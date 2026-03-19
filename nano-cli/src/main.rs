@@ -136,6 +136,7 @@ async fn main() {
                 let mut env = examples_rl::SimpleBalanceEnv::new();
                 let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
 
+                let mut episode_rewards = Vec::new();
                 for ep in 0..*episodes {
                     let mut obs = env.reset();
                     let mut total_reward = 0;
@@ -143,19 +144,24 @@ async fn main() {
                     while !done {
                         let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
                         let (next_obs, reward, is_done) = {
-                            let spikes = runtime.tick_with_reward(&inputs, None); // Normal inference
+                            let spikes = runtime.tick_with_reward(&inputs, None);
                             let actions = agent.decode_action(&spikes);
                             env.step(&actions)
                         };
 
-                        // Final tick with reward for learning
-                        runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(reward));
+                        let mean_reward = if episode_rewards.is_empty() { 0 } else {
+                            episode_rewards.iter().sum::<i32>() / episode_rewards.len() as i32
+                        };
+                        let relative_reward = reward - mean_reward;
 
+                        runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(relative_reward));
                         total_reward += reward;
                         obs = next_obs;
                         done = is_done;
                     }
                     if ep % 10 == 0 { println!("   Episode {}: Total Reward = {}", ep, total_reward); }
+                    episode_rewards.push(total_reward);
+                    if episode_rewards.len() > 10 { episode_rewards.remove(0); }
                 }
             }
             runtime.model.save(model).expect("Failed to save trained state");
@@ -166,5 +172,8 @@ async fn main() {
 
 #[cfg(feature = "rl")]
 mod examples_rl {
+    use genesis_core::rl::Environment;
+    use genesis_core::IValue;
     include!("../../examples/rl/balance.rs");
+    include!("../../examples/robotics/arm_sim.rs");
 }

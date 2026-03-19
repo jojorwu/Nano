@@ -180,8 +180,14 @@ impl ComputeBackend for CpuBackend {
             }
 
             model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
-            let decay = model.neurons.decay[i];
-            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - decay)) / SCALE;
+
+            // LLIF: Liquid Decay
+            // Decay is modulated by current input (the more input, the more "fluid" the state)
+            let base_decay = model.neurons.decay[i];
+            let liquid_modulation = (current_inputs[i].abs() * 10) / SCALE;
+            let final_decay = (base_decay - liquid_modulation).max(1);
+
+            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - final_decay)) / SCALE;
 
             if model.neurons.potential[i] >= model.neurons.threshold[i] {
                 model.neurons.potential[i] = 0;

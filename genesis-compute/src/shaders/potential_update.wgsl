@@ -11,16 +11,22 @@ struct Neuron {
 @group(0) @binding(3) var<storage, read_write> refractory: array<i32>;
 @group(0) @binding(4) var<storage, read_write> spikes: array<u32>;
 @group(0) @binding(5) var<storage, read> inputs: array<i32>;
+@group(0) @binding(6) var<storage, read_write> next_update: array<u32>;
+@group(0) @binding(7) var<storage, read> intervals: array<u32>;
+@group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&potentials)) { return; }
 
+    if (current_tick < next_update[i]) { return; }
+
     if (refractory[i] > 0) {
         refractory[i] = refractory[i] - 1;
         potentials[i] = 0;
         spikes[i] = 0;
+        next_update[i] = current_tick + intervals[i];
         return;
     }
 
@@ -36,4 +42,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         potentials[i] = pot;
         spikes[i] = 0;
     }
+
+    next_update[i] = current_tick + intervals[i];
 }
