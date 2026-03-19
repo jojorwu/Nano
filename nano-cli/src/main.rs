@@ -35,6 +35,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let cli = Cli::parse();
     match &cli.command {
         Commands::Bake { blueprint, output } => {
@@ -66,12 +67,10 @@ async fn main() {
                         let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
                         let patterns = ByteSpikingModule::encode_text(text, pattern_len);
                         for (i, pattern) in patterns.iter().enumerate() {
-                            // Merge into combined
                             for (j, &spiked) in pattern.iter().enumerate() {
                                 if spiked { combined_inputs[j] = 1000; }
                             }
                             let mut byte_spikes = runtime.tick(&combined_inputs);
-                            // Reasoning Mode: Internal thinking ticks
                             for _ in 0..*reasoning {
                                 byte_spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
                             }
@@ -93,7 +92,6 @@ async fn main() {
                                 }
                             }
                             let mut spikes_res = runtime.tick(&inputs);
-                            // Reasoning Mode
                             for _ in 0..*reasoning {
                                 spikes_res = runtime.tick(&vec![0; runtime.model.neurons.len()]);
                             }

@@ -105,17 +105,14 @@ impl BackendRegistry {
     }
 }
 
-impl ComputeBackend for CpuBackend {
-    fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
-        let n_count = model.neurons.len();
-        let mut current_inputs = vec![0i32; n_count];
-
+impl CpuBackend {
+    fn apply_external_inputs(&self, n_count: usize, external_inputs: &[i32], current_inputs: &mut [i32]) {
         for (i, &val) in external_inputs.iter().enumerate() {
             if i < n_count { current_inputs[i] = current_inputs[i].saturating_add(val); }
         }
+    }
 
-        // 1. Sparse Synapses (Standard)
+    fn propagate_sparse_spikes(&self, model: &BakedModel, previous_spikes: &[bool], current_inputs: &mut [i32]) {
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             if previous_spikes[src] {
@@ -123,11 +120,10 @@ impl ComputeBackend for CpuBackend {
                 current_inputs[target] = current_inputs[target].saturating_add(model.synapses.weight[i]);
             }
         }
+    }
 
-        // 2. Latent Synapses (Low-rank MLA-inspired)
+    fn propagate_latent_spikes(&self, model: &BakedModel, previous_spikes: &[bool], current_inputs: &mut [i32]) {
         if let Some(ref latent) = model.synapses.latent_matrix {
-            // Simplified rank-based projection: Result = previous_spikes * U * V
-            // This allows representing dense connections (e.g., 1000x1000) with a rank of 64.
             let mut latent_state = vec![0i32; latent.rank];
             for i in 0..model.neurons.len() {
                 if previous_spikes[i] {
@@ -144,6 +140,51 @@ impl ComputeBackend for CpuBackend {
                 }
             }
         }
+    }
+
+    fn update_neuron_states(&self, model: &mut BakedModel, current_inputs: &[i32], current_tick: u64, new_spikes: &mut [bool]) {
+        for i in 0..model.neurons.len() {
+            if current_tick < model.neurons.next_update_tick[i] { continue; }
+            if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] { continue; }
+
+            if model.neurons.refractory_timer[i] > 0 {
+                model.neurons.refractory_timer[i] -= 1;
+                model.neurons.potential[i] = 0;
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+                continue;
+            }
+
+            if current_inputs[i] == 0 && model.neurons.potential[i] == 0 {
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+                continue;
+            }
+
+            model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
+            let base_decay = model.neurons.decay[i];
+            let liquid_modulation = (current_inputs[i].abs() * 10) / SCALE;
+            let final_decay = (base_decay - liquid_modulation).max(1);
+            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - final_decay)) / SCALE;
+
+            if model.neurons.potential[i] >= model.neurons.threshold[i] {
+                model.neurons.potential[i] = 0;
+                model.neurons.refractory_timer[i] = 2;
+                new_spikes[i] = true;
+                model.neurons.last_spike_tick[i] = current_tick;
+            }
+            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+        }
+    }
+}
+
+impl ComputeBackend for CpuBackend {
+    fn name(&self) -> &'static str { "CpuBackend" }
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
+        let n_count = model.neurons.len();
+        let mut current_inputs = vec![0i32; n_count];
+
+        self.apply_external_inputs(n_count, external_inputs, &mut current_inputs);
+        self.propagate_sparse_spikes(model, previous_spikes, &mut current_inputs);
+        self.propagate_latent_spikes(model, previous_spikes, &mut current_inputs);
 
         #[cfg(feature = "titan")]
         if let Some(ref titan) = model.titan_memory {
@@ -155,51 +196,7 @@ impl ComputeBackend for CpuBackend {
         }
 
         let mut new_spikes = vec![false; n_count];
-        for i in 0..n_count {
-            // Asynchronous Kernel: Skip if it's not time for this neuron to update
-            if current_tick < model.neurons.next_update_tick[i] {
-                continue;
-            }
-
-            // MoE: Skip if neuron is in an inactive expert group
-            if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] {
-                continue;
-            }
-
-            if model.neurons.refractory_timer[i] > 0 {
-                model.neurons.refractory_timer[i] -= 1;
-                model.neurons.potential[i] = 0;
-                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
-                continue;
-            }
-
-            // Event-Driven: Only update if there's input or existing potential
-            if current_inputs[i] == 0 && model.neurons.potential[i] == 0 {
-                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
-                continue;
-            }
-
-            model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
-
-            // LLIF: Liquid Decay
-            // Decay is modulated by current input (the more input, the more "fluid" the state)
-            let base_decay = model.neurons.decay[i];
-            let liquid_modulation = (current_inputs[i].abs() * 10) / SCALE;
-            let final_decay = (base_decay - liquid_modulation).max(1);
-
-            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - final_decay)) / SCALE;
-
-            if model.neurons.potential[i] >= model.neurons.threshold[i] {
-                model.neurons.potential[i] = 0;
-                model.neurons.refractory_timer[i] = 2;
-                new_spikes[i] = true;
-                model.neurons.last_spike_tick[i] = current_tick;
-            }
-
-            // Schedule next update
-            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
-        }
-
+        self.update_neuron_states(model, &current_inputs, current_tick, &mut new_spikes);
         new_spikes
     }
 
@@ -231,7 +228,7 @@ impl ComputeBackend for CpuBackend {
 
             // Surprise-Driven Plasticity: If surprise is high, boost learning
             if final_error.abs() > titan.surprise_threshold {
-                // Boost plasticity learning rate temporarily for this batch
+                log::info!("High surprise detected: {}, boosting learning", final_error);
             }
 
             titan.step(previous_spikes, final_error);

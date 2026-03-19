@@ -14,6 +14,7 @@ robotics = []
 fusion = []
 
 [dependencies]
+log = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 bytemuck = { version = "1.13", features = ["derive"] }

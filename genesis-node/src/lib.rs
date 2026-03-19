@@ -23,6 +23,17 @@ pub struct Observer {
     pub total_energy_consumed: u64,
 }
 
+impl Observer {
+    pub fn process_spikes(&mut self, spikes: &mut [bool]) {
+        let spike_count = spikes.iter().filter(|&&s| s).count();
+        if spike_count > self.max_spikes_per_tick {
+            // Activity capping: Spike Storm Protection
+            for i in 0..spikes.len() { spikes[i] = false; }
+        }
+        self.total_energy_consumed += spike_count as u64;
+    }
+}
+
 pub struct NetworkManager {
     pub node_id: String,
     pub peers: Vec<String>,
@@ -60,14 +71,7 @@ impl Runtime {
         // 1. Day Phase: Inference
         let mut current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
 
-        // Observer: Spike Storm Protection
-        let spike_count = current_spikes.iter().filter(|&&s| s).count();
-        if spike_count > self.observer.max_spikes_per_tick {
-            // Activity capping
-            for i in 0..current_spikes.len() { current_spikes[i] = false; }
-        }
-
-        self.observer.total_energy_consumed += spike_count as u64;
+        self.observer.process_spikes(&mut current_spikes);
 
         self.spikes_history.push(current_spikes.clone());
 
@@ -90,6 +94,30 @@ impl Runtime {
         }
 
         self.previous_spikes = current_spikes.clone();
+
+        // Ghost Axons: Transmit spikes to remote nodes
+        if let Some(ref nm) = self.network_manager {
+            let active_indices: Vec<usize> = current_spikes.iter().enumerate()
+                .filter(|&(_, &s)| s)
+                .map(|(i, _)| i)
+                .collect();
+
+            if !active_indices.is_empty() {
+                let packet = SpikePacket { tick: self.tick_counter, active_indices };
+                // Using non-blocking send or spawn
+                let peers = nm.peers.clone();
+                tokio::spawn(async move {
+                    use tokio::net::UdpSocket;
+                    let data = serde_json::to_vec(&packet).unwrap();
+                    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
+                        for peer in peers {
+                            let _ = socket.send_to(&data, peer).await;
+                        }
+                    }
+                });
+            }
+        }
+
         current_spikes
     }
 
