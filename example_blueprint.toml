@@ -6,6 +6,7 @@ synapse_count = 50000
 type = "TitanMemory"
 learning_rate = 100
 size = 256
+decay_rate = 1 # 0.1% decay per update
 [[modules]]
 type = "TextProcessor"
 vocab_size = 5000

@@ -20,7 +20,7 @@ pub struct ArchitectureConfig {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ModuleConfig {
-    TitanMemory { learning_rate: i32, size: usize },
+    TitanMemory { learning_rate: i32, size: usize, decay_rate: Option<i32> },
     TextProcessor { vocab_size: usize },
     Vision { resolution: (u32, u32) },
 }
@@ -45,9 +45,13 @@ impl ModelBlueprint {
 
         for module in &self.modules {
             match module {
-                ModuleConfig::TitanMemory { learning_rate, size } => {
+                ModuleConfig::TitanMemory { learning_rate, size, decay_rate } => {
                     #[cfg(feature = "titan")]
-                    { titan_memory = Some(TitanMemory::new(*size, *learning_rate)); }
+                    {
+                        let mut tm = TitanMemory::new(*size, *learning_rate);
+                        if let Some(dr) = decay_rate { tm.decay_rate = *dr; }
+                        titan_memory = Some(tm);
+                    }
                 },
                 ModuleConfig::TextProcessor { .. } => has_text = true,
                 ModuleConfig::Vision { .. } => has_vision = true,

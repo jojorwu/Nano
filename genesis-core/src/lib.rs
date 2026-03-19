@@ -112,6 +112,11 @@ impl BakedModel {
     pub fn load(path: &str) -> std::io::Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        bincode::deserialize_from(reader).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        // Use a more robust deserializer configuration if needed,
+        // but bincode::deserialize_from should work if the file is correct.
+        bincode::deserialize_from(reader).map_err(|e| {
+            eprintln!("Error deserializing model: {:?}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })
     }
 }

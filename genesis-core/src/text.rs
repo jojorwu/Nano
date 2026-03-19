@@ -29,3 +29,46 @@ impl<'a> SpikingTextModule<'a> {
         pattern
     }
 }
+
+pub struct ByteSpikingModule;
+
+impl ByteSpikingModule {
+    pub fn encode_byte(byte: u8, pattern_length: usize) -> Vec<bool> {
+        let mut pattern = vec![false; pattern_length];
+        let mut h = byte as u64;
+        // Deterministic hash for byte-level encoding
+        h = h.wrapping_mul(0x517cc1b727220a95);
+        for i in 0..pattern_length {
+            if (h.rotate_right(i as u32) & 1) == 1 {
+                pattern[i] = true;
+            }
+        }
+        pattern
+    }
+
+    pub fn encode_text(text: &str, pattern_length: usize) -> Vec<Vec<bool>> {
+        text.as_bytes().iter().map(|&b| Self::encode_byte(b, pattern_length)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_byte_spiking() {
+        let pattern = ByteSpikingModule::encode_byte(b'A', 64);
+        assert_eq!(pattern.len(), 64);
+        let pattern2 = ByteSpikingModule::encode_byte(b'A', 64);
+        assert_eq!(pattern, pattern2);
+        let pattern_b = ByteSpikingModule::encode_byte(b'B', 64);
+        assert_ne!(pattern, pattern_b);
+    }
+
+    #[test]
+    fn test_encode_text() {
+        let text = "Hello";
+        let patterns = ByteSpikingModule::encode_text(text, 64);
+        assert_eq!(patterns.len(), 5);
+    }
+}

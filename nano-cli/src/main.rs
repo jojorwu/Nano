@@ -22,6 +22,7 @@ enum Commands {
         #[arg(short, long)] input: Option<String>,
         #[cfg(feature = "vision")]
         #[arg(short = 'g', long)] image: Option<String>,
+        #[arg(short, long, default_value_t = false)] byte_level: bool,
     },
 }
 
@@ -37,31 +38,45 @@ async fn main() {
             println!("✅ Model '{}' baked to {}.", bp.name, output);
             println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image } => {
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level } => {
             println!("🚀 Loading model: {}", model);
             let mut runtime = Runtime::load(model).expect("Failed to load model");
             let initial_synapses = runtime.model.synapses.len();
 
             if let Some(text) = input {
-                println!("📝 Text Input: '{}'", text);
+                println!("📝 Text Input: '{}' (Mode: {})", text, if *byte_level { "Byte-Level" } else { "Word-Based" });
                 #[cfg(feature = "text")]
                 {
-                    let tokens = {
-                        let mut text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
-                        text_mod.tokenize(text)
-                    };
-                    for token in tokens {
-                        let mut inputs = vec![0; runtime.model.neurons.len()];
-                        {
-                            let text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
-                            let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
-                            let pattern = text_mod.encode(token, pattern_len);
-                            for (i, &spiked) in pattern.iter().enumerate() {
-                                if spiked { inputs[i] = 1000; }
+                    if *byte_level {
+                        use genesis_core::text::ByteSpikingModule;
+                        let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
+                        let patterns = ByteSpikingModule::encode_text(text, pattern_len);
+                        for (i, pattern) in patterns.iter().enumerate() {
+                            let mut inputs = vec![0; runtime.model.neurons.len()];
+                            for (j, &spiked) in pattern.iter().enumerate() {
+                                if spiked { inputs[j] = 1000; }
                             }
+                            let spikes = runtime.tick(&inputs);
+                            println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, spikes.iter().filter(|&&s| s).count());
                         }
-                        let spikes = runtime.tick(&inputs);
-                        println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
+                    } else {
+                        let tokens = {
+                            let mut text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
+                            text_mod.tokenize(text)
+                        };
+                        for token in tokens {
+                            let mut inputs = vec![0; runtime.model.neurons.len()];
+                            {
+                                let text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
+                                let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
+                                let pattern = text_mod.encode(token, pattern_len);
+                                for (i, &spiked) in pattern.iter().enumerate() {
+                                    if spiked { inputs[i] = 1000; }
+                                }
+                            }
+                            let spikes = runtime.tick(&inputs);
+                            println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
+                        }
                     }
                 }
                 #[cfg(not(feature = "text"))]

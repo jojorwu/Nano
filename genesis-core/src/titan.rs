@@ -7,6 +7,7 @@ pub struct TitanMemory {
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub moment: Vec<IValue>,
+    pub decay_rate: IValue,
 }
 
 impl TitanMemory {
@@ -16,10 +17,19 @@ impl TitanMemory {
             learning_rate: lr,
             surprise_threshold: 100,
             moment: vec![0; size],
+            decay_rate: 1, // Default 0.1% decay (1/1000)
         }
     }
 
     pub fn step(&mut self, input_pattern: &[bool], error: IValue) {
+        // Apply Weight Decay (Gating) as forgetting mechanism
+        if self.decay_rate > 0 {
+            for w in self.weights.iter_mut() {
+                let decay = (*w * self.decay_rate) / 1000;
+                *w = w.saturating_sub(decay);
+            }
+        }
+
         if error.abs() > self.surprise_threshold {
             for (i, &spiked) in input_pattern.iter().enumerate() {
                 if spiked && i < self.weights.len() {
@@ -42,5 +52,20 @@ impl TitanMemory {
             }
         }
         sum
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_titan_decay() {
+        let mut titan = TitanMemory::new(10, 100);
+        titan.weights[0] = 1000;
+        titan.decay_rate = 100; // 10% decay
+        titan.step(&[false; 10], 0);
+        assert!(titan.weights[0] < 1000);
+        assert_eq!(titan.weights[0], 900);
     }
 }
