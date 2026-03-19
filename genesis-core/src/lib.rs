@@ -8,6 +8,7 @@ pub mod vision;
 pub mod audio;
 #[cfg(feature = "rl")]
 pub mod rl;
+#[cfg(feature = "fusion")]
 pub mod fusion;
 
 pub mod plasticity;
@@ -139,19 +140,33 @@ impl SynapsesSoA {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct NetworkConfig {
+    pub default_threshold: IValue,
+    pub default_decay: IValue,
+    pub learning_rate: IValue,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
+    pub config: NetworkConfig,
     pub node_id: u32,
     pub local_range: (usize, usize), // (start, end) indices of local neurons
     pub neurons: NeuronsSoA,
     pub synapses: SynapsesSoA,
     #[cfg(feature = "titan")]
     pub titan_memory: Option<titan::TitanMemory>,
+    #[cfg(feature = "text")]
     pub has_text: bool,
+    #[cfg(feature = "vision")]
     pub has_vision: bool,
+    #[cfg(feature = "audio")]
     pub has_audio: bool,
+    #[cfg(feature = "robotics")]
     pub has_robotics: bool,
+    #[cfg(feature = "fusion")]
     pub has_fusion: bool,
+    #[cfg(feature = "text")]
     pub vocabulary: HashMap<String, usize>,
 }
 

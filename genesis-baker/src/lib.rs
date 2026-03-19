@@ -71,6 +71,11 @@ impl ModelBlueprint {
         }
 
         BakedModel {
+            config: genesis_core::NetworkConfig {
+                default_threshold: 1000,
+                default_decay: 50,
+                learning_rate: 10,
+            },
             node_id: 0,
             local_range: (0, self.architecture.neuron_count),
             neurons,

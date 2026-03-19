@@ -8,6 +8,7 @@ mod tests {
     #[test]
     fn test_runtime_synapse_propagation() {
         let mut model = BakedModel {
+            config: genesis_core::NetworkConfig::default(),
             node_id: 0,
             local_range: (0, 2),
             neurons: NeuronsSoA::new(2),
@@ -45,6 +46,7 @@ mod tests {
     #[test]
     fn test_night_phase_pruning() {
         let model = BakedModel {
+            config: genesis_core::NetworkConfig::default(),
             node_id: 0,
             local_range: (0, 2),
             neurons: NeuronsSoA::new(2),

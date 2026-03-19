@@ -24,6 +24,7 @@ enum Commands {
         #[arg(short = 'g', long)] image: Option<String>,
         #[arg(short, long, default_value_t = false)] byte_level: bool,
         #[arg(short, long, default_value_t = 0)] reasoning: usize,
+        #[arg(short, long)] learning_rate: Option<i32>,
     },
     Gym {
         #[arg(short, long)] model: String,
@@ -44,9 +45,14 @@ async fn main() {
             println!("✅ Model '{}' baked to {}.", bp.name, output);
             println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning } => {
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning, learning_rate } => {
             println!("🚀 Loading model: {}", model);
             let mut runtime = Runtime::load(model).expect("Failed to load model");
+
+            if let Some(lr) = learning_rate {
+                runtime.model.config.learning_rate = *lr;
+                println!("   Overriding learning rate: {}", lr);
+            }
             let initial_synapses = runtime.model.synapses.len();
 
             let mut combined_inputs = vec![0; runtime.model.neurons.len()];

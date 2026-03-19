@@ -4,16 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["titan", "text", "vision", "rl"]
+default = ["titan", "text", "vision", "rl", "robotics", "fusion"]
 titan = ["genesis-baker/titan", "genesis-node/titan", "genesis-core/titan"]
 text = ["genesis-baker/text", "genesis-node/text", "genesis-core/text"]
 vision = ["genesis-baker/vision", "genesis-node/vision", "genesis-core/vision", "dep:image"]
 rl = ["genesis-core/rl"]
+robotics = ["genesis-core/robotics", "genesis-baker/robotics"]
+fusion = ["genesis-core/fusion", "genesis-baker/fusion"]
 
 [dependencies]
 genesis-core = { path = "../genesis-core" }
 genesis-baker = { path = "../genesis-baker" }
 genesis-node = { path = "../genesis-node" }
+genesis-compute = { path = "../genesis-compute" }
 clap = { version = "4.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
 toml = "0.8"
