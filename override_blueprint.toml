@@ -1,0 +1,13 @@
+name = "OverrideModel"
+[config]
+default_threshold = 2000
+default_decay = 100
+learning_rate = 50
+
+[architecture]
+neuron_count = 100
+synapse_count = 500
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 1000

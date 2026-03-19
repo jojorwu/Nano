@@ -3,7 +3,7 @@ use std::fs;
 use genesis_baker::ModelBlueprint;
 use genesis_node::Runtime;
 #[cfg(feature = "text")]
-use genesis_core::text::SpikingTextModule;
+use genesis_core::text::{SpikingTextModule, ByteSpikingModule};
 #[cfg(feature = "vision")]
 use genesis_core::vision::SpikingVisionModule;
 #[cfg(feature = "vision")]
@@ -33,6 +33,83 @@ enum Commands {
     },
 }
 
+struct SimulationSession {
+    runtime: Runtime,
+}
+
+impl SimulationSession {
+    fn new(model_path: &str, lr_override: Option<i32>) -> Self {
+        let mut runtime = Runtime::load(model_path).expect("Failed to load model");
+        if let Some(lr) = lr_override {
+            runtime.model.config.learning_rate = lr;
+        }
+        Self { runtime }
+    }
+
+    fn run_text(&mut self, text: &str, byte_level: bool, reasoning: usize) {
+        let mut combined_inputs = vec![0; self.runtime.model.neurons.len()];
+        println!("📝 Text Input: '{}' (Mode: {})", text, if byte_level { "Byte-Level" } else { "Word-Based" });
+
+        #[cfg(feature = "text")]
+        {
+            if byte_level {
+                let pattern_len = (self.runtime.model.neurons.len() / 4).min(256).max(10);
+                let patterns = ByteSpikingModule::encode_text(text, pattern_len);
+                for (i, pattern) in patterns.iter().enumerate() {
+                    for (j, &spiked) in pattern.iter().enumerate() {
+                        if spiked { combined_inputs[j] = 1000; }
+                    }
+                    let mut spikes = self.runtime.tick(&combined_inputs);
+                    for _ in 0..reasoning {
+                        spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+                    }
+                    println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, spikes.iter().filter(|&&s| s).count());
+                }
+            } else {
+                let tokens = {
+                    let mut text_mod = SpikingTextModule::new(&mut self.runtime.model.vocabulary);
+                    text_mod.tokenize(text)
+                };
+                for token in tokens {
+                    let mut inputs = vec![0; self.runtime.model.neurons.len()];
+                    let pattern_len = (self.runtime.model.neurons.len() / 4).min(256).max(10);
+                    let text_mod = SpikingTextModule::new(&mut self.runtime.model.vocabulary);
+                    let pattern = text_mod.encode(token, pattern_len);
+                    for (i, &spiked) in pattern.iter().enumerate() {
+                        if spiked { inputs[i] = 1000; }
+                    }
+                    let mut spikes = self.runtime.tick(&inputs);
+                    for _ in 0..reasoning {
+                        spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+                    }
+                    println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vision")]
+    fn run_image(&mut self, img_path: &str) {
+        println!("🖼️ Image Input: '{}'", img_path);
+        let img = image::open(img_path).expect("Failed to open image");
+        let (w, h) = img.dimensions();
+        let vision_mod = SpikingVisionModule::new(w, h);
+        let gray = img.to_luma8();
+        let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
+        let mut inputs = vec![0; self.runtime.model.neurons.len()];
+        for (i, &pot) in pixel_potentials.iter().enumerate() {
+            if i < inputs.len() { inputs[i] = pot; }
+        }
+        let spikes = self.runtime.tick(&inputs);
+        println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
+    }
+
+    fn finish(&mut self, path: &str) {
+        self.runtime.model.save(path).expect("Failed to save model");
+        println!("✨ Simulation finished. State saved.");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -44,133 +121,71 @@ async fn main() {
             let baked = bp.bake();
             baked.save(output).expect("Failed to save");
             println!("✅ Model '{}' baked to {}.", bp.name, output);
-            println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning, learning_rate } => {
-            println!("🚀 Loading model: {}", model);
-            let mut runtime = Runtime::load(model).expect("Failed to load model");
-
-            if let Some(lr) = learning_rate {
-                runtime.model.config.learning_rate = *lr;
-                println!("   Overriding learning rate: {}", lr);
-            }
-            let initial_synapses = runtime.model.synapses.len();
-
-            let mut combined_inputs = vec![0; runtime.model.neurons.len()];
+            let mut session = SimulationSession::new(model, *learning_rate);
 
             if let Some(text) = input {
-                println!("📝 Text Input: '{}' (Mode: {})", text, if *byte_level { "Byte-Level" } else { "Word-Based" });
-                #[cfg(feature = "text")]
-                {
-                    if *byte_level {
-                        use genesis_core::text::ByteSpikingModule;
-                        let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
-                        let patterns = ByteSpikingModule::encode_text(text, pattern_len);
-                        for (i, pattern) in patterns.iter().enumerate() {
-                            for (j, &spiked) in pattern.iter().enumerate() {
-                                if spiked { combined_inputs[j] = 1000; }
-                            }
-                            let mut byte_spikes = runtime.tick(&combined_inputs);
-                            for _ in 0..*reasoning {
-                                byte_spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
-                            }
-                            println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, byte_spikes.iter().filter(|&&s| s).count());
-                        }
-                    } else {
-                        let tokens = {
-                            let mut text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
-                            text_mod.tokenize(text)
-                        };
-                        for token in tokens {
-                            let mut inputs = vec![0; runtime.model.neurons.len()];
-                            {
-                                let text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
-                                let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
-                                let pattern = text_mod.encode(token, pattern_len);
-                                for (i, &spiked) in pattern.iter().enumerate() {
-                                    if spiked { inputs[i] = 1000; }
-                                }
-                            }
-                            let mut spikes_res = runtime.tick(&inputs);
-                            for _ in 0..*reasoning {
-                                spikes_res = runtime.tick(&vec![0; runtime.model.neurons.len()]);
-                            }
-                            println!("   Token {}: Generated {} spikes", token, spikes_res.iter().filter(|&&s| s).count());
-                        }
-                    }
-                }
-                #[cfg(not(feature = "text"))]
-                {
-                    println!("❌ Text processing is disabled in this build.");
-                }
+                session.run_text(text, *byte_level, *reasoning);
             }
 
             #[cfg(feature = "vision")]
             if let Some(img_path) = image {
-                println!("🖼️ Image Input: '{}'", img_path);
-                let img = image::open(img_path).expect("Failed to open image");
-                let (w, h) = img.dimensions();
-                println!("   Resolution: {}x{}", w, h);
-                let vision_mod = SpikingVisionModule::new(w, h);
-                let gray = img.to_luma8();
-                let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
-                for (i, &pot) in pixel_potentials.iter().enumerate() {
-                    if i < combined_inputs.len() { combined_inputs[i] = pot; }
-                }
-                let spikes = runtime.tick(&combined_inputs);
-                println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
+                session.run_image(img_path);
             }
 
-            let final_synapses = runtime.model.synapses.len();
-            println!("✨ Simulation finished.");
-            println!("   Structural Evolution: {} -> {} synapses", initial_synapses, final_synapses);
-
-            runtime.model.save(model).expect("Failed to auto-save model");
-            println!("💾 Model state and vocabulary saved.");
+            session.finish(model);
         }
         Commands::Gym { model, env: env_name, episodes } => {
-            println!("🏋️ Training in Gym: {}", env_name);
             let mut runtime = Runtime::load(model).expect("Failed to load");
-
             #[cfg(feature = "rl")]
             {
-                use genesis_core::rl::{RLAgent, Environment};
-                // For demonstration, use a hardcoded environment
-                // In a real scenario, this would be a dynamic registry
-                let mut env = examples_rl::SimpleBalanceEnv::new();
-                let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
-
-                let mut episode_rewards = Vec::new();
-                for ep in 0..*episodes {
-                    let mut obs = env.reset();
-                    let mut total_reward = 0;
-                    let mut done = false;
-                    while !done {
-                        let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
-                        let (next_obs, reward, is_done) = {
-                            let spikes = runtime.tick_with_reward(&inputs, None);
-                            let actions = agent.decode_action(&spikes);
-                            env.step(&actions)
-                        };
-
-                        let mean_reward = if episode_rewards.is_empty() { 0 } else {
-                            episode_rewards.iter().sum::<i32>() / episode_rewards.len() as i32
-                        };
-                        let relative_reward = reward - mean_reward;
-
-                        runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(relative_reward));
-                        total_reward += reward;
-                        obs = next_obs;
-                        done = is_done;
-                    }
-                    if ep % 10 == 0 { println!("   Episode {}: Total Reward = {}", ep, total_reward); }
-                    episode_rewards.push(total_reward);
-                    if episode_rewards.len() > 10 { episode_rewards.remove(0); }
-                }
+                run_gym_commands(&mut runtime, env_name, *episodes);
             }
-            runtime.model.save(model).expect("Failed to save trained state");
-            println!("✨ Gym session finished. Evolution saved.");
+            runtime.model.save(model).expect("Failed to save");
         }
+    }
+}
+
+#[cfg(feature = "rl")]
+fn run_gym_commands(runtime: &mut Runtime, env_name: &str, episodes: usize) {
+    let mut episode_rewards = Vec::new();
+
+    // Simple factory-like selection
+    if env_name == "arm" {
+        let mut env = examples_rl::RobotArmEnv::new();
+        run_gym_loop(runtime, &mut env, episodes, &mut episode_rewards);
+    } else {
+        let mut env = examples_rl::SimpleBalanceEnv::new();
+        run_gym_loop(runtime, &mut env, episodes, &mut episode_rewards);
+    }
+}
+
+#[cfg(feature = "rl")]
+fn run_gym_loop(runtime: &mut Runtime, env: &mut dyn genesis_core::rl::Environment, episodes: usize, history: &mut Vec<i32>) {
+    use genesis_core::rl::RLAgent;
+    let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
+
+    for ep in 0..episodes {
+        let mut obs = env.reset();
+        let mut total_reward = 0;
+        let mut done = false;
+        while !done {
+            let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
+            let spikes = runtime.tick_with_reward(&inputs, None);
+            let actions = agent.decode_action(&spikes);
+            let (next_obs, reward, is_done) = env.step(&actions);
+
+            let mean = if history.is_empty() { 0 } else { history.iter().sum::<i32>() / history.len() as i32 };
+            runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(reward - mean));
+
+            total_reward += reward;
+            obs = next_obs;
+            done = is_done;
+        }
+        history.push(total_reward);
+        if history.len() > 10 { history.remove(0); }
+        if ep % 10 == 0 { println!("   Episode {}: Reward = {}", ep, total_reward); }
     }
 }
 

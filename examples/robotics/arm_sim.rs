@@ -1,7 +1,3 @@
-// use genesis_core::rl::Environment;
-// use genesis_core::IValue;
-// use std::f32::consts::PI;
-
 pub struct RobotArmEnv {
     pub joint_angle: f32,
     pub target_angle: f32,
@@ -26,7 +22,7 @@ impl Environment for RobotArmEnv {
 
     fn step(&mut self, actions: &[bool]) -> (Vec<IValue>, IValue, bool) {
         let torque = if actions[0] { 0.05 } else { -0.05 };
-        self.velocity += torque - self.velocity * 0.1; // Damping
+        self.velocity += torque - self.velocity * 0.1;
         self.joint_angle += self.velocity;
 
         let error = (self.target_angle - self.joint_angle).abs();

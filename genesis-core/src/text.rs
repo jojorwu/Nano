@@ -36,10 +36,15 @@ impl ByteSpikingModule {
     pub fn encode_byte(byte: u8, pattern_length: usize) -> Vec<bool> {
         let mut pattern = vec![false; pattern_length];
         let mut h = byte as u64;
-        // Deterministic hash for byte-level encoding
         h = h.wrapping_mul(0x517cc1b727220a95);
+
         for i in 0..pattern_length {
-            if (h.rotate_right(i as u32) & 1) == 1 {
+            // Improve entropy for long patterns by mixing in the bit index
+            let mut bit_h = h.wrapping_add(i as u64);
+            bit_h = bit_h.wrapping_mul(0xbf58476d1ce4e5b9);
+            bit_h = bit_h ^ (bit_h >> 31);
+
+            if (bit_h & 1) == 1 {
                 pattern[i] = true;
             }
         }

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelBlueprint {
     pub name: String,
+    pub config: Option<genesis_core::NetworkConfig>,
     pub architecture: ArchitectureConfig,
     pub modules: Vec<ModuleConfig>,
 }
@@ -71,11 +72,11 @@ impl ModelBlueprint {
         }
 
         BakedModel {
-            config: genesis_core::NetworkConfig {
+            config: self.config.clone().unwrap_or(genesis_core::NetworkConfig {
                 default_threshold: 1000,
                 default_decay: 50,
                 learning_rate: 10,
-            },
+            }),
             node_id: 0,
             local_range: (0, self.architecture.neuron_count),
             neurons,

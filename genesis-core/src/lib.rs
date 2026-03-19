@@ -140,7 +140,7 @@ impl SynapsesSoA {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct NetworkConfig {
     pub default_threshold: IValue,
     pub default_decay: IValue,
