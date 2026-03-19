@@ -3,5 +3,9 @@ name = "genesis-compute"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["titan"]
+titan = ["genesis-core/titan"]
+
 [dependencies]
 genesis-core = { path = "../genesis-core" }

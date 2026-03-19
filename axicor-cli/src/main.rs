@@ -20,7 +20,7 @@ enum Commands {
     Run {
         #[arg(short, long)] model: String,
         #[arg(short, long)] input: Option<String>,
-        #[arg(short, long)] image: Option<String>,
+        #[arg(short = 'g', long)] image: Option<String>, // Changed short from -i to -g
     },
 }
 
@@ -41,7 +41,6 @@ async fn main() {
             let mut runtime = Runtime::load(model).expect("Failed to load model");
             let initial_synapses = runtime.model.synapses.len();
 
-            // Handle Text Input
             if let Some(text) = input {
                 println!("📝 Text Input: '{}'", text);
                 #[cfg(feature = "text")]
@@ -66,7 +65,6 @@ async fn main() {
                 }
             }
 
-            // Handle Image Input
             if let Some(img_path) = image {
                 println!("🖼️ Image Input: '{}'", img_path);
                 #[cfg(feature = "vision")]
@@ -74,24 +72,15 @@ async fn main() {
                     let img = image::open(img_path).expect("Failed to open image");
                     let (w, h) = img.dimensions();
                     println!("   Resolution: {}x{}", w, h);
-
                     let vision_mod = SpikingVisionModule::new(w, h);
                     let gray = img.to_luma8();
                     let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
-
                     let mut inputs = vec![0; runtime.model.neurons.len()];
                     for (i, &pot) in pixel_potentials.iter().enumerate() {
-                        if i < inputs.len() {
-                            inputs[i] = pot;
-                        }
+                        if i < inputs.len() { inputs[i] = pot; }
                     }
-
                     let spikes = runtime.tick(&inputs);
                     println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
-                }
-                #[cfg(not(feature = "vision"))]
-                {
-                    println!("❌ Vision processing is disabled.");
                 }
             }
 

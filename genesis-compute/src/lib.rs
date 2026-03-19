@@ -1,14 +1,100 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE};
+use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
+
+pub trait ComputeBackend {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool]) -> Vec<bool>;
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool]);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct CpuBackend {
+    pub structural_config: StructuralPlasticityConfig,
+    pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+impl Default for CpuBackend {
+    fn default() -> Self {
+        Self {
+            structural_config: StructuralPlasticityConfig::default(),
+            plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
+        }
+    }
+}
+
+impl ComputeBackend for CpuBackend {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool]) -> Vec<bool> {
+        let n_count = model.neurons.len();
+        let mut current_inputs = vec![0i32; n_count];
+
+        for (i, &val) in external_inputs.iter().enumerate() {
+            if i < n_count { current_inputs[i] = current_inputs[i].saturating_add(val); }
+        }
+
+        for i in 0..model.synapses.len() {
+            let src = model.synapses.source_index[i] as usize;
+            if previous_spikes[src] {
+                let target = model.synapses.target_index[i] as usize;
+                current_inputs[target] = current_inputs[target].saturating_add(model.synapses.weight[i]);
+            }
+        }
+
+        #[cfg(feature = "titan")]
+        if let Some(ref titan) = model.titan_memory {
+            let memory_input = titan.retrieve(previous_spikes);
+            let dist_input = memory_input / (n_count as i32).max(1);
+            for i in 0..n_count {
+                current_inputs[i] = current_inputs[i].saturating_add(dist_input);
+            }
+        }
+
+        let mut new_spikes = vec![false; n_count];
+        for i in 0..n_count {
+            if model.neurons.refractory_timer[i] > 0 {
+                model.neurons.refractory_timer[i] -= 1;
+                model.neurons.potential[i] = 0;
+            } else {
+                model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
+                let decay = model.neurons.decay[i];
+                model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - decay)) / SCALE;
+
+                if model.neurons.potential[i] >= model.neurons.threshold[i] {
+                    model.neurons.potential[i] = 0;
+                    model.neurons.refractory_timer[i] = 2;
+                    new_spikes[i] = true;
+                }
+            }
+        }
+
+        new_spikes
+    }
+
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool]) {
+        for i in 0..model.synapses.len() {
+            let pre_spiked = previous_spikes[model.synapses.source_index[i] as usize];
+            let post_spiked = current_spikes[model.synapses.target_index[i] as usize];
+            self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
+        }
+
+        #[cfg(feature = "titan")]
+        if let Some(ref mut titan) = model.titan_memory {
+            let activity = current_spikes.iter().filter(|&&s| s).count() as i32;
+            titan.step(previous_spikes, (10 - activity) * 10);
+        }
+
+        prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
+
+        let active_indices: Vec<usize> = current_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s)
+            .map(|(i, _)| i)
+            .collect();
+
+        if active_indices.len() > 1 && model.synapses.len() < self.structural_config.max_synapses {
+            for &i in active_indices.iter().take(5) {
+                for &j in active_indices.iter().take(5) {
+                    if i != j {
+                        grow_synapse(&mut model.synapses, i as u32, j as u32, 50, &self.structural_config);
+                    }
+                }
+            }
+        }
     }
 }

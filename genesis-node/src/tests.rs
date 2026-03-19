@@ -2,6 +2,7 @@
 mod tests {
     use crate::Runtime;
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
+    use genesis_compute::CpuBackend;
     use std::collections::HashMap;
 
     #[test]
@@ -23,10 +24,9 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
-            learning_rate: 0,
             tick_counter: 0,
-            structural_config: Default::default(),
         };
         runtime.previous_spikes[0] = true;
 
@@ -52,10 +52,9 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
-            learning_rate: 0,
             tick_counter: 99,
-            structural_config: Default::default(),
         };
 
         runtime.tick(&[0, 0]);

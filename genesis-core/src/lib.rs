@@ -15,6 +15,27 @@ use std::collections::HashMap;
 pub type IValue = i32;
 pub const SCALE: IValue = 1000;
 
+/// Trait for weight update rules (e.g., GSOP, STDP)
+pub trait PlasticityRule {
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool);
+}
+
+pub struct GsopRule {
+    pub learning_rate: IValue,
+}
+
+impl PlasticityRule for GsopRule {
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool) {
+        if pre_spiked && post_spiked {
+            *weight = weight.saturating_add(self.learning_rate);
+        } else if pre_spiked && !post_spiked {
+            *weight = weight.saturating_sub(self.learning_rate / 2);
+        }
+        if *weight > SCALE * 5 { *weight = SCALE * 5; }
+        if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NeuronsSoA {
     pub potential: Vec<IValue>,
@@ -93,14 +114,4 @@ impl BakedModel {
         let reader = BufReader::new(file);
         bincode::deserialize_from(reader).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
-}
-
-pub fn update_weight_gsop(weight: &mut IValue, pre_spiked: bool, post_spiked: bool, learning_rate: IValue) {
-    if pre_spiked && post_spiked {
-        *weight = weight.saturating_add(learning_rate);
-    } else if pre_spiked && !post_spiked {
-        *weight = weight.saturating_sub(learning_rate / 2);
-    }
-    if *weight > SCALE * 5 { *weight = SCALE * 5; }
-    if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
 }
