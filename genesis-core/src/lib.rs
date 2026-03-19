@@ -2,6 +2,8 @@
 pub mod titan;
 #[cfg(feature = "text")]
 pub mod text;
+#[cfg(feature = "vision")]
+pub mod vision;
 
 pub mod plasticity;
 
@@ -75,6 +77,7 @@ pub struct BakedModel {
     #[cfg(feature = "titan")]
     pub titan_memory: Option<titan::TitanMemory>,
     pub has_text: bool,
+    pub has_vision: bool,
     pub vocabulary: HashMap<String, usize>,
 }
 

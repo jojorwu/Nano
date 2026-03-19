@@ -16,17 +16,19 @@ mod tests {
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
+            has_vision: false,
             vocabulary: HashMap::new(),
         };
         model.neurons.threshold[1] = 1000;
 
         let mut runtime = Runtime {
             model,
-            previous_spikes: vec![true, false],
+            previous_spikes: vec![false; 2],
             learning_rate: 0,
             tick_counter: 0,
             structural_config: Default::default(),
         };
+        runtime.previous_spikes[0] = true;
 
         let spikes = runtime.tick(&[0, 0]);
         assert!(spikes[1]);
@@ -44,6 +46,7 @@ mod tests {
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
+            has_vision: false,
             vocabulary: HashMap::new(),
         };
 

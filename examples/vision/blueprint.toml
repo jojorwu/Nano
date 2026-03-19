@@ -1,0 +1,14 @@
+name = "VisionBrain"
+
+[architecture]
+neuron_count = 1000
+synapse_count = 20000
+
+[[modules]]
+type = "Vision"
+resolution = [28, 28]
+
+[[modules]]
+type = "TitanMemory"
+learning_rate = 150
+size = 784

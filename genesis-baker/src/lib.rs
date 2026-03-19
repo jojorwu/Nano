@@ -22,6 +22,7 @@ pub struct ArchitectureConfig {
 pub enum ModuleConfig {
     TitanMemory { learning_rate: i32, size: usize },
     TextProcessor { vocab_size: usize },
+    Vision { resolution: (u32, u32) },
 }
 
 impl ModelBlueprint {
@@ -39,6 +40,7 @@ impl ModelBlueprint {
 
         let mut titan_memory = None;
         let mut has_text = false;
+        let mut has_vision = false;
 
         for module in &self.modules {
             match module {
@@ -47,9 +49,10 @@ impl ModelBlueprint {
                     { titan_memory = Some(TitanMemory::new(*size, *learning_rate)); }
                 },
                 ModuleConfig::TextProcessor { .. } => has_text = true,
+                ModuleConfig::Vision { .. } => has_vision = true,
             }
         }
 
-        BakedModel { neurons, synapses, titan_memory, has_text, vocabulary: HashMap::new() }
+        BakedModel { neurons, synapses, titan_memory, has_text, has_vision, vocabulary: HashMap::new() }
     }
 }
