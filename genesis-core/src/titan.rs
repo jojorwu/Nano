@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::IValue;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TitanMemory {
     pub weights: Vec<IValue>,
     pub learning_rate: IValue,
@@ -13,18 +13,27 @@ impl TitanMemory {
         Self {
             weights: vec![0; size],
             learning_rate: lr,
-            surprise_threshold: 500, // 0.5
+            surprise_threshold: 100, // 0.1
         }
     }
-    pub fn step(&mut self, input_pattern: &[bool], prediction_error: IValue) {
-        if prediction_error > self.surprise_threshold {
+
+    /// Step updates the long-term memory weights based on the current surprise (prediction error).
+    pub fn step(&mut self, input_pattern: &[bool], surprise: IValue) {
+        if surprise > self.surprise_threshold {
             for (i, &spiked) in input_pattern.iter().enumerate() {
                 if spiked && i < self.weights.len() {
-                    self.weights[i] += (prediction_error * self.learning_rate) / 1000;
+                    // Update weights with scaled surprise
+                    let delta = (surprise * self.learning_rate) / 1000;
+                    self.weights[i] += delta;
+
+                    // Clamp memory weights
+                    if self.weights[i] > 10000 { self.weights[i] = 10000; }
                 }
             }
         }
     }
+
+    /// Retrieve returns the aggregated memory signal for the given input pattern.
     pub fn retrieve(&self, input_pattern: &[bool]) -> IValue {
         let mut sum = 0;
         for (i, &spiked) in input_pattern.iter().enumerate() {

@@ -1,8 +1,3 @@
-#[cfg(feature = "titan")]
-pub mod titan;
-#[cfg(feature = "text")]
-pub mod text;
-
 use serde::{Deserialize, Serialize};
 use bytemuck::{Pod, Zeroable};
 use std::fs::File;
@@ -62,8 +57,13 @@ impl SpikingNeuron for NeuronState {
             self.potential = 0;
             return false;
         }
+
+        // Potential update
         self.potential += input;
+
+        // Decay
         self.potential = (self.potential * (SCALE - self.decay)) / SCALE;
+
         if self.potential >= self.threshold {
             self.potential = 0;
             self.refractory_timer = 2;
@@ -73,12 +73,43 @@ impl SpikingNeuron for NeuronState {
     }
 }
 
+/// GSOP: Global Spiking Optimization Plasticity
+/// Updates weight based on pre- and post-synaptic activity.
+/// This happens at each tick or night cycle.
 pub fn update_weight_gsop(weight: &mut IValue, pre_spiked: bool, post_spiked: bool, learning_rate: IValue) {
     if pre_spiked && post_spiked {
+        // Potentiation: neurons fire together, weights grow
         *weight += learning_rate;
     } else if pre_spiked && !post_spiked {
+        // Depression: pre fired but post didn't
         *weight -= learning_rate / 2;
     }
-    if *weight > SCALE * 10 { *weight = SCALE * 10; }
-    if *weight < -SCALE * 10 { *weight = -SCALE * 10; }
+
+    // Clamp weight for stability
+    if *weight > SCALE * 5 { *weight = SCALE * 5; }
+    if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
+}
+
+#[cfg(feature = "titan")]
+pub mod titan;
+#[cfg(feature = "text")]
+pub mod text;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gsop_potentiation() {
+        let mut w = 500;
+        update_weight_gsop(&mut w, true, true, 100);
+        assert_eq!(w, 600);
+    }
+
+    #[test]
+    fn test_gsop_depression() {
+        let mut w = 500;
+        update_weight_gsop(&mut w, true, false, 100);
+        assert_eq!(w, 450);
+    }
 }
