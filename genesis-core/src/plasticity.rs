@@ -4,12 +4,21 @@ pub struct StdpRule {
     pub tau: u64,
     pub a_plus: IValue,
     pub a_minus: IValue,
+    pub reward_scale: IValue, // R-STDP factor
 }
 
 impl crate::PlasticityRule for StdpRule {
     fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool) {
         if pre_spiked && post_spiked {
             *weight = weight.saturating_add(self.a_plus / 2);
+        }
+    }
+
+    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
+        // R-STDP: Reward modulates the base temporal update
+        if pre_spiked && post_spiked {
+            let delta = (self.a_plus * reward * self.reward_scale) / 1000000;
+            *weight = weight.saturating_add(delta);
         }
     }
 
@@ -125,7 +134,7 @@ mod tests {
     #[test]
     fn test_stdp() {
         use crate::PlasticityRule;
-        let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100 };
+        let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100, reward_scale: 1000 };
         let mut weight = 1000;
 
         // LTP: pre=5, post=8 (diff=3)

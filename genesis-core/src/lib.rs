@@ -77,6 +77,17 @@ impl NeuronsSoA {
     pub fn len(&self) -> usize {
         self.potential.len()
     }
+
+    pub fn grow(&mut self, additional: usize) {
+        let new_size = self.potential.len() + additional;
+        self.potential.resize(new_size, 0);
+        self.threshold.resize(new_size, 1000);
+        self.decay.resize(new_size, 50);
+        self.refractory_timer.resize(new_size, 0);
+        self.last_spike_tick.resize(new_size, 0);
+        self.update_interval.resize(new_size, 1);
+        self.next_update_tick.resize(new_size, 0);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

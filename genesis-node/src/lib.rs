@@ -30,8 +30,15 @@ pub struct NetworkManager {
 
 impl NetworkManager {
     pub async fn broadcast_spikes(&self, packet: SpikePacket) {
-        let _data = serde_json::to_string(&packet).unwrap();
-        // Network transmission logic
+        use tokio::net::TcpStream;
+        use tokio::io::AsyncWriteExt;
+
+        let data = serde_json::to_vec(&packet).unwrap();
+        for peer in &self.peers {
+            if let Ok(mut stream) = TcpStream::connect(peer).await {
+                let _ = stream.write_all(&data).await;
+            }
+        }
     }
 }
 

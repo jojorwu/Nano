@@ -30,6 +30,7 @@ pub struct WgpuBackend {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub potential_pipeline: wgpu::ComputePipeline,
+    pub propagation_pipeline: wgpu::ComputePipeline,
 }
 
 #[cfg(feature = "wgpu")]
@@ -39,19 +40,31 @@ impl WgpuBackend {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("Failed to find wgpu adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).expect("Failed to create wgpu device");
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SNN Shader"),
+        let potential_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Potential Update Shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/potential_update.wgsl"))),
+        });
+
+        let propagation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Spike Propagation Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/spike_prop.wgsl"))),
         });
 
         let potential_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Potential Pipeline"),
             layout: None,
-            module: &shader,
+            module: &potential_shader,
             entry_point: "main",
         });
 
-        Self { device, queue, potential_pipeline }
+        let propagation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Propagation Pipeline"),
+            layout: None,
+            module: &propagation_shader,
+            entry_point: "main",
+        });
+
+        Self { device, queue, potential_pipeline, propagation_pipeline }
     }
 }
 
