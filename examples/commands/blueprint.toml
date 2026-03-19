@@ -1,0 +1,14 @@
+name = "CommandClassifier"
+
+[architecture]
+neuron_count = 500
+synapse_count = 10000
+
+[[modules]]
+type = "TitanMemory"
+learning_rate = 200
+size = 128
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 1000
