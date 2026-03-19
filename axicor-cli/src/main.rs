@@ -20,7 +20,8 @@ enum Commands {
     Run {
         #[arg(short, long)] model: String,
         #[arg(short, long)] input: Option<String>,
-        #[arg(short = 'g', long)] image: Option<String>, // Changed short from -i to -g
+        #[cfg(feature = "vision")]
+        #[arg(short = 'g', long)] image: Option<String>,
     },
 }
 
@@ -36,7 +37,7 @@ async fn main() {
             println!("✅ Model '{}' baked to {}.", bp.name, output);
             println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
         }
-        Commands::Run { model, input, image } => {
+        Commands::Run { model, input, #[cfg(feature = "vision")] image } => {
             println!("🚀 Loading model: {}", model);
             let mut runtime = Runtime::load(model).expect("Failed to load model");
             let initial_synapses = runtime.model.synapses.len();
@@ -63,30 +64,27 @@ async fn main() {
                         println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
                     }
                 }
-            }
-
-            if let Some(img_path) = image {
-                println!("🖼️ Image Input: '{}'", img_path);
-                #[cfg(feature = "vision")]
+                #[cfg(not(feature = "text"))]
                 {
-                    let img = image::open(img_path).expect("Failed to open image");
-                    let (w, h) = img.dimensions();
-                    println!("   Resolution: {}x{}", w, h);
-                    let vision_mod = SpikingVisionModule::new(w, h);
-                    let gray = img.to_luma8();
-                    let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
-                    let mut inputs = vec![0; runtime.model.neurons.len()];
-                    for (i, &pot) in pixel_potentials.iter().enumerate() {
-                        if i < inputs.len() { inputs[i] = pot; }
-                    }
-                    let spikes = runtime.tick(&inputs);
-                    println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
+                    println!("❌ Text processing is disabled in this build.");
                 }
             }
 
-            if input.is_none() && image.is_none() {
-                println!("🕒 Idle run (100 ticks)...");
-                for _ in 0..100 { runtime.tick(&[]); }
+            #[cfg(feature = "vision")]
+            if let Some(img_path) = image {
+                println!("🖼️ Image Input: '{}'", img_path);
+                let img = image::open(img_path).expect("Failed to open image");
+                let (w, h) = img.dimensions();
+                println!("   Resolution: {}x{}", w, h);
+                let vision_mod = SpikingVisionModule::new(w, h);
+                let gray = img.to_luma8();
+                let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
+                let mut inputs = vec![0; runtime.model.neurons.len()];
+                for (i, &pot) in pixel_potentials.iter().enumerate() {
+                    if i < inputs.len() { inputs[i] = pot; }
+                }
+                let spikes = runtime.tick(&inputs);
+                println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
             }
 
             let final_synapses = runtime.model.synapses.len();

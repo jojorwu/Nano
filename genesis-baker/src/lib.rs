@@ -38,6 +38,7 @@ impl ModelBlueprint {
             );
         }
 
+        #[cfg(feature = "titan")]
         let mut titan_memory = None;
         let mut has_text = false;
         let mut has_vision = false;
@@ -53,6 +54,14 @@ impl ModelBlueprint {
             }
         }
 
-        BakedModel { neurons, synapses, titan_memory, has_text, has_vision, vocabulary: HashMap::new() }
+        BakedModel {
+            neurons,
+            synapses,
+            #[cfg(feature = "titan")]
+            titan_memory,
+            has_text,
+            has_vision,
+            vocabulary: HashMap::new()
+        }
     }
 }
