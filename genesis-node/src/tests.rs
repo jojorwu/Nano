@@ -38,6 +38,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
+            telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
         };
         runtime.previous_spikes[0] = true;
 
@@ -76,6 +77,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
+            telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
         };
 
         runtime.tick(&[0, 0]);

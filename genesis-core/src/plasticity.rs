@@ -83,24 +83,30 @@ impl EvolutionaryOptimizer {
 
     /// Perform structural mutations based on reward and activity.
     pub fn mutate(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue) {
-        if reward < 0 {
-            // High negative reward -> increase pruning or mutate randomly
-            let prune_count = (synapses.len() as f32 * self.mutation_rate) as usize;
+        if reward < -100 {
+            // High negative reward -> Prune weak synapses more aggressively
+            let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
             for _ in 0..prune_count {
                 if synapses.len() > 0 {
-                    synapses.remove(0); // Simple mutation: remove oldest connections
+                    // Simple mutation: remove a random (first) connection for exploration
+                    synapses.remove(0);
                 }
             }
-        } else if reward > 50 {
-            // High positive reward -> Grow new synapses between random neurons
-            // This is a simplified "Exploratory Growth" mutation
+        } else if reward > 100 {
+            // High positive reward -> Grow exploratory synapses between random neurons
             let grow_count = (neuron_count as f32 * self.mutation_rate).max(1.0) as usize;
+
+            // Deterministic but non-redundant growth logic using current reward and synapse length as entropy
+            let mut offset = synapses.len() as u32;
             for _ in 0..grow_count {
-                let src = reward as u32 % neuron_count as u32;
-                let target = (reward as u32 + 1) % neuron_count as u32;
+                let src = (reward as u32 + offset) % neuron_count as u32;
+                let target = (reward as u32 * 31 + offset + 7) % neuron_count as u32;
+
                 if src != target {
-                    synapses.push(src, target, 100);
+                    // Use helper to avoid duplicates
+                    grow_synapse(synapses, src, target, 100, &StructuralPlasticityConfig::default());
                 }
+                offset = offset.wrapping_add(1);
             }
         }
     }

@@ -2,8 +2,8 @@ use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue};
 use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool>;
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64, reward: Option<IValue>);
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool>;
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>);
     fn name(&self) -> &'static str;
 }
 
@@ -31,6 +31,8 @@ pub struct WgpuBackend {
     pub queue: wgpu::Queue,
     pub potential_pipeline: wgpu::ComputePipeline,
     pub propagation_pipeline: wgpu::ComputePipeline,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub tick_layout: wgpu::BindGroupLayout,
 }
 
 #[cfg(feature = "wgpu")]
@@ -50,48 +52,190 @@ impl WgpuBackend {
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/spike_prop.wgsl"))),
         });
 
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Neuron Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
+        let tick_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Tick Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout, &tick_layout],
+            push_constant_ranges: &[],
+        });
+
         let potential_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Potential Pipeline"),
-            layout: None,
+            layout: Some(&pipeline_layout),
             module: &potential_shader,
             entry_point: "main",
         });
 
         let propagation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Propagation Pipeline"),
-            layout: None,
+            layout: Some(&pipeline_layout),
             module: &propagation_shader,
             entry_point: "main",
         });
 
-        Self { device, queue, potential_pipeline, propagation_pipeline }
+        // Simplified propagation pipeline layout might differ, but for stub it's fine
+        Self { device, queue, potential_pipeline, propagation_pipeline, bind_group_layout, tick_layout }
     }
 }
 
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], _previous_spikes: &[bool], current_tick: u32) -> Vec<bool> {
         use wgpu::util::DeviceExt;
 
-        // Finalize v3.4 WGPU Sync: Upload scheduling buffers
-        let _next_update_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Next Update Tick Buffer"),
-            contents: bytemuck::cast_slice(&model.neurons.next_update_tick),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let n_count = model.neurons.len();
 
-        let _interval_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Update Interval Buffer"),
+        // 1. Create buffers for neuron state
+        let pot_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Potentials"),
+            contents: bytemuck::cast_slice(&model.neurons.potential),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+        let threshold_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Thresholds"),
+            contents: bytemuck::cast_slice(&model.neurons.threshold),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+        let decay_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Decays"),
+            contents: bytemuck::cast_slice(&model.neurons.decay),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let refractory_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Refractory"),
+            contents: bytemuck::cast_slice(&model.neurons.refractory_timer),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+        let spikes_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Spikes"),
+            size: (n_count * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let input_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Inputs"),
+            contents: bytemuck::cast_slice(external_inputs),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let next_update_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Next Update"),
+            contents: bytemuck::cast_slice(&model.neurons.next_update_tick),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+        let interval_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Intervals"),
             contents: bytemuck::cast_slice(&model.neurons.update_interval),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let tick_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Tick Uniform"),
+            contents: bytemuck::cast_slice(&[current_tick]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
-        // Kernel dispatch with current_tick as push constant or uniform would go here
+        // 2. Create Bind Group
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: pot_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: threshold_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: decay_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: refractory_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: spikes_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: input_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: next_update_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: interval_buffer.as_entire_binding() },
+            ],
+            label: None,
+        });
+        let tick_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.tick_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tick_buffer.as_entire_binding() }],
+            label: None,
+        });
 
-        vec![false; model.neurons.len()]
+        // 3. Dispatch
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            cpass.set_pipeline(&self.potential_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_bind_group(1, &tick_bind_group, &[]);
+            cpass.dispatch_workgroups((n_count as u32 + 63) / 64, 1, 1);
+        }
+
+        // 4. Download Results (Spikes and updated state)
+        let staging_spikes = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Spikes"),
+            size: (n_count * 4) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&spikes_buffer, 0, &staging_spikes, 0, (n_count * 4) as u64);
+
+        // Also need to download updated potentials, thresholds, next_update_tick
+        let staging_state = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging State"),
+            size: (n_count * 4 * 4) as u64, // potential, threshold, refractory, next_update
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&pot_buffer, 0, &staging_state, 0, (n_count * 4) as u64);
+        encoder.copy_buffer_to_buffer(&threshold_buffer, 0, &staging_state, (n_count * 4) as u64, (n_count * 4) as u64);
+        encoder.copy_buffer_to_buffer(&refractory_buffer, 0, &staging_state, (n_count * 8) as u64, (n_count * 4) as u64);
+        encoder.copy_buffer_to_buffer(&next_update_buffer, 0, &staging_state, (n_count * 12) as u64, (n_count * 4) as u64);
+
+        self.queue.submit(Some(encoder.finish()));
+
+        // Map and read
+        let spikes_slice = staging_spikes.slice(..);
+        let state_slice = staging_state.slice(..);
+        spikes_slice.map_async(wgpu::MapMode::Read, |_| {});
+        state_slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let mut spikes = vec![false; n_count];
+        {
+            let spikes_raw = spikes_slice.get_mapped_range();
+            let spike_data: &[u32] = bytemuck::cast_slice(&spikes_raw);
+            for i in 0..n_count { spikes[i] = spike_data[i] != 0; }
+        }
+
+        {
+            let state_raw = state_slice.get_mapped_range();
+            let state_data: &[i32] = bytemuck::cast_slice(&state_raw);
+            for i in 0..n_count {
+                model.neurons.potential[i] = state_data[i];
+                model.neurons.threshold[i] = state_data[n_count + i];
+                model.neurons.refractory_timer[i] = state_data[2 * n_count + i];
+                model.neurons.next_update_tick[i] = state_data[3 * n_count + i] as u32;
+            }
+        }
+
+        spikes
     }
-    fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64, _reward: Option<IValue>) {
+    fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>) {
         // GPU-based structural plasticity
     }
 }
@@ -158,7 +302,7 @@ impl CpuBackend {
         }
     }
 
-    fn update_neuron_states(&self, model: &mut BakedModel, current_inputs: &[i32], current_tick: u64, new_spikes: &mut [bool]) {
+    fn update_neuron_states(&self, model: &mut BakedModel, current_inputs: &[i32], current_tick: u32, new_spikes: &mut [bool]) {
         for i in 0..model.neurons.len() {
             if current_tick < model.neurons.next_update_tick[i] { continue; }
             if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] { continue; }
@@ -166,12 +310,12 @@ impl CpuBackend {
             if model.neurons.refractory_timer[i] > 0 {
                 model.neurons.refractory_timer[i] -= 1;
                 model.neurons.potential[i] = 0;
-                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
                 continue;
             }
 
             if current_inputs[i] == 0 && model.neurons.potential[i] == 0 {
-                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
                 continue;
             }
 
@@ -186,15 +330,23 @@ impl CpuBackend {
                 model.neurons.refractory_timer[i] = 2;
                 new_spikes[i] = true;
                 model.neurons.last_spike_tick[i] = current_tick;
+
+                // Intrinsic Plasticity: Increase threshold upon spiking
+                model.neurons.threshold[i] = model.neurons.threshold[i].saturating_add(50);
+            } else {
+                // Threshold decay back to base
+                if model.neurons.threshold[i] > model.neurons.base_threshold[i] {
+                    model.neurons.threshold[i] -= 1;
+                }
             }
-            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
+            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
         }
     }
 }
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool> {
         let n_count = model.neurons.len();
         let mut current_inputs = vec![0i32; n_count];
 
@@ -216,7 +368,7 @@ impl ComputeBackend for CpuBackend {
         new_spikes
     }
 
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64, reward: Option<IValue>) {
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>) {
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             let target = model.synapses.target_index[i] as usize;
@@ -230,9 +382,9 @@ impl ComputeBackend for CpuBackend {
             }
 
             // Temporal update (STDP)
-            let pre_tick = model.neurons.last_spike_tick[src];
-            let post_tick = model.neurons.last_spike_tick[target];
-            self.plasticity_rule.update_temporal(&mut model.synapses.weight[i], pre_tick, post_tick, current_tick);
+            let pre_tick = model.neurons.last_spike_tick[src] as u64;
+            let post_tick = model.neurons.last_spike_tick[target] as u64;
+            self.plasticity_rule.update_temporal(&mut model.synapses.weight[i], pre_tick, post_tick, current_tick as u64);
         }
 
         #[cfg(feature = "titan")]

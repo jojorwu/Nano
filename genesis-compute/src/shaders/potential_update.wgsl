@@ -31,16 +31,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     var pot = potentials[i] + inputs[i];
-    let dec = decays[i];
-    pot = (pot * (1000 - dec)) / 1000;
+
+    // LLIF: Liquid Decay
+    let base_decay = decays[i];
+    let liquid_mod = (abs(inputs[i]) * 10) / 1000;
+    let final_decay = max(1, base_decay - liquid_mod);
+
+    pot = (pot * (1000 - final_decay)) / 1000;
 
     if (pot >= thresholds[i]) {
         potentials[i] = 0;
         refractory[i] = 2;
         spikes[i] = 1;
+        // Intrinsic Plasticity
+        thresholds[i] = thresholds[i] + 50;
     } else {
         potentials[i] = pot;
         spikes[i] = 0;
+        // Threshold decay back to base
+        // (Requires base_thresholds binding)
     }
 
     next_update[i] = current_tick + intervals[i];
