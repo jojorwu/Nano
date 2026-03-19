@@ -22,7 +22,7 @@ MODEL_PATH = "examples/commands/classifier.state"
 BLUEPRINT_PATH = "examples/commands/blueprint.toml"
 
 def run_cli_cmd(cli_args):
-    cmd = ["cargo", "run", "-q", "-p", "axicor-cli", "--all-features", "--"] + cli_args
+    cmd = ["cargo", "run", "-q", "-p", "nano-cli", "--all-features", "--"] + cli_args
     # print(f"Executing: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
