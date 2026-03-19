@@ -1,24 +1,24 @@
 #[cfg(test)]
 mod tests {
     use crate::Runtime;
-    use genesis_core::{BakedModel, NeuronState, Synapse};
+    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
     use std::collections::HashMap;
 
     #[test]
     fn test_runtime_synapse_propagation() {
         let mut model = BakedModel {
-            neurons: vec![NeuronState::default(); 2],
-            synapses: vec![Synapse {
-                source_index: 0,
-                target_index: 1,
-                weight: 1500,
-            }],
+            neurons: NeuronsSoA::new(2),
+            synapses: {
+                let mut s = SynapsesSoA::with_capacity(1);
+                s.push(0, 1, 1500);
+                s
+            },
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
             vocabulary: HashMap::new(),
         };
-        model.neurons[1].threshold = 1000;
+        model.neurons.threshold[1] = 1000;
 
         let mut runtime = Runtime {
             model,
@@ -35,12 +35,12 @@ mod tests {
     #[test]
     fn test_night_phase_pruning() {
         let model = BakedModel {
-            neurons: vec![NeuronState::default(); 2],
-            synapses: vec![Synapse {
-                source_index: 0,
-                target_index: 1,
-                weight: 5,
-            }],
+            neurons: NeuronsSoA::new(2),
+            synapses: {
+                let mut s = SynapsesSoA::with_capacity(1);
+                s.push(0, 1, 5);
+                s
+            },
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,

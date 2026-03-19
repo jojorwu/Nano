@@ -6,7 +6,6 @@ pub mod text;
 pub mod plasticity;
 
 use serde::{Deserialize, Serialize};
-use bytemuck::{Pod, Zeroable};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::collections::HashMap;
@@ -14,38 +13,65 @@ use std::collections::HashMap;
 pub type IValue = i32;
 pub const SCALE: IValue = 1000;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable)]
-#[repr(C)]
-pub struct NeuronState {
-    pub potential: IValue,
-    pub threshold: IValue,
-    pub decay: IValue,
-    pub refractory_timer: i32,
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct NeuronsSoA {
+    pub potential: Vec<IValue>,
+    pub threshold: Vec<IValue>,
+    pub decay: Vec<IValue>,
+    pub refractory_timer: Vec<i32>,
 }
 
-impl Default for NeuronState {
-    fn default() -> Self {
+impl NeuronsSoA {
+    pub fn new(size: usize) -> Self {
         Self {
-            potential: 0,
-            threshold: 1000, // 1.0
-            decay: 50,       // 0.05
-            refractory_timer: 0,
+            potential: vec![0; size],
+            threshold: vec![1000; size],
+            decay: vec![50; size],
+            refractory_timer: vec![0; size],
         }
+    }
+    pub fn len(&self) -> usize {
+        self.potential.len()
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable, PartialEq)]
-#[repr(C)]
-pub struct Synapse {
-    pub source_index: u32,
-    pub target_index: u32,
-    pub weight: IValue,
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct SynapsesSoA {
+    pub source_index: Vec<u32>,
+    pub target_index: Vec<u32>,
+    pub weight: Vec<IValue>,
+}
+
+impl SynapsesSoA {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            source_index: Vec::with_capacity(capacity),
+            target_index: Vec::with_capacity(capacity),
+            weight: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn push(&mut self, source: u32, target: u32, weight: IValue) {
+        self.source_index.push(source);
+        self.target_index.push(target);
+        self.weight.push(weight);
+    }
+
+    pub fn len(&self) -> usize {
+        self.source_index.len()
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.source_index.swap_remove(index);
+        self.target_index.swap_remove(index);
+        self.weight.swap_remove(index);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
-    pub neurons: Vec<NeuronState>,
-    pub synapses: Vec<Synapse>,
+    pub neurons: NeuronsSoA,
+    pub synapses: SynapsesSoA,
     #[cfg(feature = "titan")]
     pub titan_memory: Option<titan::TitanMemory>,
     pub has_text: bool,
@@ -63,33 +89,6 @@ impl BakedModel {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         bincode::deserialize_from(reader).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-    }
-}
-
-pub trait SpikingNeuron {
-    fn tick(&mut self, input: IValue) -> bool;
-}
-
-impl SpikingNeuron for NeuronState {
-    fn tick(&mut self, input: IValue) -> bool {
-        if self.refractory_timer > 0 {
-            self.refractory_timer -= 1;
-            self.potential = 0;
-            return false;
-        }
-
-        // Potential update with overflow protection
-        self.potential = self.potential.saturating_add(input);
-
-        // Decay
-        self.potential = (self.potential * (SCALE - self.decay)) / SCALE;
-
-        if self.potential >= self.threshold {
-            self.potential = 0;
-            self.refractory_timer = 2;
-            return true;
-        }
-        false
     }
 }
 

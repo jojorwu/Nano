@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use genesis_core::{NeuronState, Synapse, BakedModel};
+use genesis_core::{NeuronsSoA, SynapsesSoA, BakedModel};
 #[cfg(feature = "titan")]
 use genesis_core::titan::TitanMemory;
 use std::collections::HashMap;
@@ -26,15 +26,15 @@ pub enum ModuleConfig {
 
 impl ModelBlueprint {
     pub fn bake(&self) -> BakedModel {
-        let neurons = vec![NeuronState::default(); self.architecture.neuron_count];
-        let mut synapses = Vec::with_capacity(self.architecture.synapse_count);
+        let neurons = NeuronsSoA::new(self.architecture.neuron_count);
+        let mut synapses = SynapsesSoA::with_capacity(self.architecture.synapse_count);
 
         for i in 0..self.architecture.synapse_count {
-            synapses.push(Synapse {
-                source_index: (i % self.architecture.neuron_count) as u32,
-                target_index: ((i + 1) % self.architecture.neuron_count) as u32,
-                weight: 500,
-            });
+            synapses.push(
+                (i % self.architecture.neuron_count) as u32,
+                ((i + 1) % self.architecture.neuron_count) as u32,
+                500,
+            );
         }
 
         let mut titan_memory = None;
