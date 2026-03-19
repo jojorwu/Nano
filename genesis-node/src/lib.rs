@@ -47,6 +47,8 @@ impl Observer {
     }
 }
 
+pub mod examples_rl;
+
 pub struct NetworkManager {
     pub node_id: String,
     pub peers: Vec<String>,
@@ -63,7 +65,7 @@ impl NetworkManager {
         let mut buf = [0u8; 65535];
         loop {
             if let Ok((len, _)) = self.socket.recv_from(&mut buf).await {
-                if let Ok(packet) = serde_json::from_slice::<SpikePacket>(&buf[..len]) {
+                if let Ok(packet) = bincode::deserialize::<SpikePacket>(&buf[..len]) {
                     let mut q = queue.lock().unwrap();
                     match packet.data {
                         SpikeData::Sparse(indices) => q.extend(indices),
@@ -81,7 +83,7 @@ impl NetworkManager {
     }
 
     pub async fn broadcast_spikes(&self, packet: SpikePacket) {
-        let data = serde_json::to_vec(&packet).unwrap();
+        let data = bincode::serialize(&packet).unwrap();
         for peer in &self.peers {
             let _ = self.socket.send_to(&data, peer).await;
         }
@@ -141,7 +143,7 @@ impl Runtime {
                     if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
                 }
 
-                self.backend.night_phase(&mut self.model, &prev, current, tick, reward);
+                self.backend.night_phase(&mut self.model, &prev, current, tick, reward, &self.spikes_history);
                 prev = current.clone();
             }
             self.spikes_history.clear();

@@ -13,4 +13,4 @@ log = { workspace = true }
 genesis-core = { path = "../genesis-core" }
 wgpu = { version = "0.19", optional = true }
 pollster = "0.3"
-bytemuck = { version = "1.25.0", features = ["derive"] }
+bytemuck = { version = "1.13", features = ["derive"] }

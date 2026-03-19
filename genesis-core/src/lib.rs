@@ -59,6 +59,7 @@ pub struct NeuronsSoA {
     pub base_threshold: Vec<IValue>, // Intrinsic Plasticity
     pub decay: Vec<IValue>,
     pub liquid_current: Vec<IValue>, // For LLIF (Liquid Neurons)
+    pub dendritic_gate: Vec<IValue>, // 1000 = 1.0 (open), 0 = closed
     pub refractory_timer: Vec<i32>,
     pub last_spike_tick: Vec<u32>,
     pub update_interval: Vec<u32>, // Sub-tick precision: 1 = every tick, 10 = every 10 ticks
@@ -73,6 +74,7 @@ impl NeuronsSoA {
             base_threshold: vec![1000; size],
             decay: vec![50; size],
             liquid_current: vec![0; size],
+            dendritic_gate: vec![1000; size],
             refractory_timer: vec![0; size],
             last_spike_tick: vec![0; size],
             update_interval: vec![1; size],
@@ -90,6 +92,7 @@ impl NeuronsSoA {
         self.base_threshold.resize(new_size, 1000);
         self.decay.resize(new_size, 50);
         self.liquid_current.resize(new_size, 0);
+        self.dendritic_gate.resize(new_size, 1000);
         self.refractory_timer.resize(new_size, 0);
         self.last_spike_tick.resize(new_size, 0);
         self.update_interval.resize(new_size, 1);

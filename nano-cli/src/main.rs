@@ -153,10 +153,10 @@ fn run_gym_commands(runtime: &mut Runtime, env_name: &str, episodes: usize) {
 
     // Simple factory-like selection
     if env_name == "arm" {
-        let mut env = examples_rl::RobotArmEnv::new();
+        let mut env = genesis_node::examples_rl::arm_sim::RobotArmEnv::new();
         run_gym_loop(runtime, &mut env, episodes, &mut episode_rewards);
     } else {
-        let mut env = examples_rl::SimpleBalanceEnv::new();
+        let mut env = genesis_node::examples_rl::balance::SimpleBalanceEnv::new();
         run_gym_loop(runtime, &mut env, episodes, &mut episode_rewards);
     }
 }
@@ -187,12 +187,4 @@ fn run_gym_loop(runtime: &mut Runtime, env: &mut dyn genesis_core::rl::Environme
         if history.len() > 10 { history.remove(0); }
         if ep % 10 == 0 { println!("   Episode {}: Reward = {}", ep, total_reward); }
     }
-}
-
-#[cfg(feature = "rl")]
-mod examples_rl {
-    use genesis_core::rl::Environment;
-    use genesis_core::IValue;
-    include!("../../examples/rl/balance.rs");
-    include!("../../examples/robotics/arm_sim.rs");
 }

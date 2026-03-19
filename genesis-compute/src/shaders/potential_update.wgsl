@@ -13,6 +13,7 @@ struct Neuron {
 @group(0) @binding(5) var<storage, read> inputs: array<i32>;
 @group(0) @binding(6) var<storage, read_write> next_update: array<u32>;
 @group(0) @binding(7) var<storage, read> intervals: array<u32>;
+@group(0) @binding(8) var<storage, read> dendritic_gate: array<i32>;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
@@ -30,7 +31,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    var pot = potentials[i] + inputs[i];
+    var gated_input = (inputs[i] * dendritic_gate[i]) / 1000;
+    var pot = potentials[i] + gated_input;
 
     // LLIF: Liquid Decay
     let base_decay = decays[i];

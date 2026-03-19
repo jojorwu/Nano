@@ -83,30 +83,56 @@ impl EvolutionaryOptimizer {
 
     /// Perform structural mutations based on reward and activity.
     pub fn mutate(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue) {
+        self.mutate_with_activity(synapses, neuron_count, reward, &[]);
+    }
+
+    /// Perform structural mutations with activity correlation.
+    pub fn mutate_with_activity(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue, activity_history: &[Vec<bool>]) {
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
             let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
             for _ in 0..prune_count {
                 if synapses.len() > 0 {
-                    // Simple mutation: remove a random (first) connection for exploration
-                    synapses.remove(0);
+                    // Simple mutation: remove a random connection for exploration
+                    // Use swap_remove via our helper
+                    let idx = (reward.abs() as usize) % synapses.len();
+                    synapses.remove(idx);
                 }
             }
         } else if reward > 100 {
-            // High positive reward -> Grow exploratory synapses between random neurons
+            // High positive reward -> Grow synapses based on activity correlation if available
             let grow_count = (neuron_count as f32 * self.mutation_rate).max(1.0) as usize;
 
-            // Deterministic but non-redundant growth logic using current reward and synapse length as entropy
-            let mut offset = synapses.len() as u32;
-            for _ in 0..grow_count {
-                let src = (reward as u32 + offset) % neuron_count as u32;
-                let target = (reward as u32 * 31 + offset + 7) % neuron_count as u32;
-
-                if src != target {
-                    // Use helper to avoid duplicates
-                    grow_synapse(synapses, src, target, 100, &StructuralPlasticityConfig::default());
+            if !activity_history.is_empty() {
+                // Correlational Growth: find neurons that fire together
+                let mut grown = 0;
+                // Simple heuristic: check last few steps for coincidences
+                for step in activity_history.iter().rev().take(5) {
+                    let active: Vec<usize> = step.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+                    if active.len() >= 2 {
+                        for &i in active.iter().take(3) {
+                            for &j in active.iter().take(3) {
+                                if i != j && grown < grow_count {
+                                    if grow_synapse(synapses, i as u32, j as u32, 100, &StructuralPlasticityConfig::default()) {
+                                        grown += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if grown >= grow_count { break; }
                 }
-                offset = offset.wrapping_add(1);
+            } else {
+                // Fallback to exploratory growth
+                let mut offset = synapses.len() as u32;
+                for _ in 0..grow_count {
+                    let src = (reward as u32 + offset) % neuron_count as u32;
+                    let target = (reward as u32 * 31 + offset + 7) % neuron_count as u32;
+                    if src != target {
+                        grow_synapse(synapses, src, target, 100, &StructuralPlasticityConfig::default());
+                    }
+                    offset = offset.wrapping_add(1);
+                }
             }
         }
     }
