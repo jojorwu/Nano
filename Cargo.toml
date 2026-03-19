@@ -4,6 +4,6 @@ members = [
     "genesis-baker",
     "genesis-compute",
     "genesis-node",
-    "axicor-cli",
+    "nano-cli",
 ]
 resolver = "2"

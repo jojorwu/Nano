@@ -1,6 +1,6 @@
 # Пример: Модуль Зрения (Vision)
 
-Этот пример демонстрирует, как Axicor обрабатывает изображения, превращая пиксели в импульсы.
+Этот пример демонстрирует, как Nano обрабатывает изображения, превращая пиксели в импульсы.
 
 ## Как это работает:
 1. **Rate Encoding:** Модуль зрения берет интенсивность каждого пикселя (0-255) и превращает её в начальный потенциал для соответствующего нейрона.
@@ -10,11 +10,11 @@
 ## Как запустить:
 1. Запеките модель:
    ```bash
-   cargo run -p axicor-cli -- bake --blueprint examples/vision/blueprint.toml --output vision.state
+   cargo run -p nano-cli -- bake --blueprint examples/vision/blueprint.toml --output vision.state
    ```
 2. Подайте на вход любое изображение (протестировано на PNG/JPG):
    ```bash
-   cargo run -p axicor-cli -- run --model vision.state --image path/to/your/image.png
+   cargo run -p nano-cli -- run --model vision.state --image path/to/your/image.png
    ```
 
 ## Особенности:
