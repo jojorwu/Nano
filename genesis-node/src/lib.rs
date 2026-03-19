@@ -14,6 +14,19 @@ pub struct Runtime {
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u64,
     pub spikes_history: Vec<Vec<bool>>,
+    pub network_manager: Option<NetworkManager>,
+}
+
+pub struct NetworkManager {
+    pub node_id: String,
+    pub peers: Vec<String>,
+}
+
+impl NetworkManager {
+    pub async fn broadcast_spikes(&self, packet: SpikePacket) {
+        let _data = serde_json::to_string(&packet).unwrap();
+        // Network transmission logic
+    }
 }
 
 impl Runtime {
@@ -26,6 +39,7 @@ impl Runtime {
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
             spikes_history: Vec::new(),
+            network_manager: None,
         })
     }
 

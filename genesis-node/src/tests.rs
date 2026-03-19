@@ -8,6 +8,8 @@ mod tests {
     #[test]
     fn test_runtime_synapse_propagation() {
         let mut model = BakedModel {
+            node_id: 0,
+            local_range: (0, 2),
             neurons: NeuronsSoA::new(2),
             synapses: {
                 let mut s = SynapsesSoA::with_capacity(1);
@@ -29,6 +31,7 @@ mod tests {
             previous_spikes: vec![false; 2],
             tick_counter: 0,
             spikes_history: Vec::new(),
+            network_manager: None,
         };
         runtime.previous_spikes[0] = true;
 
@@ -39,6 +42,8 @@ mod tests {
     #[test]
     fn test_night_phase_pruning() {
         let model = BakedModel {
+            node_id: 0,
+            local_range: (0, 2),
             neurons: NeuronsSoA::new(2),
             synapses: {
                 let mut s = SynapsesSoA::with_capacity(1);
@@ -59,6 +64,7 @@ mod tests {
             previous_spikes: vec![false; 2],
             tick_counter: 99,
             spikes_history: Vec::new(),
+            network_manager: None,
         };
 
         runtime.tick(&[0, 0]);

@@ -23,6 +23,7 @@ enum Commands {
         #[cfg(feature = "vision")]
         #[arg(short = 'g', long)] image: Option<String>,
         #[arg(short, long, default_value_t = false)] byte_level: bool,
+        #[arg(short, long, default_value_t = 0)] reasoning: usize,
     },
     Gym {
         #[arg(short, long)] model: String,
@@ -43,7 +44,7 @@ async fn main() {
             println!("✅ Model '{}' baked to {}.", bp.name, output);
             println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level } => {
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning } => {
             println!("🚀 Loading model: {}", model);
             let mut runtime = Runtime::load(model).expect("Failed to load model");
             let initial_synapses = runtime.model.synapses.len();
@@ -61,7 +62,11 @@ async fn main() {
                             for (j, &spiked) in pattern.iter().enumerate() {
                                 if spiked { inputs[j] = 1000; }
                             }
-                            let spikes = runtime.tick(&inputs);
+                            let mut spikes = runtime.tick(&inputs);
+                            // Reasoning Mode: Internal thinking ticks
+                            for _ in 0..*reasoning {
+                                spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
+                            }
                             println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, spikes.iter().filter(|&&s| s).count());
                         }
                     } else {
@@ -79,7 +84,11 @@ async fn main() {
                                     if spiked { inputs[i] = 1000; }
                                 }
                             }
-                            let spikes = runtime.tick(&inputs);
+                            let mut spikes = runtime.tick(&inputs);
+                            // Reasoning Mode
+                            for _ in 0..*reasoning {
+                                spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
+                            }
                             println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
                         }
                     }

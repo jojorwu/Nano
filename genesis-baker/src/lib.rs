@@ -62,6 +62,8 @@ impl ModelBlueprint {
         }
 
         BakedModel {
+            node_id: 0,
+            local_range: (0, self.architecture.neuron_count),
             neurons,
             synapses,
             #[cfg(feature = "titan")]

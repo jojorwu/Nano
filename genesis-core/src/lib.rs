@@ -126,6 +126,8 @@ impl SynapsesSoA {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
+    pub node_id: u32,
+    pub local_range: (usize, usize), // (start, end) indices of local neurons
     pub neurons: NeuronsSoA,
     pub synapses: SynapsesSoA,
     #[cfg(feature = "titan")]
