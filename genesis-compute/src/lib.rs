@@ -2,8 +2,9 @@ use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE};
 use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool]) -> Vec<bool>;
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool]);
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool>;
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64);
+    fn name(&self) -> &'static str;
 }
 
 pub struct CpuBackend {
@@ -20,8 +21,32 @@ impl Default for CpuBackend {
     }
 }
 
+pub struct BackendRegistry {
+    pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Box<dyn ComputeBackend + Send + Sync>>>,
+}
+
+impl BackendRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self { backends: std::collections::HashMap::new() };
+        registry.register("cpu", || Box::new(CpuBackend::default()));
+        registry
+    }
+
+    pub fn register<F>(&mut self, name: &str, factory: F)
+    where
+        F: Fn() -> Box<dyn ComputeBackend + Send + Sync> + 'static,
+    {
+        self.backends.insert(name.to_string(), Box::new(factory));
+    }
+
+    pub fn create(&self, name: &str) -> Option<Box<dyn ComputeBackend + Send + Sync>> {
+        self.backends.get(name).map(|f| f())
+    }
+}
+
 impl ComputeBackend for CpuBackend {
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool]) -> Vec<bool> {
+    fn name(&self) -> &'static str { "CpuBackend" }
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
         let n_count = model.neurons.len();
         let mut current_inputs = vec![0i32; n_count];
 
@@ -51,27 +76,42 @@ impl ComputeBackend for CpuBackend {
             if model.neurons.refractory_timer[i] > 0 {
                 model.neurons.refractory_timer[i] -= 1;
                 model.neurons.potential[i] = 0;
-            } else {
-                model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
-                let decay = model.neurons.decay[i];
-                model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - decay)) / SCALE;
+                continue;
+            }
 
-                if model.neurons.potential[i] >= model.neurons.threshold[i] {
-                    model.neurons.potential[i] = 0;
-                    model.neurons.refractory_timer[i] = 2;
-                    new_spikes[i] = true;
-                }
+            // Event-Driven: Only update if there's input or existing potential
+            if current_inputs[i] == 0 && model.neurons.potential[i] == 0 {
+                continue;
+            }
+
+            model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
+            let decay = model.neurons.decay[i];
+            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - decay)) / SCALE;
+
+            if model.neurons.potential[i] >= model.neurons.threshold[i] {
+                model.neurons.potential[i] = 0;
+                model.neurons.refractory_timer[i] = 2;
+                new_spikes[i] = true;
+                model.neurons.last_spike_tick[i] = current_tick;
             }
         }
 
         new_spikes
     }
 
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool]) {
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64) {
         for i in 0..model.synapses.len() {
-            let pre_spiked = previous_spikes[model.synapses.source_index[i] as usize];
-            let post_spiked = current_spikes[model.synapses.target_index[i] as usize];
+            let src = model.synapses.source_index[i] as usize;
+            let target = model.synapses.target_index[i] as usize;
+            let pre_spiked = previous_spikes[src];
+            let post_spiked = current_spikes[target];
+
             self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
+
+            // Temporal update (STDP)
+            let pre_tick = model.neurons.last_spike_tick[src];
+            let post_tick = model.neurons.last_spike_tick[target];
+            self.plasticity_rule.update_temporal(&mut model.synapses.weight[i], pre_tick, post_tick, current_tick);
         }
 
         #[cfg(feature = "titan")]

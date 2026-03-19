@@ -3,9 +3,10 @@ use genesis_compute::{ComputeBackend, CpuBackend};
 
 pub struct Runtime {
     pub model: BakedModel,
-    pub backend: Box<dyn ComputeBackend>,
+    pub backend: Box<dyn ComputeBackend + Send + Sync>,
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u64,
+    pub spikes_history: Vec<Vec<bool>>,
 }
 
 impl Runtime {
@@ -17,17 +18,27 @@ impl Runtime {
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
+            spikes_history: Vec::new(),
         })
     }
 
     pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
+        self.tick_counter += 1;
         // 1. Day Phase: Inference
-        let current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes);
+        let current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
+
+        self.spikes_history.push(current_spikes.clone());
 
         // 2. Night Phase: Learning (every 100 ticks)
-        self.tick_counter += 1;
         if self.tick_counter % 100 == 0 {
-            self.backend.night_phase(&mut self.model, &self.previous_spikes, &current_spikes);
+            // Replay history for learning
+            let mut prev = vec![false; self.model.neurons.len()];
+            for (i, current) in self.spikes_history.iter().enumerate() {
+                let tick = self.tick_counter - (self.spikes_history.len() as u64) + (i as u64) + 1;
+                self.backend.night_phase(&mut self.model, &prev, current, tick);
+                prev = current.clone();
+            }
+            self.spikes_history.clear();
         }
 
         self.previous_spikes = current_spikes.clone();

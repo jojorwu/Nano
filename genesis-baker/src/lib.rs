@@ -23,6 +23,7 @@ pub enum ModuleConfig {
     TitanMemory { learning_rate: i32, size: usize, decay_rate: Option<i32> },
     TextProcessor { vocab_size: usize },
     Vision { resolution: (u32, u32) },
+    AudioProcessor { sample_rate: u32 },
 }
 
 impl ModelBlueprint {
@@ -42,6 +43,7 @@ impl ModelBlueprint {
         let mut titan_memory = None;
         let mut has_text = false;
         let mut has_vision = false;
+        let mut has_audio = false;
 
         for module in &self.modules {
             match module {
@@ -55,6 +57,7 @@ impl ModelBlueprint {
                 },
                 ModuleConfig::TextProcessor { .. } => has_text = true,
                 ModuleConfig::Vision { .. } => has_vision = true,
+                ModuleConfig::AudioProcessor { .. } => has_audio = true,
             }
         }
 
@@ -65,6 +68,7 @@ impl ModelBlueprint {
             titan_memory,
             has_text,
             has_vision,
+            has_audio,
             vocabulary: HashMap::new()
         }
     }

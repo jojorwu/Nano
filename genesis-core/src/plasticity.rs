@@ -1,5 +1,38 @@
 use crate::{SynapsesSoA, IValue};
 
+pub struct StdpRule {
+    pub tau: u64,
+    pub a_plus: IValue,
+    pub a_minus: IValue,
+}
+
+impl crate::PlasticityRule for StdpRule {
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool) {
+        if pre_spiked && post_spiked {
+            *weight = weight.saturating_add(self.a_plus / 2);
+        }
+    }
+
+    fn update_temporal(&self, weight: &mut IValue, pre_tick: u64, post_tick: u64, _current_tick: u64) {
+        if pre_tick == 0 || post_tick == 0 { return; }
+        let diff = (post_tick as i64) - (pre_tick as i64);
+
+        if diff > 0 && diff < self.tau as i64 {
+            // Long-Term Potentiation (LTP)
+            let delta = (self.a_plus * (self.tau as i64 - diff) as i32) / self.tau as i32;
+            *weight = weight.saturating_add(delta);
+        } else if diff < 0 && diff > -(self.tau as i64) {
+            // Long-Term Depression (LTD)
+            let delta = (self.a_minus * (self.tau as i64 - diff.abs()) as i32) / self.tau as i32;
+            *weight = weight.saturating_sub(delta);
+        }
+
+        // Clamp weights
+        if *weight > 5000 { *weight = 5000; }
+        if *weight < -5000 { *weight = -5000; }
+    }
+}
+
 pub struct StructuralPlasticityConfig {
     pub prune_threshold: IValue,
     pub grow_threshold: usize,
@@ -64,5 +97,21 @@ mod tests {
         let pruned = prune_synapses(&mut synapses, 10);
         assert_eq!(pruned, 1);
         assert_eq!(synapses.len(), 1);
+    }
+
+    #[test]
+    fn test_stdp() {
+        use crate::PlasticityRule;
+        let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100 };
+        let mut weight = 1000;
+
+        // LTP: pre=5, post=8 (diff=3)
+        stdp.update_temporal(&mut weight, 5, 8, 10);
+        assert!(weight > 1000);
+
+        // LTD: pre=8, post=5 (diff=-3)
+        let mut weight2 = 1000;
+        stdp.update_temporal(&mut weight2, 8, 5, 10);
+        assert!(weight2 < 1000);
     }
 }

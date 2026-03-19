@@ -4,6 +4,8 @@ pub mod titan;
 pub mod text;
 #[cfg(feature = "vision")]
 pub mod vision;
+#[cfg(feature = "audio")]
+pub mod audio;
 
 pub mod plasticity;
 
@@ -18,6 +20,9 @@ pub const SCALE: IValue = 1000;
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
     fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool);
+    fn update_temporal(&self, _weight: &mut IValue, _pre_tick: u64, _post_tick: u64, _current_tick: u64) {
+        // Default implementation does nothing
+    }
 }
 
 pub struct GsopRule {
@@ -42,6 +47,7 @@ pub struct NeuronsSoA {
     pub threshold: Vec<IValue>,
     pub decay: Vec<IValue>,
     pub refractory_timer: Vec<i32>,
+    pub last_spike_tick: Vec<u64>,
 }
 
 impl NeuronsSoA {
@@ -51,6 +57,7 @@ impl NeuronsSoA {
             threshold: vec![1000; size],
             decay: vec![50; size],
             refractory_timer: vec![0; size],
+            last_spike_tick: vec![0; size],
         }
     }
     pub fn len(&self) -> usize {
@@ -99,6 +106,7 @@ pub struct BakedModel {
     pub titan_memory: Option<titan::TitanMemory>,
     pub has_text: bool,
     pub has_vision: bool,
+    pub has_audio: bool,
     pub vocabulary: HashMap<String, usize>,
 }
 

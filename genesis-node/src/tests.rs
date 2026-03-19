@@ -18,6 +18,7 @@ mod tests {
             titan_memory: None,
             has_text: false,
             has_vision: false,
+            has_audio: false,
             vocabulary: HashMap::new(),
         };
         model.neurons.threshold[1] = 1000;
@@ -27,6 +28,7 @@ mod tests {
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
             tick_counter: 0,
+            spikes_history: Vec::new(),
         };
         runtime.previous_spikes[0] = true;
 
@@ -47,6 +49,7 @@ mod tests {
             titan_memory: None,
             has_text: false,
             has_vision: false,
+            has_audio: false,
             vocabulary: HashMap::new(),
         };
 
@@ -55,6 +58,7 @@ mod tests {
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
             tick_counter: 99,
+            spikes_history: Vec::new(),
         };
 
         runtime.tick(&[0, 0]);

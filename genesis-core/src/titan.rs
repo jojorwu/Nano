@@ -22,10 +22,19 @@ impl TitanMemory {
     }
 
     pub fn step(&mut self, input_pattern: &[bool], error: IValue) {
+        // Surprise-Modulated Dynamic Gating:
+        // Decay is inversely proportional to surprise.
+        // High surprise (error) reduces decay to preserve new important information.
+        let dynamic_decay = if error.abs() > self.surprise_threshold {
+            self.decay_rate / 2
+        } else {
+            self.decay_rate
+        };
+
         // Apply Weight Decay (Gating) as forgetting mechanism
-        if self.decay_rate > 0 {
+        if dynamic_decay > 0 {
             for w in self.weights.iter_mut() {
-                let decay = (*w * self.decay_rate) / 1000;
+                let decay = (*w * dynamic_decay) / 1000;
                 *w = w.saturating_sub(decay);
             }
         }
@@ -67,5 +76,17 @@ mod tests {
         titan.step(&[false; 10], 0);
         assert!(titan.weights[0] < 1000);
         assert_eq!(titan.weights[0], 900);
+    }
+
+    #[test]
+    fn test_surprise_modulation() {
+        let mut titan = TitanMemory::new(10, 100);
+        titan.weights[0] = 1000;
+        titan.decay_rate = 100;
+        titan.surprise_threshold = 50;
+
+        // High surprise (error 100) -> half decay (50)
+        titan.step(&[false; 10], 100);
+        assert_eq!(titan.weights[0], 950);
     }
 }
