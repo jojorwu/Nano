@@ -6,6 +6,8 @@ pub mod text;
 pub mod vision;
 #[cfg(feature = "audio")]
 pub mod audio;
+#[cfg(feature = "rl")]
+pub mod rl;
 
 pub mod plasticity;
 
@@ -20,6 +22,13 @@ pub const SCALE: IValue = 1000;
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
     fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool);
+    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
+        // Default: just do normal update if reward is positive, or nothing if negative?
+        // Usually RL uses a third factor.
+        if reward > 0 {
+            self.update(weight, pre_spiked, post_spiked);
+        }
+    }
     fn update_temporal(&self, _weight: &mut IValue, _pre_tick: u64, _post_tick: u64, _current_tick: u64) {
         // Default implementation does nothing
     }

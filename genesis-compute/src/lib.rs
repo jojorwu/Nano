@@ -1,9 +1,9 @@
-use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE};
+use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue};
 use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u64) -> Vec<bool>;
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64);
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64, reward: Option<IValue>);
     fn name(&self) -> &'static str;
 }
 
@@ -21,6 +21,34 @@ impl Default for CpuBackend {
     }
 }
 
+#[cfg(feature = "wgpu")]
+pub struct WgpuBackend {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+}
+
+#[cfg(feature = "wgpu")]
+impl WgpuBackend {
+    pub fn new() -> Self {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("Failed to find wgpu adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).expect("Failed to create wgpu device");
+        Self { device, queue }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl ComputeBackend for WgpuBackend {
+    fn name(&self) -> &'static str { "WgpuBackend" }
+    fn day_phase(&mut self, _model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _current_tick: u64) -> Vec<bool> {
+        // GPU kernels will be implemented in WGSL in next steps
+        vec![]
+    }
+    fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64) {
+        // GPU-based structural plasticity
+    }
+}
+
 pub struct BackendRegistry {
     pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Box<dyn ComputeBackend + Send + Sync>>>,
 }
@@ -29,6 +57,8 @@ impl BackendRegistry {
     pub fn new() -> Self {
         let mut registry = Self { backends: std::collections::HashMap::new() };
         registry.register("cpu", || Box::new(CpuBackend::default()));
+        #[cfg(feature = "wgpu")]
+        registry.register("wgpu", || Box::new(WgpuBackend::new()));
         registry
     }
 
@@ -99,14 +129,18 @@ impl ComputeBackend for CpuBackend {
         new_spikes
     }
 
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64) {
+    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u64, reward: Option<IValue>) {
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             let target = model.synapses.target_index[i] as usize;
             let pre_spiked = previous_spikes[src];
             let post_spiked = current_spikes[target];
 
-            self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
+            if let Some(r) = reward {
+                self.plasticity_rule.update_rewarded(&mut model.synapses.weight[i], pre_spiked, post_spiked, r);
+            } else {
+                self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
+            }
 
             // Temporal update (STDP)
             let pre_tick = model.neurons.last_spike_tick[src];
@@ -117,7 +151,10 @@ impl ComputeBackend for CpuBackend {
         #[cfg(feature = "titan")]
         if let Some(ref mut titan) = model.titan_memory {
             let activity = current_spikes.iter().filter(|&&s| s).count() as i32;
-            titan.step(previous_spikes, (10 - activity) * 10);
+            let base_error = (10 - activity) * 10;
+            // Integrate reward into Titan error if present
+            let final_error = if let Some(r) = reward { base_error + r } else { base_error };
+            titan.step(previous_spikes, final_error);
         }
 
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);

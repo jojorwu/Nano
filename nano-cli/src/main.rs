@@ -24,6 +24,11 @@ enum Commands {
         #[arg(short = 'g', long)] image: Option<String>,
         #[arg(short, long, default_value_t = false)] byte_level: bool,
     },
+    Gym {
+        #[arg(short, long)] model: String,
+        #[arg(short, long, default_value = "cartpole")] env: String,
+        #[arg(short, long, default_value_t = 100)] episodes: usize,
+    },
 }
 
 #[tokio::main]
@@ -109,5 +114,47 @@ async fn main() {
             runtime.model.save(model).expect("Failed to auto-save model");
             println!("💾 Model state and vocabulary saved.");
         }
+        Commands::Gym { model, env: env_name, episodes } => {
+            println!("🏋️ Training in Gym: {}", env_name);
+            let mut runtime = Runtime::load(model).expect("Failed to load");
+
+            #[cfg(feature = "rl")]
+            {
+                use genesis_core::rl::{RLAgent, Environment};
+                // For demonstration, use a hardcoded environment
+                // In a real scenario, this would be a dynamic registry
+                let mut env = examples_rl::SimpleBalanceEnv::new();
+                let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
+
+                for ep in 0..*episodes {
+                    let mut obs = env.reset();
+                    let mut total_reward = 0;
+                    let mut done = false;
+                    while !done {
+                        let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
+                        let (next_obs, reward, is_done) = {
+                            let spikes = runtime.tick_with_reward(&inputs, None); // Normal inference
+                            let actions = agent.decode_action(&spikes);
+                            env.step(&actions)
+                        };
+
+                        // Final tick with reward for learning
+                        runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(reward));
+
+                        total_reward += reward;
+                        obs = next_obs;
+                        done = is_done;
+                    }
+                    if ep % 10 == 0 { println!("   Episode {}: Total Reward = {}", ep, total_reward); }
+                }
+            }
+            runtime.model.save(model).expect("Failed to save trained state");
+            println!("✨ Gym session finished. Evolution saved.");
+        }
     }
+}
+
+#[cfg(feature = "rl")]
+mod examples_rl {
+    include!("../../examples/rl/balance.rs");
 }

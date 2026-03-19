@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["titan", "text", "vision", "audio"]
+default = ["titan", "text", "vision", "audio", "rl"]
 titan = []
 text = []
 vision = []
 audio = []
+rl = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

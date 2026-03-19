@@ -22,7 +22,7 @@ impl Runtime {
         })
     }
 
-    pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
+    pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         self.tick_counter += 1;
         // 1. Day Phase: Inference
         let current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
@@ -35,7 +35,7 @@ impl Runtime {
             let mut prev = vec![false; self.model.neurons.len()];
             for (i, current) in self.spikes_history.iter().enumerate() {
                 let tick = self.tick_counter - (self.spikes_history.len() as u64) + (i as u64) + 1;
-                self.backend.night_phase(&mut self.model, &prev, current, tick);
+                self.backend.night_phase(&mut self.model, &prev, current, tick, reward);
                 prev = current.clone();
             }
             self.spikes_history.clear();
@@ -43,6 +43,10 @@ impl Runtime {
 
         self.previous_spikes = current_spikes.clone();
         current_spikes
+    }
+
+    pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
+        self.tick_with_reward(external_inputs, None)
     }
 }
 

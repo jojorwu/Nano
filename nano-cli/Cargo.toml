@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["titan", "text", "vision"]
+default = ["titan", "text", "vision", "rl"]
 titan = ["genesis-baker/titan", "genesis-node/titan", "genesis-core/titan"]
 text = ["genesis-baker/text", "genesis-node/text", "genesis-core/text"]
 vision = ["genesis-baker/vision", "genesis-node/vision", "genesis-core/vision", "dep:image"]
+rl = ["genesis-core/rl"]
 
 [dependencies]
 genesis-core = { path = "../genesis-core" }
