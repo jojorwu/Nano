@@ -1,0 +1,15 @@
+[package]
+name = "genesis-baker"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["titan", "text"]
+titan = ["genesis-core/titan"]
+text = ["genesis-core/text"]
+
+[dependencies]
+genesis-core = { path = "../genesis-core" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4.0", features = ["derive"] }

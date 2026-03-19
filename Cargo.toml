@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "genesis-core",
+    "genesis-baker",
+    "genesis-compute",
+    "genesis-node",
+    "axicor-cli",
+]
+resolver = "2"

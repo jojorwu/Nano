@@ -1,0 +1,11 @@
+name = "MySpikingTitan"
+[architecture]
+neuron_count = 1000
+synapse_count = 50000
+[[modules]]
+type = "TitanMemory"
+learning_rate = 100
+size = 256
+[[modules]]
+type = "TextProcessor"
+vocab_size = 5000

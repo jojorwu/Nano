@@ -1,0 +1,16 @@
+[package]
+name = "genesis-node"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["titan", "text"]
+titan = ["genesis-core/titan"]
+text = ["genesis-core/text"]
+
+[dependencies]
+genesis-core = { path = "../genesis-core" }
+genesis-compute = { path = "../genesis-compute" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
