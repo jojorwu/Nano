@@ -83,6 +83,14 @@ pub struct SynapsesSoA {
     pub source_index: Vec<u32>,
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
+    pub latent_matrix: Option<LatentSynapseMatrix>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LatentSynapseMatrix {
+    pub u: Vec<IValue>, // Low-rank U matrix
+    pub v: Vec<IValue>, // Low-rank V matrix
+    pub rank: usize,
 }
 
 impl SynapsesSoA {
@@ -91,6 +99,7 @@ impl SynapsesSoA {
             source_index: Vec::with_capacity(capacity),
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
+            latent_matrix: None,
         }
     }
 
@@ -98,6 +107,10 @@ impl SynapsesSoA {
         self.source_index.push(source);
         self.target_index.push(target);
         self.weight.push(weight);
+    }
+
+    pub fn set_latent(&mut self, u: Vec<IValue>, v: Vec<IValue>, rank: usize) {
+        self.latent_matrix = Some(LatentSynapseMatrix { u, v, rank });
     }
 
     pub fn len(&self) -> usize {

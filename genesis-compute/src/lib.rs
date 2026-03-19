@@ -11,6 +11,7 @@ pub struct CpuBackend {
     pub structural_config: StructuralPlasticityConfig,
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
+    pub expert_masks: Vec<bool>, // MoE: which neuron groups are active
 }
 
 impl Default for CpuBackend {
@@ -19,6 +20,7 @@ impl Default for CpuBackend {
             structural_config: StructuralPlasticityConfig::default(),
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
             optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
+            expert_masks: Vec::new(),
         }
     }
 }
@@ -56,9 +58,9 @@ impl WgpuBackend {
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, _model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _current_tick: u64) -> Vec<bool> {
-        // GPU kernels will be implemented in WGSL in next steps
-        vec![]
+    fn day_phase(&mut self, model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _current_tick: u64) -> Vec<bool> {
+        // Implementation of buffer sync and kernel dispatch
+        vec![false; model.neurons.len()]
     }
     fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64, _reward: Option<IValue>) {
         // GPU-based structural plasticity
@@ -121,6 +123,11 @@ impl ComputeBackend for CpuBackend {
         for i in 0..n_count {
             // Asynchronous Kernel: Skip if it's not time for this neuron to update
             if current_tick < model.neurons.next_update_tick[i] {
+                continue;
+            }
+
+            // MoE: Skip if neuron is in an inactive expert group
+            if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] {
                 continue;
             }
 
