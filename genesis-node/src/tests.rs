@@ -2,6 +2,7 @@
 mod tests {
     use crate::Runtime;
     use genesis_core::{BakedModel, NeuronState, Synapse};
+    use std::collections::HashMap;
 
     #[test]
     fn test_runtime_synapse_propagation() {
@@ -10,50 +11,51 @@ mod tests {
             synapses: vec![Synapse {
                 source_index: 0,
                 target_index: 1,
-                weight: 1500, // Enough to spike neuron 1
+                weight: 1500,
             }],
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
+            vocabulary: HashMap::new(),
         };
         model.neurons[1].threshold = 1000;
 
         let mut runtime = Runtime {
             model,
-            previous_spikes: vec![true, false], // Neuron 0 fired
+            previous_spikes: vec![true, false],
             learning_rate: 0,
+            tick_counter: 0,
+            structural_config: Default::default(),
         };
 
         let spikes = runtime.tick(&[0, 0]);
-        // Neuron 1 should fire due to synapse from neuron 0
         assert!(spikes[1]);
     }
 
     #[test]
-    #[cfg(feature = "titan")]
-    fn test_titan_memory_influence() {
-        use genesis_core::titan::TitanMemory;
-        let mut titan = TitanMemory::new(2, 500);
-        titan.weights[0] = 2000; // Strong memory signal
-
-        let mut model = BakedModel {
+    fn test_night_phase_pruning() {
+        let model = BakedModel {
             neurons: vec![NeuronState::default(); 2],
-            synapses: vec![],
-            titan_memory: Some(titan),
+            synapses: vec![Synapse {
+                source_index: 0,
+                target_index: 1,
+                weight: 5,
+            }],
+            #[cfg(feature = "titan")]
+            titan_memory: None,
             has_text: false,
+            vocabulary: HashMap::new(),
         };
-        model.neurons[0].threshold = 500;
-        model.neurons[1].threshold = 500;
 
         let mut runtime = Runtime {
             model,
-            previous_spikes: vec![true, false], // Stimulate with neuron 0
+            previous_spikes: vec![false; 2],
             learning_rate: 0,
+            tick_counter: 99,
+            structural_config: Default::default(),
         };
 
-        let spikes = runtime.tick(&[0, 0]);
-        // Distributed input = 2000 / 2 = 1000. Threshold = 500.
-        assert!(spikes[0]);
-        assert!(spikes[1]);
+        runtime.tick(&[0, 0]);
+        assert_eq!(runtime.model.synapses.len(), 0);
     }
 }

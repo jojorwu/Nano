@@ -1,9 +1,12 @@
 use genesis_core::{BakedModel, SpikingNeuron, update_weight_gsop};
+use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
 
 pub struct Runtime {
     pub model: BakedModel,
     pub previous_spikes: Vec<bool>,
     pub learning_rate: i32,
+    pub tick_counter: u64,
+    pub structural_config: StructuralPlasticityConfig,
 }
 
 impl Runtime {
@@ -14,6 +17,8 @@ impl Runtime {
             model,
             previous_spikes: vec![false; n_count],
             learning_rate: 10,
+            tick_counter: 0,
+            structural_config: StructuralPlasticityConfig::default(),
         })
     }
 
@@ -22,12 +27,12 @@ impl Runtime {
         let mut current_inputs = vec![0i32; n_count];
 
         for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { current_inputs[i] += val; }
+            if i < n_count { current_inputs[i] = current_inputs[i].saturating_add(val); }
         }
 
         for synapse in &self.model.synapses {
             if self.previous_spikes[synapse.source_index as usize] {
-                current_inputs[synapse.target_index as usize] += synapse.weight;
+                current_inputs[synapse.target_index as usize] = current_inputs[synapse.target_index as usize].saturating_add(synapse.weight);
             }
         }
 
@@ -35,7 +40,7 @@ impl Runtime {
         if let Some(ref titan) = self.model.titan_memory {
             let memory_input = titan.retrieve(&self.previous_spikes);
             for i in 0..n_count {
-                current_inputs[i] += memory_input / (n_count as i32).max(1);
+                current_inputs[i] = current_inputs[i].saturating_add(memory_input / (n_count as i32).max(1));
             }
         }
 
@@ -54,11 +59,43 @@ impl Runtime {
         #[cfg(feature = "titan")]
         if let Some(ref mut titan) = self.model.titan_memory {
             let activity = new_spikes.iter().filter(|&&s| s).count() as i32;
-            titan.step(&self.previous_spikes, activity * 10);
+            let target_activity = 10;
+            let error = target_activity - activity; // Simple error
+            titan.step(&self.previous_spikes, error * 10);
+        }
+
+        self.tick_counter += 1;
+        if self.tick_counter % 100 == 0 {
+            self.night_phase();
         }
 
         self.previous_spikes = new_spikes.clone();
         new_spikes
+    }
+
+    /// Night Phase: Optimized structural evolution.
+    pub fn night_phase(&mut self) {
+        let pruned = prune_synapses(&mut self.model.synapses, self.structural_config.prune_threshold);
+        if pruned > 0 {
+            // Synapses pruned
+        }
+
+        // Optimized Growth: Fire together -> wire together
+        // Instead of $O(N^2)$, we only consider active neurons.
+        let active_indices: Vec<usize> = self.previous_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s)
+            .map(|(i, _)| i)
+            .collect();
+
+        if active_indices.len() > 1 && self.model.synapses.len() < self.structural_config.max_synapses {
+            for &i in active_indices.iter().take(10) { // Limit to avoid burst growth
+                for &j in active_indices.iter().take(10) {
+                    if i != j {
+                        grow_synapse(&mut self.model.synapses, i as u32, j as u32, 50, &self.structural_config);
+                    }
+                }
+            }
+        }
     }
 }
 

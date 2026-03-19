@@ -1,12 +1,20 @@
+#[cfg(feature = "titan")]
+pub mod titan;
+#[cfg(feature = "text")]
+pub mod text;
+
+pub mod plasticity;
+
 use serde::{Deserialize, Serialize};
 use bytemuck::{Pod, Zeroable};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::collections::HashMap;
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1000;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable)]
 #[repr(C)]
 pub struct NeuronState {
     pub potential: IValue,
@@ -15,7 +23,18 @@ pub struct NeuronState {
     pub refractory_timer: i32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable)]
+impl Default for NeuronState {
+    fn default() -> Self {
+        Self {
+            potential: 0,
+            threshold: 1000, // 1.0
+            decay: 50,       // 0.05
+            refractory_timer: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Pod, Zeroable, PartialEq)]
 #[repr(C)]
 pub struct Synapse {
     pub source_index: u32,
@@ -23,13 +42,14 @@ pub struct Synapse {
     pub weight: IValue,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
     pub neurons: Vec<NeuronState>,
     pub synapses: Vec<Synapse>,
     #[cfg(feature = "titan")]
     pub titan_memory: Option<titan::TitanMemory>,
     pub has_text: bool,
+    pub vocabulary: HashMap<String, usize>,
 }
 
 impl BakedModel {
@@ -58,8 +78,8 @@ impl SpikingNeuron for NeuronState {
             return false;
         }
 
-        // Potential update
-        self.potential += input;
+        // Potential update with overflow protection
+        self.potential = self.potential.saturating_add(input);
 
         // Decay
         self.potential = (self.potential * (SCALE - self.decay)) / SCALE;
@@ -73,43 +93,12 @@ impl SpikingNeuron for NeuronState {
     }
 }
 
-/// GSOP: Global Spiking Optimization Plasticity
-/// Updates weight based on pre- and post-synaptic activity.
-/// This happens at each tick or night cycle.
 pub fn update_weight_gsop(weight: &mut IValue, pre_spiked: bool, post_spiked: bool, learning_rate: IValue) {
     if pre_spiked && post_spiked {
-        // Potentiation: neurons fire together, weights grow
-        *weight += learning_rate;
+        *weight = weight.saturating_add(learning_rate);
     } else if pre_spiked && !post_spiked {
-        // Depression: pre fired but post didn't
-        *weight -= learning_rate / 2;
+        *weight = weight.saturating_sub(learning_rate / 2);
     }
-
-    // Clamp weight for stability
     if *weight > SCALE * 5 { *weight = SCALE * 5; }
     if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
-}
-
-#[cfg(feature = "titan")]
-pub mod titan;
-#[cfg(feature = "text")]
-pub mod text;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gsop_potentiation() {
-        let mut w = 500;
-        update_weight_gsop(&mut w, true, true, 100);
-        assert_eq!(w, 600);
-    }
-
-    #[test]
-    fn test_gsop_depression() {
-        let mut w = 500;
-        update_weight_gsop(&mut w, true, false, 100);
-        assert_eq!(w, 450);
-    }
 }

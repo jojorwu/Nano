@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 
-pub struct SpikingTextModule {
-    pub vocabulary: HashMap<String, usize>,
-    pub embeddings: Vec<Vec<bool>>,
+pub struct SpikingTextModule<'a> {
+    pub vocabulary: &'a mut HashMap<String, usize>,
 }
 
-impl SpikingTextModule {
-    pub fn new(vocab_size: usize, _pattern_length: usize) -> Self {
+impl<'a> SpikingTextModule<'a> {
+    pub fn new(vocab: &'a mut HashMap<String, usize>) -> Self {
         Self {
-            vocabulary: HashMap::with_capacity(vocab_size),
-            embeddings: Vec::with_capacity(vocab_size),
+            vocabulary: vocab,
         }
     }
     pub fn tokenize(&mut self, text: &str) -> Vec<usize> {
@@ -20,9 +18,11 @@ impl SpikingTextModule {
     }
     pub fn encode(&self, token: usize, pattern_length: usize) -> Vec<bool> {
         let mut pattern = vec![false; pattern_length];
-        let hash = token as u64;
+        // Improved deterministic hash-based encoding
+        let mut h = token as u64;
+        h = h.wrapping_mul(0x517cc1b727220a95);
         for i in 0..pattern_length {
-            if (hash >> (i % 64)) & 1 == 1 {
+            if (h.rotate_right(i as u32) & 1) == 1 {
                 pattern[i] = true;
             }
         }

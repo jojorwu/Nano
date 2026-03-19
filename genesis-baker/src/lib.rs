@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use genesis_core::{NeuronState, Synapse, BakedModel};
 #[cfg(feature = "titan")]
 use genesis_core::titan::TitanMemory;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelBlueprint {
@@ -28,12 +29,11 @@ impl ModelBlueprint {
         let neurons = vec![NeuronState::default(); self.architecture.neuron_count];
         let mut synapses = Vec::with_capacity(self.architecture.synapse_count);
 
-        // Simple random connection for demo
         for i in 0..self.architecture.synapse_count {
             synapses.push(Synapse {
                 source_index: (i % self.architecture.neuron_count) as u32,
                 target_index: ((i + 1) % self.architecture.neuron_count) as u32,
-                weight: 500, // 0.5
+                weight: 500,
             });
         }
 
@@ -50,6 +50,6 @@ impl ModelBlueprint {
             }
         }
 
-        BakedModel { neurons, synapses, titan_memory, has_text }
+        BakedModel { neurons, synapses, titan_memory, has_text, vocabulary: HashMap::new() }
     }
 }

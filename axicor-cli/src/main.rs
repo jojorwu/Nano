@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use genesis_baker::ModelBlueprint;
 use genesis_node::Runtime;
+#[cfg(feature = "text")]
 use genesis_core::text::SpikingTextModule;
 
 #[derive(Parser)]
@@ -26,37 +27,54 @@ async fn main() {
             baked.save(output).expect("Failed to save");
             println!("✅ Model '{}' baked to {}.", bp.name, output);
             println!("   Neurons: {}, Synapses: {}", baked.neurons.len(), baked.synapses.len());
-            #[cfg(feature = "titan")]
-            if let Some(ref t) = baked.titan_memory {
-                println!("   Titan Memory enabled (size: {})", t.weights.len());
-            }
         }
         Commands::Run { model, input } => {
             println!("🚀 Loading model: {}", model);
             let mut runtime = Runtime::load(model).expect("Failed to load model");
+            let initial_synapses = runtime.model.synapses.len();
 
             if let Some(text) = input {
                 println!("📝 Input: '{}'", text);
-                let mut text_mod = SpikingTextModule::new(5000, 256);
-                let tokens = text_mod.tokenize(text);
-                for token in tokens {
-                    let pattern = text_mod.encode(token, 10);
-                    let mut inputs = vec![0; runtime.model.neurons.len()];
-                    for (i, &spiked) in pattern.iter().enumerate() {
-                        if spiked { inputs[i] = 1000; }
+
+                #[cfg(feature = "text")]
+                {
+                    // Encapsulate everything text-related to avoid borrow conflicts
+                    let tokens = {
+                        let mut text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
+                        text_mod.tokenize(text)
+                    };
+
+                    for token in tokens {
+                        let mut inputs = vec![0; runtime.model.neurons.len()];
+                        {
+                            let text_mod = SpikingTextModule::new(&mut runtime.model.vocabulary);
+                            // Adjust encoding to use a significant portion of the network
+                            let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
+                            let pattern = text_mod.encode(token, pattern_len);
+                            for (i, &spiked) in pattern.iter().enumerate() {
+                                if spiked { inputs[i] = 1000; }
+                            }
+                        }
+
+                        let spikes = runtime.tick(&inputs);
+                        println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
                     }
-                    let spikes = runtime.tick(&inputs);
-                    let spike_count = spikes.iter().filter(|&&s| s).count();
-                    println!("   Token {}: Generated {} spikes", token, spike_count);
+                }
+                #[cfg(not(feature = "text"))]
+                {
+                    println!("❌ Text processing is disabled. Compile with 'text' feature to use it.");
                 }
             } else {
-                println!("🕒 No input. Ticking idle...");
-                for i in 0..5 {
-                    let spikes = runtime.tick(&[]);
-                    println!("   Tick {}: {} spikes", i, spikes.iter().filter(|&&s| s).count());
-                }
+                println!("🕒 Idle run (100 ticks)...");
+                for _ in 0..100 { runtime.tick(&[]); }
             }
+
+            let final_synapses = runtime.model.synapses.len();
             println!("✨ Simulation finished.");
+            println!("   Structural Evolution: {} -> {} synapses", initial_synapses, final_synapses);
+
+            runtime.model.save(model).expect("Failed to auto-save model after run");
+            println!("💾 Model state and vocabulary saved to {}.", model);
         }
     }
 }
