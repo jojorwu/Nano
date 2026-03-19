@@ -24,6 +24,7 @@ pub enum ModuleConfig {
     TextProcessor { vocab_size: usize },
     Vision { resolution: (u32, u32) },
     AudioProcessor { sample_rate: u32 },
+    RobotControl { num_motors: usize },
 }
 
 impl ModelBlueprint {
@@ -44,6 +45,8 @@ impl ModelBlueprint {
         let mut has_text = false;
         let mut has_vision = false;
         let mut has_audio = false;
+        let mut has_robotics = false;
+        let mut has_fusion = false;
 
         for module in &self.modules {
             match module {
@@ -58,7 +61,13 @@ impl ModelBlueprint {
                 ModuleConfig::TextProcessor { .. } => has_text = true,
                 ModuleConfig::Vision { .. } => has_vision = true,
                 ModuleConfig::AudioProcessor { .. } => has_audio = true,
+                ModuleConfig::RobotControl { .. } => has_robotics = true,
             }
+        }
+
+        // Logic for auto-enabling fusion if multiple modalities are present
+        if (has_text as usize + has_vision as usize + has_audio as usize) > 1 {
+            has_fusion = true;
         }
 
         BakedModel {
@@ -71,6 +80,8 @@ impl ModelBlueprint {
             has_text,
             has_vision,
             has_audio,
+            has_robotics,
+            has_fusion,
             vocabulary: HashMap::new()
         }
     }

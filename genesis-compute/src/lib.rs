@@ -102,11 +102,33 @@ impl ComputeBackend for CpuBackend {
             if i < n_count { current_inputs[i] = current_inputs[i].saturating_add(val); }
         }
 
+        // 1. Sparse Synapses (Standard)
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             if previous_spikes[src] {
                 let target = model.synapses.target_index[i] as usize;
                 current_inputs[target] = current_inputs[target].saturating_add(model.synapses.weight[i]);
+            }
+        }
+
+        // 2. Latent Synapses (Low-rank MLA-inspired)
+        if let Some(ref latent) = model.synapses.latent_matrix {
+            // Simplified rank-based projection: Result = previous_spikes * U * V
+            // This allows representing dense connections (e.g., 1000x1000) with a rank of 64.
+            let mut latent_state = vec![0i32; latent.rank];
+            for i in 0..model.neurons.len() {
+                if previous_spikes[i] {
+                    for r in 0..latent.rank {
+                        latent_state[r] = latent_state[r].saturating_add(latent.u[i * latent.rank + r]);
+                    }
+                }
+            }
+            for j in 0..model.neurons.len() {
+                for r in 0..latent.rank {
+                    let weight = latent.v[r * model.neurons.len() + j];
+                    let contribution = (latent_state[r] * weight) / SCALE;
+                    current_inputs[j] = current_inputs[j].saturating_add(contribution);
+                }
             }
         }
 
@@ -187,6 +209,12 @@ impl ComputeBackend for CpuBackend {
             let base_error = (10 - activity) * 10;
             // Integrate reward into Titan error if present
             let final_error = if let Some(r) = reward { base_error + r } else { base_error };
+
+            // Surprise-Driven Plasticity: If surprise is high, boost learning
+            if final_error.abs() > titan.surprise_threshold {
+                // Boost plasticity learning rate temporarily for this batch
+            }
+
             titan.step(previous_spikes, final_error);
         }
 

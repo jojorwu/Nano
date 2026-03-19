@@ -8,6 +8,7 @@ pub mod vision;
 pub mod audio;
 #[cfg(feature = "rl")]
 pub mod rl;
+pub mod fusion;
 
 pub mod plasticity;
 
@@ -135,6 +136,8 @@ pub struct BakedModel {
     pub has_text: bool,
     pub has_vision: bool,
     pub has_audio: bool,
+    pub has_robotics: bool,
+    pub has_fusion: bool,
     pub vocabulary: HashMap<String, usize>,
 }
 

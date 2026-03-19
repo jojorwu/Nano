@@ -49,6 +49,8 @@ async fn main() {
             let mut runtime = Runtime::load(model).expect("Failed to load model");
             let initial_synapses = runtime.model.synapses.len();
 
+            let mut combined_inputs = vec![0; runtime.model.neurons.len()];
+
             if let Some(text) = input {
                 println!("📝 Text Input: '{}' (Mode: {})", text, if *byte_level { "Byte-Level" } else { "Word-Based" });
                 #[cfg(feature = "text")]
@@ -58,16 +60,16 @@ async fn main() {
                         let pattern_len = (runtime.model.neurons.len() / 4).min(256).max(10);
                         let patterns = ByteSpikingModule::encode_text(text, pattern_len);
                         for (i, pattern) in patterns.iter().enumerate() {
-                            let mut inputs = vec![0; runtime.model.neurons.len()];
+                            // Merge into combined
                             for (j, &spiked) in pattern.iter().enumerate() {
-                                if spiked { inputs[j] = 1000; }
+                                if spiked { combined_inputs[j] = 1000; }
                             }
-                            let mut spikes = runtime.tick(&inputs);
+                            let mut byte_spikes = runtime.tick(&combined_inputs);
                             // Reasoning Mode: Internal thinking ticks
                             for _ in 0..*reasoning {
-                                spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
+                                byte_spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
                             }
-                            println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, spikes.iter().filter(|&&s| s).count());
+                            println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, byte_spikes.iter().filter(|&&s| s).count());
                         }
                     } else {
                         let tokens = {
@@ -84,12 +86,12 @@ async fn main() {
                                     if spiked { inputs[i] = 1000; }
                                 }
                             }
-                            let mut spikes = runtime.tick(&inputs);
+                            let mut spikes_res = runtime.tick(&inputs);
                             // Reasoning Mode
                             for _ in 0..*reasoning {
-                                spikes = runtime.tick(&vec![0; runtime.model.neurons.len()]);
+                                spikes_res = runtime.tick(&vec![0; runtime.model.neurons.len()]);
                             }
-                            println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
+                            println!("   Token {}: Generated {} spikes", token, spikes_res.iter().filter(|&&s| s).count());
                         }
                     }
                 }
@@ -108,11 +110,10 @@ async fn main() {
                 let vision_mod = SpikingVisionModule::new(w, h);
                 let gray = img.to_luma8();
                 let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
-                let mut inputs = vec![0; runtime.model.neurons.len()];
                 for (i, &pot) in pixel_potentials.iter().enumerate() {
-                    if i < inputs.len() { inputs[i] = pot; }
+                    if i < combined_inputs.len() { combined_inputs[i] = pot; }
                 }
-                let spikes = runtime.tick(&inputs);
+                let spikes = runtime.tick(&combined_inputs);
                 println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
             }
 

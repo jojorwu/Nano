@@ -15,6 +15,12 @@ pub struct Runtime {
     pub tick_counter: u64,
     pub spikes_history: Vec<Vec<bool>>,
     pub network_manager: Option<NetworkManager>,
+    pub observer: Observer,
+}
+
+pub struct Observer {
+    pub max_spikes_per_tick: usize,
+    pub total_energy_consumed: u64,
 }
 
 pub struct NetworkManager {
@@ -40,13 +46,23 @@ impl Runtime {
             tick_counter: 0,
             spikes_history: Vec::new(),
             network_manager: None,
+            observer: Observer { max_spikes_per_tick: n_count / 2, total_energy_consumed: 0 },
         })
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         self.tick_counter += 1;
         // 1. Day Phase: Inference
-        let current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
+        let mut current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
+
+        // Observer: Spike Storm Protection
+        let spike_count = current_spikes.iter().filter(|&&s| s).count();
+        if spike_count > self.observer.max_spikes_per_tick {
+            // Activity capping
+            for i in 0..current_spikes.len() { current_spikes[i] = false; }
+        }
+
+        self.observer.total_energy_consumed += spike_count as u64;
 
         self.spikes_history.push(current_spikes.clone());
 

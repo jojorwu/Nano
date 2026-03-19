@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::Runtime;
+    use crate::{Runtime, Observer};
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
@@ -21,6 +21,8 @@ mod tests {
             has_text: false,
             has_vision: false,
             has_audio: false,
+            has_robotics: false,
+            has_fusion: false,
             vocabulary: HashMap::new(),
         };
         model.neurons.threshold[1] = 1000;
@@ -32,6 +34,7 @@ mod tests {
             tick_counter: 0,
             spikes_history: Vec::new(),
             network_manager: None,
+            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
         };
         runtime.previous_spikes[0] = true;
 
@@ -55,6 +58,8 @@ mod tests {
             has_text: false,
             has_vision: false,
             has_audio: false,
+            has_robotics: false,
+            has_fusion: false,
             vocabulary: HashMap::new(),
         };
 
@@ -65,6 +70,7 @@ mod tests {
             tick_counter: 99,
             spikes_history: Vec::new(),
             network_manager: None,
+            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
         };
 
         runtime.tick(&[0, 0]);
