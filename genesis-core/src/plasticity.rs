@@ -63,6 +63,29 @@ pub fn prune_synapses(synapses: &mut SynapsesSoA, threshold: IValue) -> usize {
     pruned
 }
 
+pub struct EvolutionaryOptimizer {
+    pub mutation_rate: f32,
+}
+
+impl EvolutionaryOptimizer {
+    pub fn new(mutation_rate: f32) -> Self {
+        Self { mutation_rate }
+    }
+
+    /// Perform structural mutations based on reward and activity.
+    pub fn mutate(&self, synapses: &mut SynapsesSoA, _neuron_count: usize, reward: IValue) {
+        if reward < 0 {
+            // High negative reward -> increase pruning or mutate randomly
+            let prune_count = (synapses.len() as f32 * self.mutation_rate) as usize;
+            for _ in 0..prune_count {
+                if synapses.len() > 0 {
+                    synapses.remove(0); // Simple mutation: remove oldest connections
+                }
+            }
+        }
+    }
+}
+
 pub fn grow_synapse(
     synapses: &mut SynapsesSoA,
     source: u32,

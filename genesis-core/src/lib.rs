@@ -57,6 +57,8 @@ pub struct NeuronsSoA {
     pub decay: Vec<IValue>,
     pub refractory_timer: Vec<i32>,
     pub last_spike_tick: Vec<u64>,
+    pub update_interval: Vec<u32>, // Sub-tick precision: 1 = every tick, 10 = every 10 ticks
+    pub next_update_tick: Vec<u64>,
 }
 
 impl NeuronsSoA {
@@ -67,6 +69,8 @@ impl NeuronsSoA {
             decay: vec![50; size],
             refractory_timer: vec![0; size],
             last_spike_tick: vec![0; size],
+            update_interval: vec![1; size],
+            next_update_tick: vec![0; size],
         }
     }
     pub fn len(&self) -> usize {

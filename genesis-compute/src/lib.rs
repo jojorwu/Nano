@@ -10,6 +10,7 @@ pub trait ComputeBackend {
 pub struct CpuBackend {
     pub structural_config: StructuralPlasticityConfig,
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
+    pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
 }
 
 impl Default for CpuBackend {
@@ -17,6 +18,7 @@ impl Default for CpuBackend {
         Self {
             structural_config: StructuralPlasticityConfig::default(),
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
+            optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
         }
     }
 }
@@ -25,6 +27,7 @@ impl Default for CpuBackend {
 pub struct WgpuBackend {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    pub potential_pipeline: wgpu::ComputePipeline,
 }
 
 #[cfg(feature = "wgpu")]
@@ -33,7 +36,20 @@ impl WgpuBackend {
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("Failed to find wgpu adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).expect("Failed to create wgpu device");
-        Self { device, queue }
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SNN Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/potential_update.wgsl"))),
+        });
+
+        let potential_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Potential Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: "main",
+        });
+
+        Self { device, queue, potential_pipeline }
     }
 }
 
@@ -103,14 +119,21 @@ impl ComputeBackend for CpuBackend {
 
         let mut new_spikes = vec![false; n_count];
         for i in 0..n_count {
+            // Asynchronous Kernel: Skip if it's not time for this neuron to update
+            if current_tick < model.neurons.next_update_tick[i] {
+                continue;
+            }
+
             if model.neurons.refractory_timer[i] > 0 {
                 model.neurons.refractory_timer[i] -= 1;
                 model.neurons.potential[i] = 0;
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
                 continue;
             }
 
             // Event-Driven: Only update if there's input or existing potential
             if current_inputs[i] == 0 && model.neurons.potential[i] == 0 {
+                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
                 continue;
             }
 
@@ -124,6 +147,9 @@ impl ComputeBackend for CpuBackend {
                 new_spikes[i] = true;
                 model.neurons.last_spike_tick[i] = current_tick;
             }
+
+            // Schedule next update
+            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i] as u64;
         }
 
         new_spikes
@@ -172,6 +198,11 @@ impl ComputeBackend for CpuBackend {
                     }
                 }
             }
+        }
+
+        // SNNaS: Evolutionary mutation based on reward
+        if let Some(r) = reward {
+            self.optimizer.mutate(&mut model.synapses, model.neurons.len(), r);
         }
     }
 }

@@ -1,5 +1,12 @@
 use genesis_core::BakedModel;
 use genesis_compute::{ComputeBackend, CpuBackend};
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SpikePacket {
+    pub tick: u64,
+    pub active_indices: Vec<usize>,
+}
 
 pub struct Runtime {
     pub model: BakedModel,
