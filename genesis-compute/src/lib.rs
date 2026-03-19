@@ -44,7 +44,7 @@ impl ComputeBackend for WgpuBackend {
         // GPU kernels will be implemented in WGSL in next steps
         vec![]
     }
-    fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64) {
+    fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64, _reward: Option<IValue>) {
         // GPU-based structural plasticity
     }
 }

@@ -32,9 +32,15 @@ impl Runtime {
         // 2. Night Phase: Learning (every 100 ticks)
         if self.tick_counter % 100 == 0 {
             // Replay history for learning
-            let mut prev = vec![false; self.model.neurons.len()];
+            let mut prev = self.previous_spikes.clone(); // Correct batch boundary
             for (i, current) in self.spikes_history.iter().enumerate() {
                 let tick = self.tick_counter - (self.spikes_history.len() as u64) + (i as u64) + 1;
+
+                // Update neuron last_spike_tick for the replayed tick
+                for (n_idx, &spiked) in current.iter().enumerate() {
+                    if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
+                }
+
                 self.backend.night_phase(&mut self.model, &prev, current, tick, reward);
                 prev = current.clone();
             }
