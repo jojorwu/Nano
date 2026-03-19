@@ -16,6 +16,7 @@ pub struct Runtime {
     pub spikes_history: Vec<Vec<bool>>,
     pub network_manager: Option<NetworkManager>,
     pub observer: Observer,
+    pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 pub struct Observer {
@@ -40,6 +41,19 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
+    pub async fn listen(port: u16, queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>) {
+        use tokio::net::UdpSocket;
+        if let Ok(socket) = UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
+            let mut buf = [0u8; 65535];
+            while let Ok((len, _)) = socket.recv_from(&mut buf).await {
+                if let Ok(packet) = serde_json::from_slice::<SpikePacket>(&buf[..len]) {
+                    let mut q = queue.lock().unwrap();
+                    q.extend(packet.active_indices);
+                }
+            }
+        }
+    }
+
     pub async fn broadcast_spikes(&self, packet: SpikePacket) {
         use tokio::net::UdpSocket;
 
@@ -63,13 +77,26 @@ impl Runtime {
             spikes_history: Vec::new(),
             network_manager: None,
             observer: Observer { max_spikes_per_tick: n_count / 2, total_energy_consumed: 0 },
+            remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         self.tick_counter += 1;
+
+        let mut merged_inputs = external_inputs.to_vec();
+        {
+            let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
+            for &idx in remote_spikes.iter() {
+                if idx < merged_inputs.len() {
+                    merged_inputs[idx] = merged_inputs[idx].saturating_add(1000);
+                }
+            }
+            remote_spikes.clear();
+        }
+
         // 1. Day Phase: Inference
-        let mut current_spikes = self.backend.day_phase(&mut self.model, external_inputs, &self.previous_spikes, self.tick_counter);
+        let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, self.tick_counter);
 
         self.observer.process_spikes(&mut current_spikes);
 

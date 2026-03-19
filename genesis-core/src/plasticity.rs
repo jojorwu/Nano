@@ -82,13 +82,24 @@ impl EvolutionaryOptimizer {
     }
 
     /// Perform structural mutations based on reward and activity.
-    pub fn mutate(&self, synapses: &mut SynapsesSoA, _neuron_count: usize, reward: IValue) {
+    pub fn mutate(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue) {
         if reward < 0 {
             // High negative reward -> increase pruning or mutate randomly
             let prune_count = (synapses.len() as f32 * self.mutation_rate) as usize;
             for _ in 0..prune_count {
                 if synapses.len() > 0 {
                     synapses.remove(0); // Simple mutation: remove oldest connections
+                }
+            }
+        } else if reward > 50 {
+            // High positive reward -> Grow new synapses between random neurons
+            // This is a simplified "Exploratory Growth" mutation
+            let grow_count = (neuron_count as f32 * self.mutation_rate).max(1.0) as usize;
+            for _ in 0..grow_count {
+                let src = reward as u32 % neuron_count as u32;
+                let target = (reward as u32 + 1) % neuron_count as u32;
+                if src != target {
+                    synapses.push(src, target, 100);
                 }
             }
         }

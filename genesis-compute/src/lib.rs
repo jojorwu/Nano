@@ -71,8 +71,24 @@ impl WgpuBackend {
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _current_tick: u64) -> Vec<bool> {
-        // Implementation of buffer sync and kernel dispatch
+    fn day_phase(&mut self, model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], current_tick: u64) -> Vec<bool> {
+        use wgpu::util::DeviceExt;
+
+        // Finalize v3.4 WGPU Sync: Upload scheduling buffers
+        let _next_update_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Next Update Tick Buffer"),
+            contents: bytemuck::cast_slice(&model.neurons.next_update_tick),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let _interval_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Update Interval Buffer"),
+            contents: bytemuck::cast_slice(&model.neurons.update_interval),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Kernel dispatch with current_tick as push constant or uniform would go here
+
         vec![false; model.neurons.len()]
     }
     fn night_phase(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u64, _reward: Option<IValue>) {
@@ -254,6 +270,17 @@ impl ComputeBackend for CpuBackend {
         // SNNaS: Evolutionary mutation based on reward
         if let Some(r) = reward {
             self.optimizer.mutate(&mut model.synapses, model.neurons.len(), r);
+        }
+
+        // Homeostatic Synaptic Scaling:
+        // Scale all weights to maintain global stability if total weight magnitude is too high
+        let total_weight: i64 = model.synapses.weight.iter().map(|&w| w.abs() as i64).sum();
+        let max_total_weight = (model.neurons.len() as i64) * 1000 * 10; // Target avg 1.0 weight per neuron x 10
+        if total_weight > max_total_weight {
+            let scale_factor = (max_total_weight * 1000) / total_weight;
+            for w in model.synapses.weight.iter_mut() {
+                *w = ((*w as i64 * scale_factor) / 1000) as i32;
+            }
         }
     }
 }

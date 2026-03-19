@@ -4,6 +4,7 @@ mod tests {
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_runtime_synapse_propagation() {
@@ -36,6 +37,7 @@ mod tests {
             spikes_history: Vec::new(),
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
+            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
         };
         runtime.previous_spikes[0] = true;
 
@@ -73,6 +75,7 @@ mod tests {
             spikes_history: Vec::new(),
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
+            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
         };
 
         runtime.tick(&[0, 0]);
