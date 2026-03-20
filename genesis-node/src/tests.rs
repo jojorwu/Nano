@@ -27,7 +27,7 @@ mod tests {
             has_fusion: false,
             vocabulary: HashMap::new(),
         };
-        model.neurons.threshold[1] = 1000;
+        model.neurons.threshold[1] = genesis_core::SCALE;
 
         let mut runtime = Runtime {
             model,

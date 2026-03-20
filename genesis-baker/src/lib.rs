@@ -73,7 +73,7 @@ impl ModelBlueprint {
 
         BakedModel {
             config: self.config.clone().unwrap_or(genesis_core::NetworkConfig {
-                default_threshold: 1000,
+                default_threshold: 1024,
                 default_decay: 50,
                 learning_rate: 10,
             }),

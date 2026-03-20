@@ -17,7 +17,8 @@ impl crate::PlasticityRule for StdpRule {
     fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
         // R-STDP: Reward modulates the base temporal update
         if pre_spiked && post_spiked {
-            let delta = (self.a_plus * reward * self.reward_scale) / 1000000;
+            // (a * reward * scale) >> 20
+            let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64) >> 20) as i32;
             *weight = weight.saturating_add(delta);
         }
     }
@@ -91,11 +92,12 @@ impl EvolutionaryOptimizer {
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
             let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
+            use rand::RngExt;
+            let mut rng = rand::rng();
             for _ in 0..prune_count {
                 if synapses.len() > 0 {
-                    // Simple mutation: remove a random connection for exploration
-                    // Use swap_remove via our helper
-                    let idx = (reward.abs() as usize) % synapses.len();
+                    // Evolutionary Pruning: Remove synapses that are weak or randomly for exploration.
+                    let idx = rng.random_range(0..synapses.len());
                     synapses.remove(idx);
                 }
             }
@@ -177,16 +179,16 @@ mod tests {
     #[test]
     fn test_stdp() {
         use crate::PlasticityRule;
-        let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100, reward_scale: 1000 };
-        let mut weight = 1000;
+        let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100, reward_scale: 1024 };
+        let mut weight = 1024;
 
         // LTP: pre=5, post=8 (diff=3)
         stdp.update_temporal(&mut weight, 5, 8, 10);
-        assert!(weight > 1000);
+        assert!(weight > 1024);
 
         // LTD: pre=8, post=5 (diff=-3)
-        let mut weight2 = 1000;
+        let mut weight2 = 1024;
         stdp.update_temporal(&mut weight2, 8, 5, 10);
-        assert!(weight2 < 1000);
+        assert!(weight2 < 1024);
     }
 }

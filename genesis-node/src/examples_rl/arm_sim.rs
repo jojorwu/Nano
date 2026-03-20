@@ -20,7 +20,7 @@ impl Environment for RobotArmEnv {
     fn reset(&mut self) -> Vec<IValue> {
         self.joint_angle = 0.0;
         self.velocity = 0.0;
-        vec![(self.joint_angle * 1000.0) as IValue, (self.target_angle * 1000.0) as IValue]
+        vec![(self.joint_angle * 1024.0) as IValue, (self.target_angle * 1024.0) as IValue]
     }
 
     fn step(&mut self, actions: &[bool]) -> (Vec<IValue>, IValue, bool) {
@@ -33,7 +33,7 @@ impl Environment for RobotArmEnv {
         let done = error > 2.0;
 
         (
-            vec![(self.joint_angle * 1000.0) as IValue, (self.target_angle * 1000.0) as IValue],
+            vec![(self.joint_angle * 1024.0) as IValue, (self.target_angle * 1024.0) as IValue],
             reward,
             done
         )

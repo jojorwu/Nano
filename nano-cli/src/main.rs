@@ -57,7 +57,7 @@ impl SimulationSession {
                 let patterns = ByteSpikingModule::encode_text(text, pattern_len);
                 for (i, pattern) in patterns.iter().enumerate() {
                     for (j, &spiked) in pattern.iter().enumerate() {
-                        if spiked { combined_inputs[j] = 1000; }
+                        if spiked { combined_inputs[j] = 1024; }
                     }
                     let mut spikes = self.runtime.tick(&combined_inputs);
                     for _ in 0..reasoning {
@@ -76,7 +76,7 @@ impl SimulationSession {
                     let text_mod = SpikingTextModule::new(&mut self.runtime.model.vocabulary);
                     let pattern = text_mod.encode(token, pattern_len);
                     for (i, &spiked) in pattern.iter().enumerate() {
-                        if spiked { inputs[i] = 1000; }
+                        if spiked { inputs[i] = 1024; }
                     }
                     let mut spikes = self.runtime.tick(&inputs);
                     for _ in 0..reasoning {

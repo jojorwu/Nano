@@ -12,6 +12,7 @@ pub struct SpikePacket {
 pub enum SpikeData {
     Sparse(Vec<usize>),
     Dense(Vec<u8>), // Bitmask
+    Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
 }
 
 pub struct Runtime {
@@ -19,7 +20,7 @@ pub struct Runtime {
     pub backend: Box<dyn ComputeBackend + Send + Sync>,
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u32,
-    pub spikes_history: Vec<Vec<bool>>,
+    pub spikes_history: Vec<Vec<u32>>, // Sparse: only active indices
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
     pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
@@ -76,6 +77,14 @@ impl NetworkManager {
                                 }
                             }
                         }
+                        SpikeData::Compressed(data) => {
+                            // Bit-packed Elias-Fano inspired decompression
+                            // (Simplified for placeholder: treat as indices)
+                            for chunk in data.chunks_exact(4) {
+                                let idx = u32::from_le_bytes(chunk.try_into().unwrap());
+                                q.push(idx as usize);
+                            }
+                        }
                     }
                 }
             }
@@ -116,7 +125,7 @@ impl Runtime {
             let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
             for &idx in remote_spikes.iter() {
                 if idx < merged_inputs.len() {
-                    merged_inputs[idx] = merged_inputs[idx].saturating_add(1000);
+                    merged_inputs[idx] = merged_inputs[idx].saturating_add(1024);
                 }
             }
             remote_spikes.clear();
@@ -129,21 +138,34 @@ impl Runtime {
         self.observer.process_spikes(&mut current_spikes);
         self.telemetry.spike_counts.push(spike_count);
 
-        self.spikes_history.push(current_spikes.clone());
+        let sparse_spikes: Vec<u32> = current_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s)
+            .map(|(i, _)| i as u32)
+            .collect();
+        self.spikes_history.push(sparse_spikes);
 
         // 2. Night Phase: Learning (every 100 ticks)
         if self.tick_counter % 100 == 0 {
             // Replay history for learning
-            let mut prev = self.previous_spikes.clone(); // Correct batch boundary
-            for (i, current) in self.spikes_history.iter().enumerate() {
-                let tick = self.tick_counter - (self.spikes_history.len() as u32) + (i as u32) + 1;
+            let mut prev = self.previous_spikes.clone();
+            let n_count = self.model.neurons.len();
+
+            // Reconstruct full boolean history for Correlational Growth
+            let full_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|sparse| {
+                let mut vec = vec![false; n_count];
+                for &idx in sparse { if (idx as usize) < n_count { vec[idx as usize] = true; } }
+                vec
+            }).collect();
+
+            for (i, current) in full_history.iter().enumerate() {
+                let tick = self.tick_counter - (full_history.len() as u32) + (i as u32) + 1;
 
                 // Update neuron last_spike_tick for the replayed tick
                 for (n_idx, &spiked) in current.iter().enumerate() {
                     if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
                 }
 
-                self.backend.night_phase(&mut self.model, &prev, current, tick, reward, &self.spikes_history);
+                self.backend.night_phase(&mut self.model, &prev, current, tick, reward, &full_history);
                 prev = current.clone();
             }
             self.spikes_history.clear();

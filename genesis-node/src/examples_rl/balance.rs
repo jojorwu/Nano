@@ -21,7 +21,7 @@ impl Environment for SimpleBalanceEnv {
         self.angle = 0.01;
         self.velocity = 0.0;
         self.steps = 0;
-        vec![(self.angle * 1000.0) as IValue, (self.velocity * 1000.0) as IValue]
+        vec![(self.angle * 1024.0) as IValue, (self.velocity * 1024.0) as IValue]
     }
 
     fn step(&mut self, actions: &[bool]) -> (Vec<IValue>, IValue, bool) {
@@ -34,7 +34,7 @@ impl Environment for SimpleBalanceEnv {
         let done = self.angle.abs() > 0.5 || self.steps > 500;
 
         (
-            vec![(self.angle * 1000.0) as IValue, (self.velocity * 1000.0) as IValue],
+            vec![(self.angle * 1024.0) as IValue, (self.velocity * 1024.0) as IValue],
             reward,
             done
         )

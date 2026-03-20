@@ -43,6 +43,9 @@ pub struct WgpuBackend {
     pub next_update_buffer: Option<wgpu::Buffer>,
     pub interval_buffer: Option<wgpu::Buffer>,
     pub gate_buffer: Option<wgpu::Buffer>,
+    pub distal_buffer: Option<wgpu::Buffer>,
+    pub proximal_buffer: Option<wgpu::Buffer>,
+    pub base_threshold_buffer: Option<wgpu::Buffer>,
     pub tick_buffer: Option<wgpu::Buffer>,
     pub staging_spikes: Option<wgpu::Buffer>,
     pub staging_state: Option<wgpu::Buffer>,
@@ -80,6 +83,9 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -115,7 +121,7 @@ impl WgpuBackend {
             device, queue, potential_pipeline, propagation_pipeline, bind_group_layout, tick_layout,
             pot_buffer: None, threshold_buffer: None, decay_buffer: None, refractory_buffer: None,
             spikes_buffer: None, input_buffer: None, next_update_buffer: None, interval_buffer: None,
-            gate_buffer: None, tick_buffer: None, staging_spikes: None, staging_state: None,
+            gate_buffer: None, distal_buffer: None, proximal_buffer: None, base_threshold_buffer: None, tick_buffer: None, staging_spikes: None, staging_state: None,
             bind_group: None, tick_bind_group: None, cached_neuron_count: 0
         }
     }
@@ -178,6 +184,21 @@ impl ComputeBackend for WgpuBackend {
                 contents: bytemuck::cast_slice(&model.neurons.dendritic_gate),
                 usage: wgpu::BufferUsages::STORAGE,
             }));
+            self.distal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Distal Potentials"),
+                contents: bytemuck::cast_slice(&model.neurons.distal_potential),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }));
+            self.proximal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Proximal Potentials"),
+                contents: bytemuck::cast_slice(&model.neurons.proximal_potential),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }));
+            self.base_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Base Thresholds"),
+                contents: bytemuck::cast_slice(&model.neurons.base_threshold),
+                usage: wgpu::BufferUsages::STORAGE,
+            }));
             self.tick_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Tick Uniform"),
                 size: 4,
@@ -210,6 +231,9 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 6, resource: self.next_update_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 7, resource: self.interval_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 8, resource: self.gate_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: self.distal_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: self.proximal_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 11, resource: self.base_threshold_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -225,6 +249,8 @@ impl ComputeBackend for WgpuBackend {
         // 2. Upload inputs and current tick
         self.queue.write_buffer(self.input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(external_inputs));
         self.queue.write_buffer(self.tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[current_tick]));
+        self.queue.write_buffer(self.distal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.distal_potential));
+        self.queue.write_buffer(self.proximal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.proximal_potential));
 
         // 3. Dispatch
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -314,10 +340,10 @@ impl CpuBackend {
             let src = model.synapses.source_index[i] as usize;
             if previous_spikes[src] {
                 let target = model.synapses.target_index[i] as usize;
-                // Apply dendritic gate: w * gate / 1000
+                // Apply dendritic gate: w * gate >> 10
                 let raw_weight = model.synapses.weight[i];
                 let gate = model.neurons.dendritic_gate[target];
-                let gated_weight = (raw_weight as i64 * gate as i64 / 1000) as i32;
+                let gated_weight = ((raw_weight as i64 * gate as i64) >> 10) as i32;
                 current_inputs[target] = current_inputs[target].saturating_add(gated_weight);
             }
         }
@@ -337,7 +363,8 @@ impl CpuBackend {
                 let gate = model.neurons.dendritic_gate[j];
                 for r in 0..latent.rank {
                     let weight = latent.v[r * model.neurons.len() + j];
-                    let contribution = (latent_state[r] as i64 * weight as i64 * gate as i64 / (SCALE as i64 * 1000)) as i32;
+                    // (state * weight * gate) >> 20
+                    let contribution = ((latent_state[r] as i64 * weight as i64 * gate as i64) >> 20) as i32;
                     current_inputs[j] = current_inputs[j].saturating_add(contribution);
                 }
             }
@@ -361,11 +388,20 @@ impl CpuBackend {
                 continue;
             }
 
-            model.neurons.potential[i] = model.neurons.potential[i].saturating_add(current_inputs[i]);
+            // Multi-compartment integration:
+            // Proximal (soma) vs Distal (dendrite) interaction
+            let proximal = model.neurons.proximal_potential[i];
+            let distal = model.neurons.distal_potential[i];
+
+            // Dendritic Coincidence detection: Distal spikes only if proximal is high
+            let dend_factor = if proximal > 500 { distal } else { distal / 4 };
+            let total_input = current_inputs[i].saturating_add(proximal).saturating_add(dend_factor);
+
+            model.neurons.potential[i] = model.neurons.potential[i].saturating_add(total_input);
             let base_decay = model.neurons.decay[i];
-            let liquid_modulation = (current_inputs[i].abs() * 10) / SCALE;
+            let liquid_modulation = (current_inputs[i].abs() * 10) >> 10;
             let final_decay = (base_decay - liquid_modulation).max(1);
-            model.neurons.potential[i] = (model.neurons.potential[i] * (SCALE - final_decay)) / SCALE;
+            model.neurons.potential[i] = (model.neurons.potential[i] as i64 * (SCALE - final_decay) as i64 >> 10) as i32;
 
             if model.neurons.potential[i] >= model.neurons.threshold[i] {
                 model.neurons.potential[i] = 0;
@@ -479,11 +515,11 @@ impl ComputeBackend for CpuBackend {
         // Homeostatic Synaptic Scaling:
         // Scale all weights to maintain global stability if total weight magnitude is too high
         let total_weight: i64 = model.synapses.weight.iter().map(|&w| w.abs() as i64).sum();
-        let max_total_weight = (model.neurons.len() as i64) * 1000 * 10; // Target avg 1.0 weight per neuron x 10
+        let max_total_weight = (model.neurons.len() as i64) << 13; // Target avg ~8.0 weight per neuron
         if total_weight > max_total_weight {
-            let scale_factor = (max_total_weight * 1000) / total_weight;
+            let scale_factor = (max_total_weight << 10) / total_weight;
             for w in model.synapses.weight.iter_mut() {
-                *w = ((*w as i64 * scale_factor) / 1000) as i32;
+                *w = ((*w as i64 * scale_factor) >> 10) as i32;
             }
         }
     }

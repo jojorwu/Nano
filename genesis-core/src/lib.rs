@@ -19,7 +19,7 @@ use std::io::{BufReader, BufWriter};
 use std::collections::HashMap;
 
 pub type IValue = i32;
-pub const SCALE: IValue = 1000;
+pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
@@ -55,11 +55,13 @@ impl PlasticityRule for GsopRule {
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NeuronsSoA {
     pub potential: Vec<IValue>,
+    pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
+    pub proximal_potential: Vec<IValue>, // For somatic inputs
     pub threshold: Vec<IValue>,
     pub base_threshold: Vec<IValue>, // Intrinsic Plasticity
     pub decay: Vec<IValue>,
     pub liquid_current: Vec<IValue>, // For LLIF (Liquid Neurons)
-    pub dendritic_gate: Vec<IValue>, // 1000 = 1.0 (open), 0 = closed
+    pub dendritic_gate: Vec<IValue>, // SCALE = 1.0 (open), 0 = closed
     pub refractory_timer: Vec<i32>,
     pub last_spike_tick: Vec<u32>,
     pub update_interval: Vec<u32>, // Sub-tick precision: 1 = every tick, 10 = every 10 ticks
@@ -70,11 +72,13 @@ impl NeuronsSoA {
     pub fn new(size: usize) -> Self {
         Self {
             potential: vec![0; size],
-            threshold: vec![1000; size],
-            base_threshold: vec![1000; size],
+            distal_potential: vec![0; size],
+            proximal_potential: vec![0; size],
+            threshold: vec![SCALE; size],
+            base_threshold: vec![SCALE; size],
             decay: vec![50; size],
             liquid_current: vec![0; size],
-            dendritic_gate: vec![1000; size],
+            dendritic_gate: vec![SCALE; size],
             refractory_timer: vec![0; size],
             last_spike_tick: vec![0; size],
             update_interval: vec![1; size],
@@ -88,11 +92,13 @@ impl NeuronsSoA {
     pub fn grow(&mut self, additional: usize) {
         let new_size = self.potential.len() + additional;
         self.potential.resize(new_size, 0);
-        self.threshold.resize(new_size, 1000);
-        self.base_threshold.resize(new_size, 1000);
+        self.distal_potential.resize(new_size, 0);
+        self.proximal_potential.resize(new_size, 0);
+        self.threshold.resize(new_size, SCALE);
+        self.base_threshold.resize(new_size, SCALE);
         self.decay.resize(new_size, 50);
         self.liquid_current.resize(new_size, 0);
-        self.dendritic_gate.resize(new_size, 1000);
+        self.dendritic_gate.resize(new_size, SCALE);
         self.refractory_timer.resize(new_size, 0);
         self.last_spike_tick.resize(new_size, 0);
         self.update_interval.resize(new_size, 1);

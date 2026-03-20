@@ -19,7 +19,7 @@ impl TitanMemory {
             learning_rate: lr,
             surprise_threshold: 100,
             moment: vec![0; size],
-            decay_rate: 1, // Default 0.1% decay (1/1000)
+            decay_rate: 1, // Default ~0.1% decay
         }
     }
 
@@ -36,7 +36,7 @@ impl TitanMemory {
         // Apply Weight Decay (Gating) as forgetting mechanism
         if dynamic_decay > 0 {
             for w in self.weights.iter_mut() {
-                let decay = (*w * dynamic_decay) / 1000;
+                let decay = ((*w as i64 * dynamic_decay as i64) >> 10) as i32;
                 *w = w.saturating_sub(decay);
             }
         }
@@ -46,7 +46,7 @@ impl TitanMemory {
                 if spiked && i < self.weights.len() {
                     let grad = error;
                     self.moment[i] = (self.moment[i] * 9 + grad) / 10;
-                    let update = (self.moment[i] * self.learning_rate) / 1000;
+                    let update = ((self.moment[i] as i64 * self.learning_rate as i64) >> 10) as i32;
 
                     self.weights[i] = self.weights[i].saturating_add(update);
 
@@ -81,22 +81,22 @@ mod tests {
     #[test]
     fn test_titan_decay() {
         let mut titan = TitanMemory::new(10, 100);
-        titan.weights[0] = 1000;
-        titan.decay_rate = 100; // 10% decay
+        titan.weights[0] = 1024;
+        titan.decay_rate = 128; // ~12.5% decay
         titan.step(&[false; 10], 0);
-        assert!(titan.weights[0] < 1000);
-        assert_eq!(titan.weights[0], 900);
+        assert!(titan.weights[0] < 1024);
+        assert_eq!(titan.weights[0], 1024 - 128);
     }
 
     #[test]
     fn test_surprise_modulation() {
         let mut titan = TitanMemory::new(10, 100);
-        titan.weights[0] = 1000;
-        titan.decay_rate = 100;
+        titan.weights[0] = 1024;
+        titan.decay_rate = 128;
         titan.surprise_threshold = 50;
 
-        // High surprise (error 100) -> half decay (50)
+        // High surprise (error 100) -> half decay (64)
         titan.step(&[false; 10], 100);
-        assert_eq!(titan.weights[0], 950);
+        assert_eq!(titan.weights[0], 1024 - 64);
     }
 }

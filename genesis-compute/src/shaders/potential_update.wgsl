@@ -6,7 +6,10 @@ struct Neuron {
 }
 
 @group(0) @binding(0) var<storage, read_write> potentials: array<i32>;
+@group(0) @binding(9) var<storage, read> distal_potentials: array<i32>;
+@group(0) @binding(10) var<storage, read> proximal_potentials: array<i32>;
 @group(0) @binding(1) var<storage, read_write> thresholds: array<i32>;
+@group(0) @binding(11) var<storage, read> base_thresholds: array<i32>;
 @group(0) @binding(2) var<storage, read_write> decays: array<i32>;
 @group(0) @binding(3) var<storage, read_write> refractory: array<i32>;
 @group(0) @binding(4) var<storage, read_write> spikes: array<u32>;
@@ -31,15 +34,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    var gated_input = (inputs[i] * dendritic_gate[i]) / 1000;
-    var pot = potentials[i] + gated_input;
+    let proximal = proximal_potentials[i];
+    let distal = distal_potentials[i];
 
-    // LLIF: Liquid Decay
+    var dend_factor = distal / 4;
+    if (proximal > 500) { dend_factor = distal; }
+
+    let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
+    var pot = potentials[i] + gated_input + proximal + dend_factor;
+
+    // LLIF: Liquid Decay (using bit-shifts)
     let base_decay = decays[i];
-    let liquid_mod = (abs(inputs[i]) * 10) / 1000;
+    let liquid_mod = (abs(inputs[i]) * 10) >> 10;
     let final_decay = max(1, base_decay - liquid_mod);
 
-    pot = (pot * (1000 - final_decay)) / 1000;
+    pot = (pot * (1024 - final_decay)) >> 10;
 
     if (pot >= thresholds[i]) {
         potentials[i] = 0;
@@ -50,8 +59,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         potentials[i] = pot;
         spikes[i] = 0;
-        // Threshold decay back to base
-        // (Requires base_thresholds binding)
+        // Threshold decay back to base (Intrinsic Plasticity)
+        if (thresholds[i] > base_thresholds[i]) {
+            thresholds[i] = thresholds[i] - 1;
+        }
     }
 
     next_update[i] = current_tick + intervals[i];
