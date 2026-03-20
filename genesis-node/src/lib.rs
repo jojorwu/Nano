@@ -8,6 +8,48 @@ pub struct SpikePacket {
     pub data: SpikeData,
 }
 
+impl SpikePacket {
+    pub fn compress_indices(indices: &[usize], universe: usize) -> Vec<u8> {
+        let mut bits = Vec::new();
+        let count = indices.len() as u32;
+        bits.extend_from_slice(&count.to_le_bytes());
+
+        let low_bits = if count > 0 { (universe as u32 / count).ilog2().max(1) } else { 1 };
+        bits.push(low_bits as u8);
+
+        let mut bit_buf = 0u8;
+        let mut bit_count = 0;
+        let mut last_high = 0u32;
+
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+
+        for &idx in &sorted {
+            let high = (idx as u32) >> low_bits;
+            let low = (idx as u32) & ((1 << low_bits) - 1);
+
+            // Encode high part (unary)
+            for _ in 0..(high - last_high) {
+                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+                bit_count += 1;
+            }
+            bit_buf |= 1 << bit_count;
+            bit_count += 1;
+            if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+            last_high = high;
+
+            // Encode low part
+            for i in 0..low_bits {
+                if (low >> i) & 1 == 1 { bit_buf |= 1 << bit_count; }
+                bit_count += 1;
+                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+            }
+        }
+        if bit_count > 0 { bits.push(bit_buf); }
+        bits
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SpikeData {
     Sparse(Vec<usize>),
@@ -187,11 +229,16 @@ impl Runtime {
         if let Some(r) = reward { self.telemetry.episode_rewards.push(r); }
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
-        let mut merged_inputs = external_inputs.to_vec();
+        let n_count = self.model.neurons.len();
+        let mut merged_inputs = vec![0; n_count];
+        for (i, &val) in external_inputs.iter().enumerate() {
+            if i < n_count { merged_inputs[i] = val; }
+        }
+
         {
             let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
             for &idx in remote_spikes.iter() {
-                if idx < merged_inputs.len() {
+                if idx < n_count {
                     merged_inputs[idx] = merged_inputs[idx].saturating_add(1024);
                 }
             }
@@ -232,9 +279,10 @@ impl Runtime {
                     if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
                 }
 
-                self.backend.night_phase(&mut self.model, &prev, current, tick, reward, &full_history);
+                self.backend.update_weights(&mut self.model, &prev, current, tick, reward, &full_history);
                 prev = current.clone();
             }
+            self.backend.structural_plasticity(&mut self.model, reward, &full_history);
             self.spikes_history.clear();
         }
 
@@ -249,42 +297,7 @@ impl Runtime {
 
             if !active_indices.is_empty() {
                 let data = if active_indices.len() < current_spikes.len() / 16 {
-                    // Elias-Fano Bit-Packing Encoder
-                    let mut bits = Vec::new();
-                    let count = active_indices.len() as u32;
-                    bits.extend_from_slice(&count.to_le_bytes());
-
-                    let universe = current_spikes.len() as u32;
-                    let low_bits = if count > 0 { (universe / count).ilog2().max(1) } else { 1 };
-                    bits.push(low_bits as u8);
-
-                    let mut bit_buf = 0u8;
-                    let mut bit_count = 0;
-                    let mut last_high = 0u32;
-
-                    for &idx in &active_indices {
-                        let high = (idx as u32) >> low_bits;
-                        let low = (idx as u32) & ((1 << low_bits) - 1);
-
-                        // Encode high part (unary)
-                        for _ in 0..(high - last_high) {
-                            bit_count += 1;
-                            if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-                        }
-                        bit_buf |= 1 << bit_count;
-                        bit_count += 1;
-                        if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-                        last_high = high;
-
-                        // Encode low part
-                        for i in 0..low_bits {
-                            if (low >> i) & 1 == 1 { bit_buf |= 1 << bit_count; }
-                            bit_count += 1;
-                            if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-                        }
-                    }
-                    if bit_count > 0 { bits.push(bit_buf); }
-                    SpikeData::Compressed(bits)
+                    SpikeData::Compressed(SpikePacket::compress_indices(&active_indices, current_spikes.len()))
                 } else if active_indices.len() < current_spikes.len() / 8 {
                     SpikeData::Sparse(active_indices)
                 } else {

@@ -235,6 +235,24 @@ pub struct BakedModel {
     pub vocabulary: HashMap<String, usize>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_neurons_init_and_grow() {
+        let mut neurons = NeuronsSoA::new(10);
+        assert_eq!(neurons.len(), 10);
+        assert_eq!(neurons.dendritic_gate[0], SCALE);
+        assert_eq!(neurons.layer_id[0], 0);
+
+        neurons.grow(5);
+        assert_eq!(neurons.len(), 15);
+        assert_eq!(neurons.dendritic_gate[14], SCALE);
+        assert_eq!(neurons.potential[14], 0);
+    }
+}
+
 impl BakedModel {
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let file = File::create(path)?;

@@ -93,11 +93,11 @@ impl EvolutionaryOptimizer {
             // High negative reward -> Prune weak synapses more aggressively
             let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
             use rand::Rng;
-            let mut rng = rand::rng();
+            let mut rng = rand::thread_rng();
             for _ in 0..prune_count {
                 if synapses.len() > 0 {
                     // Evolutionary Pruning: Remove synapses that are weak or randomly for exploration.
-                    let idx = rng.random_range(0..synapses.len());
+                    let idx = rng.gen_range(0..synapses.len());
                     synapses.remove(idx);
                 }
             }
@@ -190,5 +190,21 @@ mod tests {
         let mut weight2 = 1024;
         stdp.update_temporal(&mut weight2, 8, 5, 10);
         assert!(weight2 < 1024);
+    }
+
+    #[test]
+    fn test_contrastive_learning() {
+        use crate::PlasticityRule;
+        let gsop = crate::GsopRule { learning_rate: 10 };
+        let mut weight = 1000;
+
+        // High correlation should reduce weight
+        gsop.update_contrastive(&mut weight, 600);
+        assert!(weight < 1000);
+
+        let mut weight2 = 1000;
+        // Low correlation should not change weight much
+        gsop.update_contrastive(&mut weight2, 100);
+        assert_eq!(weight2, 1000);
     }
 }

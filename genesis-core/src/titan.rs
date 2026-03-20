@@ -103,4 +103,16 @@ mod tests {
         titan.step(&[false; 10], 100);
         assert_eq!(titan.weights[0], 1024 - 64);
     }
+
+    #[test]
+    fn test_titan_hierarchical_memory() {
+        let mut titan = TitanMemory::new(10, 500); // Higher learning rate
+        // Surprise-driven learning should update both temp and permanent weights
+        titan.step(&[true; 10], 500); // High error
+        assert!(titan.weights[0] != 0);
+        assert!(titan.permanent_weights[0] != 0);
+
+        let retrieved = titan.retrieve(&[true; 10]);
+        assert!(retrieved != 0);
+    }
 }

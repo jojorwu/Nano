@@ -1,9 +1,11 @@
 use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue};
-use genesis_core::plasticity::{prune_synapses, grow_synapse, StructuralPlasticityConfig};
+use genesis_core::plasticity::{prune_synapses, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool>;
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
+    /// Weight updates (fast phase of learning)
+    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
+    fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
     fn sync_state(&mut self, _model: &mut BakedModel) {} // Optional: download state from device
     fn name(&self) -> &'static str;
 }
@@ -35,7 +37,10 @@ pub struct WgpuBackend {
     pub gsop_pipeline: wgpu::ComputePipeline,
     pub latent_accum_pipeline: wgpu::ComputePipeline,
     pub latent_distrib_pipeline: wgpu::ComputePipeline,
-    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub potential_layout: wgpu::BindGroupLayout,
+    pub gsop_layout: wgpu::BindGroupLayout,
+    pub latent_accum_layout: wgpu::BindGroupLayout,
+    pub latent_distrib_layout: wgpu::BindGroupLayout,
     pub tick_layout: wgpu::BindGroupLayout,
     // Cached Buffers
     pub pot_buffer: Option<wgpu::Buffer>,
@@ -103,8 +108,8 @@ impl WgpuBackend {
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/latent_distrib.wgsl"))),
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Neuron Bind Group Layout"),
+        let potential_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Potential Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
@@ -126,6 +131,36 @@ impl WgpuBackend {
             ],
         });
 
+        let gsop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("GSOP Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
+        let latent_accum_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Latent Accum Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
+        let latent_distrib_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Latent Distrib Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
         let tick_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Tick Bind Group Layout"),
             entries: &[
@@ -133,50 +168,75 @@ impl WgpuBackend {
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout, &tick_layout],
+        let potential_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Potential Pipeline Layout"),
+            bind_group_layouts: &[&potential_layout, &tick_layout],
+            push_constant_ranges: &[],
+        });
+
+        let propagation_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Propagation Pipeline Layout"),
+            bind_group_layouts: &[&potential_layout, &tick_layout],
+            push_constant_ranges: &[],
+        });
+
+        let gsop_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("GSOP Pipeline Layout"),
+            bind_group_layouts: &[&gsop_layout, &tick_layout],
+            push_constant_ranges: &[],
+        });
+
+        let latent_accum_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Latent Accum Pipeline Layout"),
+            bind_group_layouts: &[&latent_accum_layout, &tick_layout],
+            push_constant_ranges: &[],
+        });
+
+        let latent_distrib_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Latent Distrib Pipeline Layout"),
+            bind_group_layouts: &[&latent_distrib_layout, &tick_layout],
             push_constant_ranges: &[],
         });
 
         let potential_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Potential Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&potential_p_layout),
             module: &potential_shader,
             entry_point: "main",
         });
 
         let propagation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Propagation Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&propagation_p_layout),
             module: &propagation_shader,
             entry_point: "main",
         });
 
         let gsop_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("GSOP Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&gsop_p_layout),
             module: &gsop_shader,
             entry_point: "main",
         });
 
         let latent_accum_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Latent Accum Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&latent_accum_p_layout),
             module: &latent_accum_shader,
             entry_point: "main",
         });
 
         let latent_distrib_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Latent Distrib Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&latent_distrib_p_layout),
             module: &latent_distrib_shader,
             entry_point: "main",
         });
 
         // Simplified propagation pipeline layout might differ, but for stub it's fine
         Self {
-            device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline, bind_group_layout, tick_layout,
+            device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
+            potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, tick_layout,
             pot_buffer: None, threshold_buffer: None, decay_buffer: None, refractory_buffer: None,
             spikes_buffer: None, input_buffer: None, next_update_buffer: None, interval_buffer: None,
             weight_buffer: None, source_buffer: None, target_buffer: None,
@@ -310,7 +370,7 @@ impl ComputeBackend for WgpuBackend {
 
             // Re-create Bind Group
             self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &self.bind_group_layout,
+                layout: &self.potential_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.pot_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.threshold_buffer.as_ref().unwrap().as_entire_binding() },
@@ -387,7 +447,7 @@ impl ComputeBackend for WgpuBackend {
                 });
 
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &self.bind_group_layout,
+                    layout: &self.latent_accum_layout,
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: self.u_matrix_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 1, resource: accum_spike_buffer.as_entire_binding() },
@@ -425,7 +485,7 @@ impl ComputeBackend for WgpuBackend {
                 label: None, contents: bytemuck::cast_slice(&[latent.rank as u32]), usage: wgpu::BufferUsages::UNIFORM,
             });
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &self.bind_group_layout,
+                layout: &self.latent_distrib_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.v_matrix_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.latent_state_buffer.as_ref().unwrap().as_entire_binding() },
@@ -533,7 +593,10 @@ impl ComputeBackend for WgpuBackend {
         }
     }
 
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>, _history: &[Vec<bool>]) {
+    fn structural_plasticity(&mut self, _model: &mut BakedModel, _reward: Option<IValue>, _history: &[Vec<bool>]) {
+        // GPU structural plasticity logic
+    }
+    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>, _history: &[Vec<bool>]) {
         use wgpu::util::DeviceExt;
         let s_count = model.synapses.len();
         let n_count = model.neurons.len();
@@ -580,7 +643,7 @@ impl ComputeBackend for WgpuBackend {
 
         // 3. Create GSOP Bind Group
         let gsop_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.bind_group_layout,
+            layout: &self.gsop_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.weight_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.source_buffer.as_ref().unwrap().as_entire_binding() },
@@ -618,6 +681,50 @@ impl ComputeBackend for WgpuBackend {
         self.device.poll(wgpu::Maintain::Wait);
 
         // Weight download moved to sync_state to keep weights on GPU during simulation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
+
+    #[test]
+    fn test_cpu_dendritic_gating() {
+        let mut model = BakedModel {
+            version: "3.7".to_string(),
+            config: genesis_core::NetworkConfig::default(),
+            node_id: 0,
+            local_range: (0, 2),
+            neurons: NeuronsSoA::new(2),
+            synapses: {
+                let mut s = SynapsesSoA::with_capacity(1);
+                s.push(0, 1, 2000); // High weight
+                s
+            },
+            #[cfg(feature = "titan")]
+            titan_memory: None,
+            has_text: false,
+            has_vision: false,
+            has_audio: false,
+            has_robotics: false,
+            has_fusion: false,
+            vocabulary: std::collections::HashMap::new(),
+        };
+
+        let mut backend = CpuBackend::default();
+        let prev_spikes = vec![true, false];
+
+        // 1. Open gate (1.0)
+        model.neurons.dendritic_gate[1] = 1024;
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, 1);
+        assert!(spikes[1]); // Should spike
+
+        // 2. Closed gate (0.0)
+        model.neurons.potential[1] = 0;
+        model.neurons.dendritic_gate[1] = 0;
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, 2);
+        assert!(!spikes[1]); // Should not spike
     }
 }
 
@@ -781,7 +888,7 @@ impl ComputeBackend for CpuBackend {
         new_spikes
     }
 
-    fn night_phase(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {
+    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _history: &[Vec<bool>]) {
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             let target = model.synapses.target_index[i] as usize;
@@ -794,13 +901,9 @@ impl ComputeBackend for CpuBackend {
                 self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
             }
 
-            // Temporal update (STDP)
             let pre_tick = model.neurons.last_spike_tick[src] as u64;
             let post_tick = model.neurons.last_spike_tick[target] as u64;
             self.plasticity_rule.update_temporal(&mut model.synapses.weight[i], pre_tick, post_tick, current_tick as u64);
-
-            // Temporal Contrastive Learning (TCL)
-            // (Placeholder: assume some measure of layer correlation)
             self.plasticity_rule.update_contrastive(&mut model.synapses.weight[i], 0);
         }
 
@@ -808,53 +911,23 @@ impl ComputeBackend for CpuBackend {
         if let Some(ref mut titan) = model.titan_memory {
             let activity = current_spikes.iter().filter(|&&s| s).count() as i32;
             let base_error = (10 - activity) * 10;
-            // Integrate reward into Titan error if present
             let final_error = if let Some(r) = reward { base_error + r } else { base_error };
-
-            // Surprise-Driven Plasticity: If surprise is high, boost learning
-            if final_error.abs() > titan.surprise_threshold {
-                log::info!("High surprise detected: {}, boosting learning", final_error);
-            }
-
             titan.step(previous_spikes, final_error);
         }
+    }
 
+    fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
 
-        let active_indices: Vec<usize> = current_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s)
-            .map(|(i, _)| i)
-            .collect();
-
-        if active_indices.len() > 1 && model.synapses.len() < self.structural_config.max_synapses {
-            for &i in active_indices.iter().take(5) {
-                for &j in active_indices.iter().take(5) {
-                    if i != j {
-                        grow_synapse(&mut model.synapses, i as u32, j as u32, 50, &self.structural_config);
-                    }
-                }
-            }
-        }
-
-        // SNNaS: Evolutionary mutation based on reward and activity history
+        // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
             self.optimizer.mutate_with_activity(&mut model.synapses, model.neurons.len(), r, history);
-        }
 
-        // Evolutionary Neurogenesis:
-        // Trigger neuron growth if reward is high and we are below capacity
-        if let Some(r) = reward {
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_synapses {
-                let growth_size = (model.neurons.len() / 20).max(1);
-                model.neurons.grow(growth_size);
-                log::info!("Neurogenesis triggered: +{} neurons", growth_size);
+                model.neurons.grow((model.neurons.len() / 20).max(1));
             }
-        }
 
-        // Metaplasticity:
-        // Adjust global learning rate based on reward stability (placeholder logic)
-        if model.config.metaplasticity_enabled {
-            if let Some(r) = reward {
+            if model.config.metaplasticity_enabled {
                 if r.abs() < 10 {
                     model.config.learning_rate = (model.config.learning_rate as i64 * 900 >> 10) as i32;
                 } else if r.abs() > 500 {
@@ -863,16 +936,14 @@ impl ComputeBackend for CpuBackend {
             }
         }
 
-        // Local Homeostatic Scaling:
-        // Scale weights per-target neuron to prevent individual neurons from becoming too dominant.
+        // Local Homeostatic Scaling
         let n_count = model.neurons.len();
         let mut sum_weights = vec![0i64; n_count];
         for i in 0..model.synapses.len() {
             let target = model.synapses.target_index[i] as usize;
             sum_weights[target] += model.synapses.weight[i].abs() as i64;
         }
-
-        let max_neuron_sum = 1024 * 16; // Target sum of incoming weights ~16.0 per neuron
+        let max_neuron_sum = 1024 * 16;
         for i in 0..model.synapses.len() {
             let target = model.synapses.target_index[i] as usize;
             if sum_weights[target] > max_neuron_sum {
