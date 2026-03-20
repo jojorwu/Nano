@@ -87,7 +87,7 @@ impl ModelBlueprint {
         }
 
         BakedModel {
-            version: "3.7".to_string(),
+            version: "4.0".to_string(),
             config: self.config.clone().unwrap_or_default(),
             node_id: 0,
             local_range: (0, self.architecture.neuron_count),

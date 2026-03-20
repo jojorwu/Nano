@@ -271,8 +271,8 @@ impl BakedModel {
             std::io::Error::new(std::io::ErrorKind::Other, e)
         })?;
 
-        if model.version != "3.7" {
-             log::warn!("Loading model version {} into v3.7 engine. Stability not guaranteed.", model.version);
+        if model.version != "4.0" {
+             log::warn!("Loading model version {} into v4.0 engine. Physics scaling (1024) may differ from older versions.", model.version);
         }
 
         Ok(model)

@@ -593,8 +593,20 @@ impl ComputeBackend for WgpuBackend {
         }
     }
 
-    fn structural_plasticity(&mut self, _model: &mut BakedModel, _reward: Option<IValue>, _history: &[Vec<bool>]) {
-        // GPU structural plasticity logic
+    fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
+        // 1. Sync weights and thresholds back to CPU for structural processing
+        self.sync_state(model);
+
+        // 2. Perform structural plasticity using CPU implementation (re-using logic)
+        let mut cpu_backend = CpuBackend::default();
+        cpu_backend.structural_plasticity(model, reward, history);
+
+        // 3. Reset GPU buffers in next tick (day_phase handles this by checking neuron count)
+        // Resetting to None forces re-allocation and re-upload in the next day_phase
+        self.cached_neuron_count = 0;
+        self.weight_buffer = None;
+        self.pot_buffer = None;
+        log::info!("GPU Structural Plasticity: Weights re-synced and buffers cleared for re-initialization.");
     }
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>, _history: &[Vec<bool>]) {
         use wgpu::util::DeviceExt;
