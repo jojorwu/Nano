@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use serde::{Serialize, Deserialize};
 use std::fs;
 use genesis_baker::ModelBlueprint;
 use genesis_node::Runtime;
@@ -16,6 +17,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Init,
     Bake { #[arg(short, long)] blueprint: String, #[arg(short, long, default_value = "model.state")] output: String },
     Run {
         #[arg(short, long)] model: String,
@@ -33,13 +35,35 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct GlobalConfig {
+    pub simulation: Option<genesis_node::SimulationSettings>,
+    pub network: Option<genesis_core::NetworkConfig>,
+}
+
 struct SimulationSession {
     runtime: Runtime,
 }
 
 impl SimulationSession {
     fn new(model_path: &str, lr_override: Option<i32>) -> Self {
-        let mut runtime = Runtime::load(model_path).expect("Failed to load model");
+        let settings = if let Ok(content) = fs::read_to_string("nano.toml") {
+            let global: GlobalConfig = toml::from_str(&content).unwrap_or_else(|_| GlobalConfig { simulation: None, network: None });
+            global.simulation.unwrap_or_default()
+        } else {
+            genesis_node::SimulationSettings::default()
+        };
+
+        let mut runtime = Runtime::load_with_settings(model_path, settings).expect("Failed to load model");
+
+        if let Ok(content) = fs::read_to_string("nano.toml") {
+             if let Ok(global) = toml::from_str::<GlobalConfig>(&content) {
+                 if let Some(net_cfg) = global.network {
+                     runtime.model.config = net_cfg;
+                 }
+             }
+        }
+
         if let Some(lr) = lr_override {
             runtime.model.config.learning_rate = lr;
         }
@@ -105,6 +129,7 @@ impl SimulationSession {
     }
 
     fn finish(&mut self, path: &str) {
+        self.runtime.sync_state();
         self.runtime.model.save(path).expect("Failed to save model");
         println!("✨ Simulation finished. State saved.");
     }
@@ -115,6 +140,31 @@ async fn main() {
     env_logger::init();
     let cli = Cli::parse();
     match &cli.command {
+        Commands::Init => {
+            let config = r#"[simulation]
+checkpoint_interval = 1000
+night_phase_interval = 100
+save_on_exit = true
+
+[network]
+default_threshold = 1024
+learning_rate = 10
+neurogenesis_reward_threshold = 200
+"#;
+            fs::write("nano.toml", config).expect("Failed to write nano.toml");
+
+            let blueprint = r#"name = "MyFirstNano"
+[architecture]
+neuron_count = 1000
+synapse_count = 5000
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 1000
+"#;
+            fs::write("blueprint.toml", blueprint).expect("Failed to write blueprint.toml");
+            println!("✨ Nano environment initialized. Edit nano.toml and blueprint.toml, then run 'bake'.");
+        }
         Commands::Bake { blueprint, output } => {
             let content = fs::read_to_string(blueprint).expect("Failed to read");
             let bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");

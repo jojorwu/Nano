@@ -9,6 +9,7 @@ mod tests {
     #[test]
     fn test_runtime_synapse_propagation() {
         let mut model = BakedModel {
+            version: "3.7".to_string(),
             config: genesis_core::NetworkConfig::default(),
             node_id: 0,
             local_range: (0, 2),
@@ -31,12 +32,13 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
             tick_counter: 0,
             spikes_history: Vec::new(),
             network_manager: None,
-            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
+            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
             telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
         };
@@ -49,6 +51,7 @@ mod tests {
     #[test]
     fn test_night_phase_pruning() {
         let model = BakedModel {
+            version: "3.7".to_string(),
             config: genesis_core::NetworkConfig::default(),
             node_id: 0,
             local_range: (0, 2),
@@ -70,12 +73,13 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
             tick_counter: 99,
             spikes_history: Vec::new(),
             network_manager: None,
-            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0 },
+            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
             telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
         };

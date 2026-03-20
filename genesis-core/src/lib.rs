@@ -24,6 +24,12 @@ pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
     fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool);
+    fn update_contrastive(&self, weight: &mut IValue, layer_correlation: IValue) {
+        // Default: Reduce weight if correlation in layer is too high (penalize redundancy)
+        if layer_correlation > 512 {
+             *weight = (*weight as i64 * (1024 - (layer_correlation / 10)) as i64 >> 10) as i32;
+        }
+    }
     fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
         // Default: just do normal update if reward is positive, or nothing if negative?
         // Usually RL uses a third factor.
@@ -54,9 +60,11 @@ impl PlasticityRule for GsopRule {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NeuronsSoA {
+    pub layer_id: Vec<u16>,
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
+    pub backprop_signal: Vec<IValue>, // Signal from soma to dendrites (SMBP)
     pub threshold: Vec<IValue>,
     pub base_threshold: Vec<IValue>, // Intrinsic Plasticity
     pub decay: Vec<IValue>,
@@ -71,9 +79,11 @@ pub struct NeuronsSoA {
 impl NeuronsSoA {
     pub fn new(size: usize) -> Self {
         Self {
+            layer_id: vec![0; size],
             potential: vec![0; size],
             distal_potential: vec![0; size],
             proximal_potential: vec![0; size],
+            backprop_signal: vec![0; size],
             threshold: vec![SCALE; size],
             base_threshold: vec![SCALE; size],
             decay: vec![50; size],
@@ -91,9 +101,11 @@ impl NeuronsSoA {
 
     pub fn grow(&mut self, additional: usize) {
         let new_size = self.potential.len() + additional;
+        self.layer_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
         self.proximal_potential.resize(new_size, 0);
+        self.backprop_signal.resize(new_size, 0);
         self.threshold.resize(new_size, SCALE);
         self.base_threshold.resize(new_size, SCALE);
         self.decay.resize(new_size, 50);
@@ -152,15 +164,56 @@ impl SynapsesSoA {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NetworkConfig {
     pub default_threshold: IValue,
     pub default_decay: IValue,
     pub learning_rate: IValue,
+
+    // Advanced Structural Plasticity
+    pub max_synapses: usize,
+    pub neurogenesis_reward_threshold: IValue,
+    pub pruning_threshold: IValue,
+
+    // Dendritic Gating
+    pub dendritic_coincidence_threshold: IValue,
+
+    // Intrinsic Plasticity
+    pub intrinsic_plasticity_increment: IValue,
+    pub intrinsic_plasticity_decay: IValue,
+
+    // STDP Parameters
+    pub stdp_tau: u64,
+    pub stdp_a_plus: IValue,
+    pub stdp_a_minus: IValue,
+
+    // Metaplasticity
+    pub metaplasticity_enabled: bool,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            default_threshold: SCALE,
+            default_decay: 50,
+            learning_rate: 10,
+            max_synapses: 1_000_000,
+            neurogenesis_reward_threshold: 200,
+            pruning_threshold: 10,
+            dendritic_coincidence_threshold: 512, // 0.5 * SCALE
+            intrinsic_plasticity_increment: 50,
+            intrinsic_plasticity_decay: 1,
+            stdp_tau: 20,
+            stdp_a_plus: 100,
+            stdp_a_minus: 100,
+            metaplasticity_enabled: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
+    pub version: String,
     pub config: NetworkConfig,
     pub node_id: u32,
     pub local_range: (usize, usize), // (start, end) indices of local neurons
@@ -195,9 +248,15 @@ impl BakedModel {
             e
         })?;
         let reader = BufReader::new(file);
-        bincode::deserialize_from(reader).map_err(|e| {
+        let model: BakedModel = bincode::deserialize_from(reader).map_err(|e| {
             log::error!("Error deserializing model from '{}': {:?}", path, e);
             std::io::Error::new(std::io::ErrorKind::Other, e)
-        })
+        })?;
+
+        if model.version != "3.7" {
+             log::warn!("Loading model version {} into v3.7 engine. Stability not guaranteed.", model.version);
+        }
+
+        Ok(model)
     }
 }

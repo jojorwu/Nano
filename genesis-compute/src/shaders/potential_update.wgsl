@@ -10,9 +10,18 @@ struct Neuron {
 @group(0) @binding(10) var<storage, read> proximal_potentials: array<i32>;
 @group(0) @binding(1) var<storage, read_write> thresholds: array<i32>;
 @group(0) @binding(11) var<storage, read> base_thresholds: array<i32>;
+@group(0) @binding(14) var<storage, read> layer_ids: array<u32>;
+@group(0) @binding(15) var<storage, read_write> backprop_signals: array<i32>;
+struct Config {
+    ip_increment: i32,
+    ip_decay: i32,
+}
+@group(0) @binding(16) var<storage, read> config: Config;
 @group(0) @binding(2) var<storage, read_write> decays: array<i32>;
 @group(0) @binding(3) var<storage, read_write> refractory: array<i32>;
 @group(0) @binding(4) var<storage, read_write> spikes: array<u32>;
+@group(0) @binding(12) var<storage, read_write> sparse_spikes: array<u32>;
+@group(0) @binding(13) var<storage, read_write> spike_counter: atomic<u32>;
 @group(0) @binding(5) var<storage, read> inputs: array<i32>;
 @group(0) @binding(6) var<storage, read_write> next_update: array<u32>;
 @group(0) @binding(7) var<storage, read> intervals: array<u32>;
@@ -54,15 +63,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         potentials[i] = 0;
         refractory[i] = 2;
         spikes[i] = 1;
+
+        // SMBP: Active backpropagation signal
+        backprop_signals[i] = 1024;
+
+        let count = atomicAdd(&spike_counter, 1u);
+        if (count < arrayLength(&sparse_spikes)) {
+            // Simple index storage for now, bit-packing can be done in a separate kernel if needed.
+            sparse_spikes[count] = i;
+        }
+
         // Intrinsic Plasticity
-        thresholds[i] = thresholds[i] + 50;
+        thresholds[i] = thresholds[i] + config.ip_increment;
     } else {
         potentials[i] = pot;
         spikes[i] = 0;
         // Threshold decay back to base (Intrinsic Plasticity)
         if (thresholds[i] > base_thresholds[i]) {
-            thresholds[i] = thresholds[i] - 1;
+            thresholds[i] = thresholds[i] - config.ip_decay;
         }
+        // Decaying backprop signal
+        backprop_signals[i] = (backprop_signals[i] * 800) >> 10;
     }
 
     next_update[i] = current_tick + intervals[i];

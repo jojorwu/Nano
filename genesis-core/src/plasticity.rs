@@ -29,11 +29,11 @@ impl crate::PlasticityRule for StdpRule {
 
         if diff > 0 && diff < self.tau as i64 {
             // Long-Term Potentiation (LTP)
-            let delta = (self.a_plus * (self.tau as i64 - diff) as i32) / self.tau as i32;
+            let delta = (self.a_plus as i64 * (self.tau as i64 - diff) / self.tau as i64) as i32;
             *weight = weight.saturating_add(delta);
         } else if diff < 0 && diff > -(self.tau as i64) {
             // Long-Term Depression (LTD)
-            let delta = (self.a_minus * (self.tau as i64 - diff.abs()) as i32) / self.tau as i32;
+            let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) / self.tau as i64) as i32;
             *weight = weight.saturating_sub(delta);
         }
 
@@ -92,7 +92,7 @@ impl EvolutionaryOptimizer {
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
             let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
-            use rand::RngExt;
+            use rand::Rng;
             let mut rng = rand::rng();
             for _ in 0..prune_count {
                 if synapses.len() > 0 {

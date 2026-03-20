@@ -46,7 +46,11 @@ impl TitanMemory {
                 if spiked && i < self.weights.len() {
                     let grad = error;
                     self.moment[i] = (self.moment[i] * 9 + grad) / 10;
-                    let update = ((self.moment[i] as i64 * self.learning_rate as i64) >> 10) as i32;
+
+                    // Surprise-Modulated Learning Rate (SMLR)
+                    // Boost LR if surprise is extremely high
+                    let lr_boost = if error.abs() > self.surprise_threshold * 2 { 2 } else { 1 };
+                    let update = ((self.moment[i] as i64 * self.learning_rate as i64 * lr_boost as i64) >> 10) as i32;
 
                     self.weights[i] = self.weights[i].saturating_add(update);
 

@@ -16,6 +16,14 @@ pub struct ModelBlueprint {
 pub struct ArchitectureConfig {
     pub neuron_count: usize,
     pub synapse_count: usize,
+    pub layers: Option<Vec<LayerConfig>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LayerConfig {
+    pub id: u16,
+    pub range: (usize, usize),
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +38,14 @@ pub enum ModuleConfig {
 
 impl ModelBlueprint {
     pub fn bake(&self) -> BakedModel {
-        let neurons = NeuronsSoA::new(self.architecture.neuron_count);
+        let mut neurons = NeuronsSoA::new(self.architecture.neuron_count);
+        if let Some(ref layers) = self.architecture.layers {
+            for layer in layers {
+                for i in layer.range.0..layer.range.1 {
+                    if i < neurons.len() { neurons.layer_id[i] = layer.id; }
+                }
+            }
+        }
         let mut synapses = SynapsesSoA::with_capacity(self.architecture.synapse_count);
 
         for i in 0..self.architecture.synapse_count {
@@ -72,11 +87,8 @@ impl ModelBlueprint {
         }
 
         BakedModel {
-            config: self.config.clone().unwrap_or(genesis_core::NetworkConfig {
-                default_threshold: 1024,
-                default_decay: 50,
-                learning_rate: 10,
-            }),
+            version: "3.7".to_string(),
+            config: self.config.clone().unwrap_or_default(),
             node_id: 0,
             local_range: (0, self.architecture.neuron_count),
             neurons,
