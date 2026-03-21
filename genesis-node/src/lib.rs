@@ -309,9 +309,17 @@ impl Runtime {
                 self.backend.update_weights(&mut self.model, &prev, current, tick, reward, &full_history);
 
                 // Modulate module weight updates with surprise (3rd factor)
-                // We pass reward as the modulation factor for now, but we'll adapt titan
-                // to use internal surprise if needed.
                 self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
+
+                // Synchronize dynamic settings (like learning rate) from modules
+                for m in &self.modules.modules {
+                    if m.name() == "adaptive_lr" {
+                        let state = m.get_state();
+                        if let Ok(alr) = bincode::deserialize::<genesis_core::plasticity::AdaptiveLearningRateModule>(&state) {
+                            self.model.config.learning_rate = alr.current_lr;
+                        }
+                    }
+                }
                 prev = current.clone();
             }
             self.backend.structural_plasticity(&mut self.model, reward, &full_history);
@@ -383,6 +391,27 @@ impl Runtime {
 
     pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
         self.tick_with_reward(external_inputs, None)
+    }
+
+    pub fn inject_text(&mut self, text: &str) {
+        for m in &mut self.modules.modules {
+            if m.name() == "text_processor" {
+                let mut state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                state.tokenize_and_queue(text);
+                m.set_state(&bincode::serialize(&state).unwrap());
+            }
+        }
+    }
+
+    #[cfg(feature = "vision")]
+    pub fn inject_image(&mut self, pixels: &[u8]) {
+        for m in &mut self.modules.modules {
+            if m.name() == "vision" {
+                let mut state: genesis_core::vision::VisionModule = bincode::deserialize(&m.get_state()).unwrap();
+                state.set_input(pixels);
+                m.set_state(&bincode::serialize(&state).unwrap());
+            }
+        }
     }
 
     pub fn sync_state(&mut self) {

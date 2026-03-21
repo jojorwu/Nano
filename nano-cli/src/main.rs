@@ -66,63 +66,36 @@ impl SimulationSession {
         Self { runtime }
     }
 
-    fn run_text(&mut self, text: &str, byte_level: bool, _reasoning: usize) {
-        println!("📝 Text Input: '{}' (Mode: {})", text, if byte_level { "Byte-Level" } else { "Modular" });
-
-        let mut found = false;
-        for m in &mut self.runtime.modules.modules {
-            if m.name() == "text_processor" {
-                let mut state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.tokenize_and_queue(text);
-                m.set_state(&bincode::serialize(&state).unwrap());
-                found = true;
-            }
+    fn run_multimodal(&mut self, text: Option<&str>, img_path: Option<&str>, byte_level: bool) {
+        if let Some(t) = text {
+            println!("📝 Injecting Text: '{}' (Mode: {})", t, if byte_level { "Byte-Level" } else { "Modular" });
+            self.runtime.inject_text(t);
         }
 
-        if found {
-            // Run ticks until queue is empty
-            loop {
-                let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-                let count = spikes.iter().filter(|&&s| s).count();
-
-                // Check if module still has tokens
-                let mut has_more = false;
-                for m in &self.runtime.modules.modules {
-                    if m.name() == "text_processor" {
-                        let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
-                        has_more = !state.last_tokens.is_empty();
-                    }
-                }
-
-                println!("   Tick: Generated {} spikes", count);
-                if !has_more { break; }
-            }
-        } else {
-             println!("⚠️ Text Processor module not found in model state.");
-        }
-    }
-
-    #[cfg(feature = "vision")]
-    fn run_image(&mut self, img_path: &str) {
-        println!("🖼️ Image Input: '{}'", img_path);
-        let img = image::open(img_path).expect("Failed to open image");
-        let gray = img.to_luma8();
-
-        let mut found = false;
-        for m in &mut self.runtime.modules.modules {
-            if m.name() == "vision" {
-                let mut state: genesis_core::vision::VisionModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.set_input(gray.as_raw());
-                m.set_state(&bincode::serialize(&state).unwrap());
-                found = true;
-            }
+        #[cfg(feature = "vision")]
+        if let Some(path) = img_path {
+            println!("🖼️ Injecting Image: '{}'", path);
+            let img = image::open(path).expect("Failed to open image");
+            let gray = img.to_luma8();
+            self.runtime.inject_image(gray.as_raw());
         }
 
-        if found {
+        // Execution loop: run until all transient inputs are processed
+        loop {
             let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-            println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
-        } else {
-            println!("⚠️ Vision module not found in model state.");
+            let count = spikes.iter().filter(|&&s| s).count();
+
+            let mut transient_active = false;
+            for m in &self.runtime.modules.modules {
+                if m.name() == "text_processor" {
+                    let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                    if !state.last_tokens.is_empty() { transient_active = true; }
+                }
+                // Vision is currently one-shot injection
+            }
+
+            println!("   Tick: {} spikes", count);
+            if !transient_active { break; }
         }
     }
 
@@ -170,18 +143,9 @@ vocab_size = 1000
             baked.save(output).expect("Failed to save");
             println!("✅ Model '{}' baked to {}.", bp.name, output);
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning, learning_rate } => {
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate } => {
             let mut session = SimulationSession::new(model, *learning_rate);
-
-            if let Some(text) = input {
-                session.run_text(text, *byte_level, *reasoning);
-            }
-
-            #[cfg(feature = "vision")]
-            if let Some(img_path) = image {
-                session.run_image(img_path);
-            }
-
+            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level);
             session.finish(model);
         }
         Commands::Gym { model, env: env_name, episodes } => {
@@ -232,7 +196,7 @@ vocab_size = 1000
                 if cmd == "save" { session.finish(model); }
                 else if cmd.starts_with("run ") {
                     let input = &cmd[4..];
-                    session.run_text(input, false, 0);
+                    session.run_multimodal(Some(input), None, false);
                 }
                 else {
                     let resp = session.runtime.handle_command(cmd);

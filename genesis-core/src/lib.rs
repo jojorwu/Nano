@@ -89,6 +89,7 @@ impl ModuleManager {
         #[cfg(feature = "fusion")]
         self.register_factory("fusion", || Box::new(fusion::SpikingFusionModule::new(Vec::new())));
         self.register_factory("graph_engine", || Box::new(graph::SpikingGraphModule::new(graph::TopologyType::SmallWorld)));
+        self.register_factory("adaptive_lr", || Box::new(plasticity::AdaptiveLearningRateModule::new(10)));
         self.register_factory("think", || Box::new(ThinkModule::new(5)));
     }
 
