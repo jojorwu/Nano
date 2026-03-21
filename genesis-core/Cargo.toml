@@ -4,13 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["titan", "text", "vision"]
+default = ["titan", "text", "vision", "audio", "rl", "robotics", "fusion"]
 titan = []
 text = []
 vision = []
+audio = []
+rl = []
+robotics = []
+fusion = []
 
 [dependencies]
+log = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 bytemuck = { version = "1.13", features = ["derive"] }
 bincode = "1.3"
+rand = "0.8"

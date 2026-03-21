@@ -6,6 +6,11 @@ edition = "2021"
 [features]
 default = ["titan"]
 titan = ["genesis-core/titan"]
+wgpu = ["dep:wgpu"]
 
 [dependencies]
+log = { workspace = true }
 genesis-core = { path = "../genesis-core" }
+wgpu = { version = "0.19", optional = true }
+pollster = "0.3"
+bytemuck = { version = "1.13", features = ["derive"] }
