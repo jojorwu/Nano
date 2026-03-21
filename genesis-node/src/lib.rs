@@ -290,9 +290,7 @@ impl Runtime {
             self.modules.on_night_phase(&mut self.model.synapses, reward);
 
             // Sync module states back to model for persistence
-            for module in &self.modules.modules {
-                self.model.module_states.insert(module.name().to_string(), module.get_state());
-            }
+            self.sync_modules_to_model();
 
             self.spikes_history.clear();
         }
@@ -335,6 +333,13 @@ impl Runtime {
 
     pub fn sync_state(&mut self) {
         self.backend.sync_state(&mut self.model);
+        self.sync_modules_to_model();
+    }
+
+    pub fn sync_modules_to_model(&mut self) {
+        for module in &self.modules.modules {
+            self.model.module_states.insert(module.name().to_string(), module.get_state());
+        }
     }
 
     pub fn reload_settings(&mut self, path: &str) -> std::io::Result<()> {
