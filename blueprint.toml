@@ -1,0 +1,8 @@
+name = "MyFirstNano"
+[architecture]
+neuron_count = 1000
+synapse_count = 5000
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 1000

@@ -31,7 +31,7 @@ enum Commands {
     Gym {
         #[arg(short, long)] model: String,
         #[arg(short, long, default_value = "cartpole")] env: String,
-        #[arg(short, long, default_value_t = 100)] episodes: usize,
+        #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
     },
 }
 
