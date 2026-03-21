@@ -21,7 +21,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (pre_spiked && post_spiked) {
         w = w + learning_rate;
     } else if (pre_spiked && !post_spiked) {
-        w = w - (learning_rate / 2);
+        w = w - (learning_rate >> 1);
     }
 
     // Clamp weight (-5120 to 5120, assuming SCALE=1024)

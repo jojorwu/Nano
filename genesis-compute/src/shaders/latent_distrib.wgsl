@@ -9,13 +9,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let neuron_idx = id.x;
     if (neuron_idx >= arrayLength(&dendritic_gates)) { return; }
 
-    var sum = 0f32;
+    var sum = 0i64;
     for (var r = 0u; r < rank; r = r + 1u) {
-        sum = sum + f32(latent_state[r]) * f32(v_matrix[r * arrayLength(&dendritic_gates) + neuron_idx]);
+        sum = sum + i64(latent_state[r]) * i64(v_matrix[r * arrayLength(&dendritic_gates) + neuron_idx]);
     }
 
-    let gate = f32(dendritic_gates[neuron_idx]);
-    let contribution = i32((sum * gate) / 1048576.0); // >> 20
+    let gate = i64(dendritic_gates[neuron_idx]);
+    let contribution = i32((sum * gate) >> 20);
 
     atomicAdd(&current_inputs[neuron_idx], contribution);
 }

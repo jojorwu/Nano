@@ -18,8 +18,8 @@ impl Observer {
     }
 
     pub fn process_spikes(&mut self, spikes: &mut [bool], model: &mut BakedModel) {
-        let spike_count = spikes.iter().filter(|&&s| s).count() as u64;
-        self.current_energy_usage = spike_count; // Simplified: 1 spike = 1 energy unit
+        let spike_count = spikes.iter().filter(|&&s| s).count();
+        self.current_energy_usage = spike_count as u64; // Simplified: 1 spike = 1 energy unit
 
         if self.current_energy_usage > self.energy_budget_per_tick {
             // Graceful Degradation: Increase thresholds globally if budget is exceeded
@@ -31,10 +31,10 @@ impl Observer {
             log::warn!("Energy budget exceeded. Applying global threshold increment: {}", increment);
         }
 
-        if spike_count as usize > self.max_spikes_per_tick {
+        if spike_count > self.max_spikes_per_tick {
             // Activity capping: Spike Storm Protection (still useful as safety)
             for i in 0..spikes.len() { spikes[i] = false; }
         }
-        self.total_energy_consumed += spike_count;
+        self.total_energy_consumed += spike_count as u64;
     }
 }
