@@ -1,0 +1,9 @@
+[simulation]
+checkpoint_interval = 1000
+night_phase_interval = 100
+save_on_exit = true
+
+[network]
+default_threshold = 1024
+learning_rate = 10
+neurogenesis_reward_threshold = 200

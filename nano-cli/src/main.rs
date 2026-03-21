@@ -3,12 +3,6 @@ use serde::{Serialize, Deserialize};
 use std::fs;
 use genesis_baker::ModelBlueprint;
 use genesis_node::Runtime;
-#[cfg(feature = "text")]
-use genesis_core::text::{SpikingTextModule, ByteSpikingModule};
-#[cfg(feature = "vision")]
-use genesis_core::vision::SpikingVisionModule;
-#[cfg(feature = "vision")]
-use image::GenericImageView;
 
 #[derive(Parser)]
 struct Cli {
@@ -31,8 +25,10 @@ enum Commands {
     Gym {
         #[arg(short, long)] model: String,
         #[arg(short, long, default_value = "cartpole")] env: String,
-        #[arg(short, long, default_value_t = 100)] episodes: usize,
+        #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
     },
+    Export { #[arg(short, long)] model: String, #[arg(short, long)] name: String },
+    Shell { #[arg(short, long)] model: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,45 +66,39 @@ impl SimulationSession {
         Self { runtime }
     }
 
-    fn run_text(&mut self, text: &str, byte_level: bool, reasoning: usize) {
-        let mut combined_inputs = vec![0; self.runtime.model.neurons.len()];
-        println!("📝 Text Input: '{}' (Mode: {})", text, if byte_level { "Byte-Level" } else { "Word-Based" });
+    fn run_text(&mut self, text: &str, byte_level: bool, _reasoning: usize) {
+        println!("📝 Text Input: '{}' (Mode: {})", text, if byte_level { "Byte-Level" } else { "Modular" });
 
-        #[cfg(feature = "text")]
-        {
-            if byte_level {
-                let pattern_len = (self.runtime.model.neurons.len() / 4).min(256).max(10);
-                let patterns = ByteSpikingModule::encode_text(text, pattern_len);
-                for (i, pattern) in patterns.iter().enumerate() {
-                    for (j, &spiked) in pattern.iter().enumerate() {
-                        if spiked { combined_inputs[j] = 1024; }
-                    }
-                    let mut spikes = self.runtime.tick(&combined_inputs);
-                    for _ in 0..reasoning {
-                        spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-                    }
-                    println!("   Byte {}: Generated {} spikes", text.as_bytes()[i] as char, spikes.iter().filter(|&&s| s).count());
-                }
-            } else {
-                let tokens = {
-                    let mut text_mod = SpikingTextModule::new(&mut self.runtime.model.vocabulary);
-                    text_mod.tokenize(text)
-                };
-                for token in tokens {
-                    let mut inputs = vec![0; self.runtime.model.neurons.len()];
-                    let pattern_len = (self.runtime.model.neurons.len() / 4).min(256).max(10);
-                    let text_mod = SpikingTextModule::new(&mut self.runtime.model.vocabulary);
-                    let pattern = text_mod.encode(token, pattern_len);
-                    for (i, &spiked) in pattern.iter().enumerate() {
-                        if spiked { inputs[i] = 1024; }
-                    }
-                    let mut spikes = self.runtime.tick(&inputs);
-                    for _ in 0..reasoning {
-                        spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-                    }
-                    println!("   Token {}: Generated {} spikes", token, spikes.iter().filter(|&&s| s).count());
-                }
+        let mut found = false;
+        for m in &mut self.runtime.modules.modules {
+            if m.name() == "text_processor" {
+                let mut state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                state.tokenize_and_queue(text);
+                m.set_state(&bincode::serialize(&state).unwrap());
+                found = true;
             }
+        }
+
+        if found {
+            // Run ticks until queue is empty
+            loop {
+                let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+                let count = spikes.iter().filter(|&&s| s).count();
+
+                // Check if module still has tokens
+                let mut has_more = false;
+                for m in &self.runtime.modules.modules {
+                    if m.name() == "text_processor" {
+                        let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                        has_more = !state.last_tokens.is_empty();
+                    }
+                }
+
+                println!("   Tick: Generated {} spikes", count);
+                if !has_more { break; }
+            }
+        } else {
+             println!("⚠️ Text Processor module not found in model state.");
         }
     }
 
@@ -116,16 +106,24 @@ impl SimulationSession {
     fn run_image(&mut self, img_path: &str) {
         println!("🖼️ Image Input: '{}'", img_path);
         let img = image::open(img_path).expect("Failed to open image");
-        let (w, h) = img.dimensions();
-        let vision_mod = SpikingVisionModule::new(w, h);
         let gray = img.to_luma8();
-        let pixel_potentials = vision_mod.rate_encode(gray.as_raw());
-        let mut inputs = vec![0; self.runtime.model.neurons.len()];
-        for (i, &pot) in pixel_potentials.iter().enumerate() {
-            if i < inputs.len() { inputs[i] = pot; }
+
+        let mut found = false;
+        for m in &mut self.runtime.modules.modules {
+            if m.name() == "vision" {
+                let mut state: genesis_core::vision::VisionModule = bincode::deserialize(&m.get_state()).unwrap();
+                state.set_input(gray.as_raw());
+                m.set_state(&bincode::serialize(&state).unwrap());
+                found = true;
+            }
         }
-        let spikes = self.runtime.tick(&inputs);
-        println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
+
+        if found {
+            let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+            println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
+        } else {
+            println!("⚠️ Vision module not found in model state.");
+        }
     }
 
     fn finish(&mut self, path: &str) {
@@ -193,6 +191,56 @@ vocab_size = 1000
                 run_gym_commands(&mut runtime, env_name, *episodes);
             }
             runtime.model.save(model).expect("Failed to save");
+        }
+        Commands::Export { model, name } => {
+            let dir = format!("models/{}", name);
+            fs::create_dir_all(&dir).expect("Failed to create dir");
+            fs::copy(model, format!("{}/state.bin", dir)).expect("Failed to copy state");
+
+            let config = fs::read_to_string("nano.toml").unwrap_or_default();
+            fs::write(format!("{}/config.toml", dir), config).expect("Failed to write config");
+
+            // Create a simple launcher script
+            let launcher = format!("#!/bin/bash\ncargo run -p nano-cli -- shell --model state.bin\n");
+            fs::write(format!("{}/run.sh", dir), launcher).expect("Failed to write launcher");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(format!("{}/run.sh", dir)).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(format!("{}/run.sh", dir), perms).unwrap();
+            }
+
+            println!("🚀 Model '{}' exported to {}. Use ./run.sh to start the interactive console.", name, dir);
+        }
+        Commands::Shell { model } => {
+            let mut session = SimulationSession::new(model, None);
+            println!("🐚 Nano Interactive Shell");
+            println!("Type 'help' for a list of commands.");
+
+            use std::io::{Write, BufRead};
+            let stdin = std::io::stdin();
+            let mut stdout = std::io::stdout();
+
+            print!("> ");
+            let _ = stdout.flush();
+            for line in stdin.lock().lines() {
+                let l = line.unwrap();
+                let cmd = l.trim();
+                if cmd == "exit" || cmd == "quit" { break; }
+                if cmd == "save" { session.finish(model); }
+                else if cmd.starts_with("run ") {
+                    let input = &cmd[4..];
+                    session.run_text(input, false, 0);
+                }
+                else {
+                    let resp = session.runtime.handle_command(cmd);
+                    println!(">> {}", resp);
+                }
+                print!("> ");
+                let _ = stdout.flush();
+            }
         }
     }
 }

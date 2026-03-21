@@ -1,4 +1,4 @@
-use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue};
+use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue, Compartment};
 use genesis_core::plasticity::{prune_synapses, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
@@ -703,8 +703,9 @@ mod tests {
 
     #[test]
     fn test_cpu_dendritic_gating() {
+        use crate::ComputeBackend;
         let mut model = BakedModel {
-            version: "3.7".to_string(),
+            version: "4.0".to_string(),
             config: genesis_core::NetworkConfig::default(),
             node_id: 0,
             local_range: (0, 2),
@@ -714,6 +715,7 @@ mod tests {
                 s.push(0, 1, 2000); // High weight
                 s
             },
+            module_states: std::collections::HashMap::new(),
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
@@ -766,13 +768,8 @@ impl BackendRegistry {
 }
 
 impl CpuBackend {
-    fn apply_external_inputs(&self, n_count: usize, external_inputs: &[i32], current_inputs: &mut [i32]) {
-        for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { current_inputs[i] = current_inputs[i].saturating_add(val); }
-        }
-    }
 
-    fn propagate_sparse_spikes(&self, model: &BakedModel, previous_spikes: &[bool], current_inputs: &mut [i32]) {
+    fn propagate_sparse_spikes(&self, model: &mut BakedModel, previous_spikes: &[bool]) {
         let active_indices: Vec<usize> = previous_spikes.iter().enumerate()
             .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
 
@@ -789,12 +786,20 @@ impl CpuBackend {
 
                 let raw_weight = model.synapses.weight[i];
                 let gated_weight = ((raw_weight as i64 * gate as i64) >> 10) as i32;
-                current_inputs[target] = current_inputs[target].saturating_add(gated_weight);
+
+                match model.synapses.compartment[i] {
+                    Compartment::Proximal => {
+                        model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
+                    }
+                    Compartment::Distal => {
+                        model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight);
+                    }
+                }
             }
         }
     }
 
-    fn propagate_latent_spikes(&self, model: &BakedModel, previous_spikes: &[bool], current_inputs: &mut [i32]) {
+    fn propagate_latent_spikes(&self, model: &mut BakedModel, previous_spikes: &[bool]) {
         if let Some(ref latent) = model.synapses.latent_matrix {
             let mut latent_state = vec![0i32; latent.rank];
             // Sparse MLA: iterate only over spiked neurons
@@ -819,12 +824,14 @@ impl CpuBackend {
                     sum += latent_state[r] as i64 * weight as i64;
                 }
                 let contribution = ((sum * gate as i64) >> 20) as i32;
-                current_inputs[j] = current_inputs[j].saturating_add(contribution);
+
+                // Latent MLA connections are predominantly distal in this architecture
+                model.neurons.distal_potential[j] = model.neurons.distal_potential[j].saturating_add(contribution);
             }
         }
     }
 
-    fn update_neuron_states(&self, model: &mut BakedModel, current_inputs: &[i32], current_tick: u32, new_spikes: &mut [bool]) {
+    fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         let n_count = model.neurons.len();
         let coincidence_threshold = model.config.dendritic_coincidence_threshold;
         let ip_inc = model.config.intrinsic_plasticity_increment;
@@ -847,13 +854,22 @@ impl CpuBackend {
             // Multi-compartment integration
             let proximal = model.neurons.proximal_potential[i];
             let distal = model.neurons.distal_potential[i];
-            let dend_factor = if proximal > coincidence_threshold { distal } else { distal >> 2 };
 
-            pot = pot.saturating_add(current_inputs[i]).saturating_add(proximal).saturating_add(dend_factor);
+            // Dendritic Gating: proximal somatic potential gates distal integration
+            // If proximal >= threshold * 0.5 (coincidence), distal is fully integrated.
+            let dend_factor = if proximal >= coincidence_threshold {
+                 distal
+            } else {
+                 // Non-coincident distal input is attenuated (shunting inhibition or low gain)
+                 distal / 4
+            };
 
-            // LLIF: Liquid Decay
+            pot = pot.saturating_add(proximal).saturating_add(dend_factor);
+
+            // LLIF: Liquid Decay modulated by input activity
             let base_decay = model.neurons.decay[i];
-            let liquid_mod = (current_inputs[i].abs() * 10) >> 10;
+            let total_input = proximal.abs() + distal.abs();
+            let liquid_mod = (total_input * 10) >> 10;
             let final_decay = (base_decay - liquid_mod).max(1);
             pot = (pot as i64 * (SCALE - final_decay) as i64 >> 10) as i32;
 
@@ -880,23 +896,17 @@ impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool> {
         let n_count = model.neurons.len();
-        let mut current_inputs = vec![0i32; n_count];
 
-        self.apply_external_inputs(n_count, external_inputs, &mut current_inputs);
-        self.propagate_sparse_spikes(model, previous_spikes, &mut current_inputs);
-        self.propagate_latent_spikes(model, previous_spikes, &mut current_inputs);
-
-        #[cfg(feature = "titan")]
-        if let Some(ref titan) = model.titan_memory {
-            let memory_input = titan.retrieve(previous_spikes);
-            let dist_input = memory_input / (n_count as i32).max(1);
-            for i in 0..n_count {
-                current_inputs[i] = current_inputs[i].saturating_add(dist_input);
-            }
+        // Apply external inputs directly to proximal potential
+        for (i, &val) in external_inputs.iter().enumerate() {
+            if i < n_count { model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(val); }
         }
 
+        self.propagate_sparse_spikes(model, previous_spikes);
+        self.propagate_latent_spikes(model, previous_spikes);
+
         let mut new_spikes = vec![false; n_count];
-        self.update_neuron_states(model, &current_inputs, current_tick, &mut new_spikes);
+        self.update_neuron_states(model, current_tick, &mut new_spikes);
         new_spikes
     }
 
@@ -917,14 +927,6 @@ impl ComputeBackend for CpuBackend {
             let post_tick = model.neurons.last_spike_tick[target] as u64;
             self.plasticity_rule.update_temporal(&mut model.synapses.weight[i], pre_tick, post_tick, current_tick as u64);
             self.plasticity_rule.update_contrastive(&mut model.synapses.weight[i], 0);
-        }
-
-        #[cfg(feature = "titan")]
-        if let Some(ref mut titan) = model.titan_memory {
-            let activity = current_spikes.iter().filter(|&&s| s).count() as i32;
-            let base_error = (10 - activity) * 10;
-            let final_error = if let Some(r) = reward { base_error + r } else { base_error };
-            titan.step(previous_spikes, final_error);
         }
     }
 
