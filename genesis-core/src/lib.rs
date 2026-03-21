@@ -13,6 +13,49 @@ pub mod fusion;
 
 pub mod plasticity;
 
+pub trait NanoModule: Send + Sync {
+    fn name(&self) -> &str;
+    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32);
+    fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
+    fn on_night_phase(&mut self, synapses: &mut SynapsesSoA, reward: Option<IValue>);
+
+    // Serialization for persistence
+    fn get_state(&self) -> Vec<u8> { Vec::new() }
+    fn set_state(&mut self, _state: &[u8]) {}
+}
+
+pub struct ModuleManager {
+    pub modules: Vec<Box<dyn NanoModule>>,
+}
+
+impl ModuleManager {
+    pub fn new() -> Self {
+        Self { modules: Vec::new() }
+    }
+
+    pub fn add_module(&mut self, module: Box<dyn NanoModule>) {
+        self.modules.push(module);
+    }
+
+    pub fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32) {
+        for module in &mut self.modules {
+            module.on_tick(neurons, previous_spikes, tick);
+        }
+    }
+
+    pub fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>) {
+        for module in &mut self.modules {
+            module.on_update_weights(neurons, previous_spikes, current_spikes, tick, reward);
+        }
+    }
+
+    pub fn on_night_phase(&mut self, synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+        for module in &mut self.modules {
+            module.on_night_phase(synapses, reward);
+        }
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
@@ -20,6 +63,18 @@ use std::collections::HashMap;
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum Compartment {
+    Proximal,
+    Distal,
+}
+
+impl Default for Compartment {
+    fn default() -> Self {
+        Compartment::Proximal
+    }
+}
 
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
@@ -123,6 +178,7 @@ pub struct SynapsesSoA {
     pub source_index: Vec<u32>,
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
+    pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
 
@@ -139,14 +195,20 @@ impl SynapsesSoA {
             source_index: Vec::with_capacity(capacity),
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
+            compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
     }
 
     pub fn push(&mut self, source: u32, target: u32, weight: IValue) {
+        self.push_to_compartment(source, target, weight, Compartment::Proximal);
+    }
+
+    pub fn push_to_compartment(&mut self, source: u32, target: u32, weight: IValue, compartment: Compartment) {
         self.source_index.push(source);
         self.target_index.push(target);
         self.weight.push(weight);
+        self.compartment.push(compartment);
     }
 
     pub fn set_latent(&mut self, u: Vec<IValue>, v: Vec<IValue>, rank: usize) {
@@ -161,6 +223,7 @@ impl SynapsesSoA {
         self.source_index.swap_remove(index);
         self.target_index.swap_remove(index);
         self.weight.swap_remove(index);
+        self.compartment.swap_remove(index);
     }
 }
 
@@ -219,6 +282,10 @@ pub struct BakedModel {
     pub local_range: (usize, usize), // (start, end) indices of local neurons
     pub neurons: NeuronsSoA,
     pub synapses: SynapsesSoA,
+
+    // Dynamic Module State Storage
+    pub module_states: HashMap<String, Vec<u8>>,
+
     #[cfg(feature = "titan")]
     pub titan_memory: Option<titan::TitanMemory>,
     #[cfg(feature = "text")]

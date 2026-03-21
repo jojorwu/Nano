@@ -1,4 +1,4 @@
-use genesis_core::BakedModel;
+use genesis_core::{BakedModel, ModuleManager, NanoModule};
 use genesis_compute::{ComputeBackend, CpuBackend};
 use serde::{Serialize, Deserialize};
 
@@ -80,8 +80,16 @@ impl Default for SimulationSettings {
     }
 }
 
+pub mod examples_rl;
+pub mod observer;
+pub mod telemetry;
+
+pub use observer::Observer;
+pub use telemetry::Telemetry;
+
 pub struct Runtime {
     pub model: BakedModel,
+    pub modules: ModuleManager,
     pub settings: SimulationSettings,
     pub backend: Box<dyn ComputeBackend + Send + Sync>,
     pub previous_spikes: Vec<bool>,
@@ -92,43 +100,6 @@ pub struct Runtime {
     pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
     pub telemetry: Telemetry,
 }
-
-pub struct Telemetry {
-    pub spike_counts: Vec<usize>,
-    pub episode_rewards: Vec<i32>,
-}
-
-pub struct Observer {
-    pub max_spikes_per_tick: usize,
-    pub energy_budget_per_tick: u64,
-    pub current_energy_usage: u64,
-    pub total_energy_consumed: u64,
-}
-
-impl Observer {
-    pub fn process_spikes(&mut self, spikes: &mut [bool], model: &mut BakedModel) {
-        let spike_count = spikes.iter().filter(|&&s| s).count() as u64;
-        self.current_energy_usage = spike_count; // Simplified: 1 spike = 1 energy unit
-
-        if self.current_energy_usage > self.energy_budget_per_tick {
-            // Graceful Degradation: Increase thresholds globally if budget is exceeded
-            let overload = (self.current_energy_usage - self.energy_budget_per_tick) as i32;
-            let increment = (overload / 10).max(1);
-            for t in model.neurons.threshold.iter_mut() {
-                *t = t.saturating_add(increment);
-            }
-            log::warn!("Energy budget exceeded. Applying global threshold increment: {}", increment);
-        }
-
-        if spike_count as usize > self.max_spikes_per_tick {
-            // Activity capping: Spike Storm Protection (still useful as safety)
-            for i in 0..spikes.len() { spikes[i] = false; }
-        }
-        self.total_energy_consumed += spike_count;
-    }
-}
-
-pub mod examples_rl;
 
 pub struct NetworkManager {
     pub node_id: String,
@@ -206,22 +177,29 @@ impl Runtime {
     pub fn load_with_settings(path: &str, settings: SimulationSettings) -> std::io::Result<Self> {
         let model = BakedModel::load(path)?;
         let n_count = model.neurons.len();
+
+        let mut modules = ModuleManager::new();
+        #[cfg(feature = "titan")]
+        if let Some(ref titan) = model.titan_memory {
+            let mut titan_module = titan.clone();
+            if let Some(state) = model.module_states.get("titan") {
+                titan_module.set_state(state);
+            }
+            modules.add_module(Box::new(titan_module));
+        }
+
         Ok(Self {
             model,
+            modules,
             settings,
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
             spikes_history: Vec::new(),
             network_manager: None,
-            observer: Observer {
-                max_spikes_per_tick: n_count / 2,
-                energy_budget_per_tick: (n_count / 10) as u64,
-                current_energy_usage: 0,
-                total_energy_consumed: 0
-            },
+            observer: Observer::new(n_count),
             remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            telemetry: Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
+            telemetry: Telemetry::default(),
         })
     }
 
@@ -230,6 +208,13 @@ impl Runtime {
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
         let n_count = self.model.neurons.len();
+
+        // 0. Reset somatic input buffers each tick before module injection
+        for i in 0..n_count {
+            self.model.neurons.proximal_potential[i] = 0;
+            self.model.neurons.distal_potential[i] = 0;
+        }
+
         let mut merged_inputs = vec![0; n_count];
         for (i, &val) in external_inputs.iter().enumerate() {
             if i < n_count { merged_inputs[i] = val; }
@@ -244,6 +229,9 @@ impl Runtime {
             }
             remote_spikes.clear();
         }
+
+        // Module Pre-tick logic (e.g. Signal Injection)
+        self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
 
         // 1. Day Phase: Inference
         let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, self.tick_counter);
@@ -280,9 +268,17 @@ impl Runtime {
                 }
 
                 self.backend.update_weights(&mut self.model, &prev, current, tick, reward, &full_history);
+                self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, reward);
                 prev = current.clone();
             }
             self.backend.structural_plasticity(&mut self.model, reward, &full_history);
+            self.modules.on_night_phase(&mut self.model.synapses, reward);
+
+            // Sync module states back to model for persistence
+            for module in &self.modules.modules {
+                self.model.module_states.insert(module.name().to_string(), module.get_state());
+            }
+
             self.spikes_history.clear();
         }
 

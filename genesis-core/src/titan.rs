@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::IValue;
+use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TitanMemory {
@@ -75,6 +75,44 @@ impl TitanMemory {
             }
         }
         sum
+    }
+}
+
+impl NanoModule for TitanMemory {
+    fn name(&self) -> &str { "titan" }
+
+    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], _tick: u32) {
+        let n_count = neurons.len();
+        let memory_input = self.retrieve(previous_spikes);
+        let global_input = memory_input / (n_count as i32).max(1);
+
+        for i in 0..n_count {
+            // Titan injects signals into the soma (proximal) as a global bias
+            neurons.proximal_potential[i] = neurons.proximal_potential[i].saturating_add(global_input);
+        }
+    }
+
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, reward: Option<IValue>) {
+        let activity = current_spikes.iter().filter(|&&s| s).count() as i32;
+        let base_error = (10 - activity) * 10;
+        let final_error = if let Some(r) = reward { base_error + r } else { base_error };
+        self.step(previous_spikes, final_error);
+    }
+
+    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+        if let Some(r) = reward {
+             log::debug!("Titan Night Phase with reward: {}", r);
+        }
+    }
+
+    fn get_state(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap_or_default()
+    }
+
+    fn set_state(&mut self, state: &[u8]) {
+        if let Ok(new_self) = bincode::deserialize::<Self>(state) {
+            *self = new_self;
+        }
     }
 }
 

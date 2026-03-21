@@ -93,6 +93,7 @@ impl ModelBlueprint {
             local_range: (0, self.architecture.neuron_count),
             neurons,
             synapses,
+            module_states: HashMap::new(),
             #[cfg(feature = "titan")]
             titan_memory,
             has_text,

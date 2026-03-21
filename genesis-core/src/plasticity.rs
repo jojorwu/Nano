@@ -105,6 +105,8 @@ impl EvolutionaryOptimizer {
             // High positive reward -> Grow synapses based on activity correlation if available
             let grow_count = (neuron_count as f32 * self.mutation_rate).max(1.0) as usize;
 
+            use crate::Compartment;
+
             if !activity_history.is_empty() {
                 // Correlational Growth: find neurons that fire together
                 let mut grown = 0;
@@ -115,7 +117,8 @@ impl EvolutionaryOptimizer {
                         for &i in active.iter().take(3) {
                             for &j in active.iter().take(3) {
                                 if i != j && grown < grow_count {
-                                    if grow_synapse(synapses, i as u32, j as u32, 100, &StructuralPlasticityConfig::default()) {
+                                    let comp = if (i + j) % 2 == 0 { Compartment::Proximal } else { Compartment::Distal };
+                                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &StructuralPlasticityConfig::default()) {
                                         grown += 1;
                                     }
                                 }
@@ -131,7 +134,8 @@ impl EvolutionaryOptimizer {
                     let src = (reward as u32 + offset) % neuron_count as u32;
                     let target = (reward as u32 * 31 + offset + 7) % neuron_count as u32;
                     if src != target {
-                        grow_synapse(synapses, src, target, 100, &StructuralPlasticityConfig::default());
+                        let comp = if (src + target) % 2 == 0 { Compartment::Proximal } else { Compartment::Distal };
+                        grow_synapse_in_compartment(synapses, src, target, 100, comp, &StructuralPlasticityConfig::default());
                     }
                     offset = offset.wrapping_add(1);
                 }
@@ -147,6 +151,17 @@ pub fn grow_synapse(
     initial_weight: IValue,
     config: &StructuralPlasticityConfig
 ) -> bool {
+    grow_synapse_in_compartment(synapses, source, target, initial_weight, crate::Compartment::Proximal, config)
+}
+
+pub fn grow_synapse_in_compartment(
+    synapses: &mut SynapsesSoA,
+    source: u32,
+    target: u32,
+    initial_weight: IValue,
+    compartment: crate::Compartment,
+    config: &StructuralPlasticityConfig
+) -> bool {
     if synapses.len() >= config.max_synapses {
         return false;
     }
@@ -158,7 +173,7 @@ pub fn grow_synapse(
         }
     }
 
-    synapses.push(source, target, initial_weight);
+    synapses.push_to_compartment(source, target, initial_weight, compartment);
     true
 }
 

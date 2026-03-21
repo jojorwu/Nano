@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::{Runtime, Observer};
-    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
+    use crate::{Runtime, Observer, Telemetry};
+    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ mod tests {
                 s.push(0, 1, 1500);
                 s
             },
+            module_states: HashMap::new(),
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
@@ -32,6 +33,7 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            modules: ModuleManager::new(),
             settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
@@ -40,7 +42,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
+            telemetry: Telemetry::default(),
         };
         runtime.previous_spikes[0] = true;
 
@@ -61,6 +63,7 @@ mod tests {
                 s.push(0, 1, 5);
                 s
             },
+            module_states: HashMap::new(),
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
@@ -73,6 +76,7 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
+            modules: ModuleManager::new(),
             settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
@@ -81,7 +85,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            telemetry: crate::Telemetry { spike_counts: Vec::new(), episode_rewards: Vec::new() },
+            telemetry: Telemetry::default(),
         };
 
         runtime.tick(&[0, 0]);
@@ -97,6 +101,7 @@ mod tests {
             local_range: (0, 10),
             neurons: NeuronsSoA::new(10),
             synapses: SynapsesSoA::default(),
+            module_states: HashMap::new(),
             #[cfg(feature = "titan")]
             titan_memory: None,
             has_text: false,
