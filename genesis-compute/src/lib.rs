@@ -15,6 +15,7 @@ pub struct CpuBackend {
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
     pub expert_masks: Vec<bool>, // MoE: which neuron groups are active
+    pub synapse_index: Vec<Vec<usize>>, // source_neuron -> list of synapse indices
 }
 
 impl Default for CpuBackend {
@@ -24,6 +25,7 @@ impl Default for CpuBackend {
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
             optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
             expert_masks: Vec::new(),
+            synapse_index: Vec::new(),
         }
     }
 }
@@ -769,31 +771,40 @@ impl BackendRegistry {
 
 impl CpuBackend {
 
-    fn propagate_sparse_spikes(&self, model: &mut BakedModel, previous_spikes: &[bool]) {
-        let active_indices: Vec<u32> = previous_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i as u32).collect();
+    pub fn rebuild_index(&mut self, model: &BakedModel) {
+        let n_count = model.neurons.len();
+        self.synapse_index = vec![Vec::new(); n_count];
+        for i in 0..model.synapses.len() {
+            let src = model.synapses.source_index[i] as usize;
+            if src < n_count {
+                self.synapse_index[src].push(i);
+            }
+        }
+    }
+
+    fn propagate_sparse_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool]) {
+        let active_indices: Vec<usize> = previous_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
 
         if active_indices.is_empty() { return; }
 
-        // Optimized spike propagation: In a sparse spiking regime, we still iterate over synapses,
-        // but we use a fast branch (the source check) to minimize computation.
-        // For truly large models, a reverse mapping (source -> synapses) would be used.
+        // Ensure index is ready (Lazy initialization or rebuild after structural changes)
+        if self.synapse_index.len() != model.neurons.len() {
+            self.rebuild_index(model);
+        }
 
-        for i in 0..model.synapses.len() {
-            let src = model.synapses.source_index[i];
-
-            // Check if source neuron fired in the previous tick
-            if previous_spikes[src as usize] {
-                let target = model.synapses.target_index[i] as usize;
+        // Optimized spike propagation: O(active_spikes * average_fanout)
+        for &src in &active_indices {
+            if src >= self.synapse_index.len() { continue; }
+            for &syn_idx in &self.synapse_index[src] {
+                let target = model.synapses.target_index[syn_idx] as usize;
                 let gate = model.neurons.dendritic_gate[target];
 
-                // Selective Dendritic Processing (SDP): Skip nearly closed gates
                 if gate < 8 { continue; }
 
-                // Integer Physics: SCALE=1024 (2^10)
-                let gated_weight = ((model.synapses.weight[i] as i64 * gate as i64) >> 10) as i32;
+                let gated_weight = ((model.synapses.weight[syn_idx] as i64 * gate as i64) >> 10) as i32;
 
-                match model.synapses.compartment[i] {
+                match model.synapses.compartment[syn_idx] {
                     Compartment::Proximal => {
                         model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
                     }
@@ -926,6 +937,9 @@ impl ComputeBackend for CpuBackend {
 
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
+
+        // Structure changed -> Index must be rebuilt next tick
+        self.synapse_index.clear();
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {

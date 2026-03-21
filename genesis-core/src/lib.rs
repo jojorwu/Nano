@@ -65,9 +65,29 @@ pub struct ModuleManager {
     pub factories: HashMap<String, Box<dyn Fn() -> Box<dyn NanoModule> + Send + Sync>>,
 }
 
+impl Default for ModuleManager {
+    fn default() -> Self {
+        let mut mm = Self { modules: Vec::new(), factories: HashMap::new() };
+        mm.register_defaults();
+        mm
+    }
+}
+
 impl ModuleManager {
     pub fn new() -> Self {
-        Self { modules: Vec::new(), factories: HashMap::new() }
+        Self::default()
+    }
+
+    pub fn register_defaults(&mut self) {
+        #[cfg(feature = "titan")]
+        self.register_factory("titan", || Box::new(titan::TitanMemory::new(64, 100)));
+        #[cfg(feature = "text")]
+        self.register_factory("text_processor", || Box::new(text::TextProcessorModule::new(64)));
+        #[cfg(feature = "vision")]
+        self.register_factory("vision", || Box::new(vision::VisionModule::new(32, 32)));
+        #[cfg(feature = "fusion")]
+        self.register_factory("fusion", || Box::new(fusion::SpikingFusionModule::new(Vec::new())));
+        self.register_factory("think", || Box::new(ThinkModule::new(5)));
     }
 
     pub fn register_factory<F>(&mut self, name: &str, factory: F)

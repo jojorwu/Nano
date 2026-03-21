@@ -181,15 +181,12 @@ impl Runtime {
 
         let mut modules = ModuleManager::new();
 
-        // Register available factories
+        // Register model-specific factories (e.g. pre-initialized Titan from BakedModel)
         #[cfg(feature = "titan")]
         if let Some(ref titan) = model.titan_memory {
             let t = titan.clone();
             modules.register_factory("titan", move || Box::new(t.clone()));
         }
-        modules.register_factory("think", || Box::new(genesis_core::ThinkModule::new(5)));
-        modules.register_factory("text_processor", || Box::new(genesis_core::text::TextProcessorModule::new(64)));
-        modules.register_factory("vision", || Box::new(genesis_core::vision::VisionModule::new(32, 32)));
 
         // Instantiate modules based on model state
         for name in model.module_states.keys() {
@@ -270,24 +267,7 @@ impl Runtime {
         let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, self.tick_counter);
 
         // Chain-of-Thought Reasoning (Thinking Mode)
-        for module in &self.modules.modules {
-            if module.name() == "think" {
-                let state = module.get_state();
-                if let Ok(think) = bincode::deserialize::<genesis_core::ThinkModule>(&state) {
-                    if think.active {
-                        for _ in 0..think.extra_ticks {
-                            // 0. Reset somatic input buffers for sub-tick
-                            for i in 0..n_count {
-                                self.model.neurons.proximal_potential[i] = 0;
-                                self.model.neurons.distal_potential[i] = 0;
-                            }
-                            // Internal cycles: no external input, feed back spikes
-                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
-                        }
-                    }
-                }
-            }
-        }
+        current_spikes = self.process_thinking_cycles(current_spikes, n_count);
 
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
@@ -342,6 +322,32 @@ impl Runtime {
         self.previous_spikes = current_spikes.clone();
 
         // Ghost Axons: Transmit spikes to remote nodes
+        self.broadcast_ghost_spikes(&current_spikes);
+
+        current_spikes
+    }
+
+    fn process_thinking_cycles(&mut self, mut current_spikes: Vec<bool>, n_count: usize) -> Vec<bool> {
+        for module in &self.modules.modules {
+            if module.name() == "think" {
+                let state = module.get_state();
+                if let Ok(think) = bincode::deserialize::<genesis_core::ThinkModule>(&state) {
+                    if think.active {
+                        for _ in 0..think.extra_ticks {
+                            for i in 0..n_count {
+                                self.model.neurons.proximal_potential[i] = 0;
+                                self.model.neurons.distal_potential[i] = 0;
+                            }
+                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
+                        }
+                    }
+                }
+            }
+        }
+        current_spikes
+    }
+
+    fn broadcast_ghost_spikes(&self, current_spikes: &[bool]) {
         if let Some(ref nm) = self.network_manager {
             let active_indices: Vec<usize> = current_spikes.iter().enumerate()
                 .filter(|&(_, &s)| s)
@@ -367,8 +373,6 @@ impl Runtime {
                 });
             }
         }
-
-        current_spikes
     }
 
     pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
