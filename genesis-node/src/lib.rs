@@ -243,6 +243,8 @@ impl Runtime {
         for i in 0..n_count {
             self.model.neurons.proximal_potential[i] = 0;
             self.model.neurons.distal_potential[i] = 0;
+            self.model.neurons.apical_potential[i] = 0;
+            self.model.neurons.basal_potential[i] = 0;
         }
 
         let mut merged_inputs = vec![0; n_count];
@@ -272,6 +274,8 @@ impl Runtime {
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
 
+        // Asynchronous Observation: process safety and energy in background
+        // Note: For deterministic threshold updates, we still need some sync
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
@@ -337,6 +341,8 @@ impl Runtime {
                             for i in 0..n_count {
                                 self.model.neurons.proximal_potential[i] = 0;
                                 self.model.neurons.distal_potential[i] = 0;
+                                self.model.neurons.apical_potential[i] = 0;
+                                self.model.neurons.basal_potential[i] = 0;
                             }
                             current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
                         }

@@ -10,6 +10,7 @@ pub mod audio;
 pub mod rl;
 #[cfg(feature = "fusion")]
 pub mod fusion;
+pub mod graph;
 
 pub mod plasticity;
 
@@ -87,6 +88,7 @@ impl ModuleManager {
         self.register_factory("vision", || Box::new(vision::VisionModule::new(32, 32)));
         #[cfg(feature = "fusion")]
         self.register_factory("fusion", || Box::new(fusion::SpikingFusionModule::new(Vec::new())));
+        self.register_factory("graph_engine", || Box::new(graph::SpikingGraphModule::new(graph::TopologyType::SmallWorld)));
         self.register_factory("think", || Box::new(ThinkModule::new(5)));
     }
 
@@ -139,6 +141,8 @@ pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 pub enum Compartment {
     Proximal,
     Distal,
+    Apical, // New Apical compartment for hierarchical feedback
+    Basal,  // New Basal compartment for lateral inhibition
 }
 
 impl Default for Compartment {
@@ -190,6 +194,8 @@ pub struct NeuronsSoA {
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
+    pub apical_potential: Vec<IValue>,  // For hierarchical feedback
+    pub basal_potential: Vec<IValue>,   // For lateral signals
     pub backprop_signal: Vec<IValue>, // Signal from soma to dendrites (SMBP)
     pub threshold: Vec<IValue>,
     pub base_threshold: Vec<IValue>, // Intrinsic Plasticity
@@ -209,6 +215,8 @@ impl NeuronsSoA {
             potential: vec![0; size],
             distal_potential: vec![0; size],
             proximal_potential: vec![0; size],
+            apical_potential: vec![0; size],
+            basal_potential: vec![0; size],
             backprop_signal: vec![0; size],
             threshold: vec![SCALE; size],
             base_threshold: vec![SCALE; size],
@@ -231,6 +239,8 @@ impl NeuronsSoA {
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
         self.proximal_potential.resize(new_size, 0);
+        self.apical_potential.resize(new_size, 0);
+        self.basal_potential.resize(new_size, 0);
         self.backprop_signal.resize(new_size, 0);
         self.threshold.resize(new_size, SCALE);
         self.base_threshold.resize(new_size, SCALE);

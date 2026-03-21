@@ -45,6 +45,10 @@ pub struct WgpuBackend {
     pub latent_distrib_layout: wgpu::BindGroupLayout,
     pub tick_layout: wgpu::BindGroupLayout,
     // Cached Buffers
+    pub distal_buffer: Option<wgpu::Buffer>,
+    pub proximal_buffer: Option<wgpu::Buffer>,
+    pub apical_buffer: Option<wgpu::Buffer>,
+    pub basal_buffer: Option<wgpu::Buffer>,
     pub pot_buffer: Option<wgpu::Buffer>,
     pub threshold_buffer: Option<wgpu::Buffer>,
     pub decay_buffer: Option<wgpu::Buffer>,
@@ -130,6 +134,8 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 16, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 17, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 18, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -318,6 +324,16 @@ impl ComputeBackend for WgpuBackend {
                 contents: bytemuck::cast_slice(&model.neurons.proximal_potential),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
+            self.apical_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Apical Potentials"),
+                contents: bytemuck::cast_slice(&model.neurons.apical_potential),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }));
+            self.basal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Basal Potentials"),
+                contents: bytemuck::cast_slice(&model.neurons.basal_potential),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }));
             self.base_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Base Thresholds"),
                 contents: bytemuck::cast_slice(&model.neurons.base_threshold),
@@ -391,6 +407,8 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 12, resource: self.sparse_spike_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 13, resource: self.spike_counter_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 16, resource: self.config_uniform_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 17, resource: self.apical_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 18, resource: self.basal_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -431,6 +449,8 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 4, bytemuck::cast_slice(&[model.config.intrinsic_plasticity_decay]));
         self.queue.write_buffer(self.distal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.distal_potential));
         self.queue.write_buffer(self.proximal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.proximal_potential));
+        self.queue.write_buffer(self.apical_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.apical_potential));
+        self.queue.write_buffer(self.basal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.basal_potential));
 
         // 3. Dispatch
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -811,6 +831,12 @@ impl CpuBackend {
                     Compartment::Distal => {
                         model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight);
                     }
+                    Compartment::Apical => {
+                        model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight);
+                    }
+                    Compartment::Basal => {
+                        model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight);
+                    }
                 }
             }
         }
@@ -869,9 +895,20 @@ impl CpuBackend {
 
             let proximal = model.neurons.proximal_potential[i];
             let distal = model.neurons.distal_potential[i];
+            let apical = model.neurons.apical_potential[i];
+            let basal = model.neurons.basal_potential[i];
 
-            let dend_factor = if proximal >= coincidence_threshold { distal } else { distal >> 2 };
-            let mut pot = model.neurons.potential[i].saturating_add(proximal).saturating_add(dend_factor);
+            let dist_gated = if proximal >= coincidence_threshold { distal } else { distal >> 2 };
+            let apical_gated = if dist_gated >= coincidence_threshold { apical } else { apical >> 1 };
+
+            let mod_factor = if basal < 0 { 800 } else { 1024 };
+
+            let mut pot = model.neurons.potential[i]
+                .saturating_add(proximal)
+                .saturating_add(dist_gated)
+                .saturating_add(apical_gated);
+
+            pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
 
             // LLIF: Dynamic Decay
             let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;

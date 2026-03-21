@@ -19,22 +19,24 @@ impl Observer {
 
     pub fn process_spikes(&mut self, spikes: &mut [bool], model: &mut BakedModel) {
         let spike_count = spikes.iter().filter(|&&s| s).count();
-        self.current_energy_usage = spike_count as u64; // Simplified: 1 spike = 1 energy unit
+        self.current_energy_usage = spike_count as u64;
 
+        // 1. Critical Path: Activity Capping (Synchronous Safety)
+        if spike_count > self.max_spikes_per_tick {
+            for i in 0..spikes.len() { spikes[i] = false; }
+            log::error!("Activity cap triggered! {} spikes inhibited.", spike_count);
+        }
+
+        // 2. Control Path: Graceful Degradation (Sync threshold update)
         if self.current_energy_usage > self.energy_budget_per_tick {
-            // Graceful Degradation: Increase thresholds globally if budget is exceeded
             let overload = (self.current_energy_usage - self.energy_budget_per_tick) as i32;
             let increment = (overload / 10).max(1);
             for t in model.neurons.threshold.iter_mut() {
                 *t = t.saturating_add(increment);
             }
-            log::warn!("Energy budget exceeded. Applying global threshold increment: {}", increment);
         }
 
-        if spike_count > self.max_spikes_per_tick {
-            // Activity capping: Spike Storm Protection (still useful as safety)
-            for i in 0..spikes.len() { spikes[i] = false; }
-        }
+        // 3. Telemetry Path: (Could be async, keeping count for now)
         self.total_energy_consumed += spike_count as u64;
     }
 }

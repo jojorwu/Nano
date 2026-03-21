@@ -8,6 +8,8 @@ struct Neuron {
 @group(0) @binding(0) var<storage, read_write> potentials: array<i32>;
 @group(0) @binding(9) var<storage, read> distal_potentials: array<i32>;
 @group(0) @binding(10) var<storage, read> proximal_potentials: array<i32>;
+@group(0) @binding(17) var<storage, read> apical_potentials: array<i32>;
+@group(0) @binding(18) var<storage, read> basal_potentials: array<i32>;
 @group(0) @binding(1) var<storage, read_write> thresholds: array<i32>;
 @group(0) @binding(11) var<storage, read> base_thresholds: array<i32>;
 @group(0) @binding(14) var<storage, read> layer_ids: array<u32>;
@@ -45,13 +47,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let proximal = proximal_potentials[i];
     let distal = distal_potentials[i];
+    let apical = apical_potentials[i];
+    let basal = basal_potentials[i];
 
-    // Dendritic Gating (Threshold 512 for coincidence)
-    var dend_factor = distal >> 2;
-    if (proximal > 512) { dend_factor = distal; }
+    // Hierarchical Gating (Threshold 512 for coincidence)
+    var dist_gated = distal >> 2;
+    if (proximal > 512) { dist_gated = distal; }
+
+    var apical_gated = apical >> 1;
+    if (dist_gated > 512) { apical_gated = apical; }
+
+    // Basal Modulation (Lateral inhibition)
+    var mod_factor = 1024;
+    if (basal < 0) { mod_factor = 800; }
 
     let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
-    var pot = potentials[i] + gated_input + proximal + dend_factor;
+    var pot = potentials[i] + gated_input + proximal + dist_gated + apical_gated;
+    pot = (pot * mod_factor) >> 10;
 
     // LLIF: Dynamic Decay
     let liquid_mod = ((abs(proximal) + abs(distal)) * 10) >> 10;
