@@ -8,13 +8,13 @@ pub struct StdpRule {
 }
 
 impl crate::PlasticityRule for StdpRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool) {
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, _compartment: crate::Compartment) {
         if pre_spiked && post_spiked {
             *weight = weight.saturating_add(self.a_plus / 2);
         }
     }
 
-    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
+    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue, _compartment: crate::Compartment) {
         // R-STDP: Reward modulates the base temporal update
         if pre_spiked && post_spiked {
             // (a * reward * scale) >> 20

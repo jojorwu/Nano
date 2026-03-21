@@ -28,6 +28,19 @@ impl NanoModule for VisionModule {
 
     fn on_tick(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
         if !self.input_buffer.is_empty() {
+            // Apply spatial coordinates on first tick if not set
+            if neurons.x[0] == 0 && neurons.y[0] == 0 && self.resolution.0 > 0 {
+                for y in 0..self.resolution.1 {
+                    for x in 0..self.resolution.0 {
+                        let i = (y * self.resolution.0 + x) as usize;
+                        if i < neurons.len() {
+                            neurons.x[i] = x as i16;
+                            neurons.y[i] = y as i16;
+                        }
+                    }
+                }
+            }
+
             let mut rng = rand::thread_rng();
             for (i, &p) in self.input_buffer.iter().enumerate() {
                 if i < neurons.len() {

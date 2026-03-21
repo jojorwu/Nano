@@ -28,6 +28,7 @@ struct Config {
 @group(0) @binding(6) var<storage, read_write> next_update: array<u32>;
 @group(0) @binding(7) var<storage, read> intervals: array<u32>;
 @group(0) @binding(8) var<storage, read> dendritic_gate: array<i32>;
+@group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
@@ -50,12 +51,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let apical = apical_potentials[i];
     let basal = basal_potentials[i];
 
-    // Hierarchical Gating (Threshold 512 for coincidence)
+    // Hierarchical Gating (Per-neuron gate threshold)
+    let gate_threshold = gate_thresholds[i];
     var dist_gated = distal >> 2;
-    if (proximal > 512) { dist_gated = distal; }
+    if (proximal >= gate_threshold) { dist_gated = distal; }
 
     var apical_gated = apical >> 1;
-    if (dist_gated > 512) { apical_gated = apical; }
+    if (dist_gated >= gate_threshold) { apical_gated = apical; }
 
     // Basal Modulation (Lateral inhibition)
     var mod_factor = 1024;

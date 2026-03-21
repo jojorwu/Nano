@@ -154,18 +154,18 @@ impl Default for Compartment {
 
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool);
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, compartment: Compartment);
     fn update_contrastive(&self, weight: &mut IValue, layer_correlation: IValue) {
         // Default: Reduce weight if correlation in layer is too high (penalize redundancy)
         if layer_correlation > 512 {
              *weight = (*weight as i64 * (1024 - (layer_correlation / 10)) as i64 >> 10) as i32;
         }
     }
-    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue) {
+    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue, compartment: Compartment) {
         // Default: just do normal update if reward is positive, or nothing if negative?
         // Usually RL uses a third factor.
         if reward > 0 {
-            self.update(weight, pre_spiked, post_spiked);
+            self.update(weight, pre_spiked, post_spiked, compartment);
         }
     }
     fn update_temporal(&self, _weight: &mut IValue, _pre_tick: u64, _post_tick: u64, _current_tick: u64) {
@@ -178,11 +178,17 @@ pub struct GsopRule {
 }
 
 impl PlasticityRule for GsopRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool) {
+    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, compartment: Compartment) {
+        let lr = match compartment {
+            Compartment::Proximal => self.learning_rate,
+            Compartment::Distal => self.learning_rate * 8 / 10,
+            _ => self.learning_rate / 2, // Slower learning in secondary compartments
+        };
+
         if pre_spiked && post_spiked {
-            *weight = weight.saturating_add(self.learning_rate);
+            *weight = weight.saturating_add(lr);
         } else if pre_spiked && !post_spiked {
-            *weight = weight.saturating_sub(self.learning_rate / 2);
+            *weight = weight.saturating_sub(lr / 2);
         }
         if *weight > SCALE * 5 { *weight = SCALE * 5; }
         if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
@@ -207,6 +213,9 @@ pub struct NeuronsSoA {
     pub last_spike_tick: Vec<u32>,
     pub update_interval: Vec<u32>, // Sub-tick precision: 1 = every tick, 10 = every 10 ticks
     pub next_update_tick: Vec<u32>,
+    pub x: Vec<i16>,
+    pub y: Vec<i16>,
+    pub gate_threshold: Vec<IValue>,
 }
 
 impl NeuronsSoA {
@@ -228,6 +237,9 @@ impl NeuronsSoA {
             last_spike_tick: vec![0; size],
             update_interval: vec![1; size],
             next_update_tick: vec![0; size],
+            x: vec![0; size],
+            y: vec![0; size],
+            gate_threshold: vec![512; size],
         }
     }
     pub fn len(&self) -> usize {
@@ -252,6 +264,9 @@ impl NeuronsSoA {
         self.last_spike_tick.resize(new_size, 0);
         self.update_interval.resize(new_size, 1);
         self.next_update_tick.resize(new_size, 0);
+        self.x.resize(new_size, 0);
+        self.y.resize(new_size, 0);
+        self.gate_threshold.resize(new_size, 512);
     }
 }
 

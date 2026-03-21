@@ -49,6 +49,7 @@ pub struct WgpuBackend {
     pub proximal_buffer: Option<wgpu::Buffer>,
     pub apical_buffer: Option<wgpu::Buffer>,
     pub basal_buffer: Option<wgpu::Buffer>,
+    pub gate_threshold_buffer: Option<wgpu::Buffer>,
     pub pot_buffer: Option<wgpu::Buffer>,
     pub threshold_buffer: Option<wgpu::Buffer>,
     pub decay_buffer: Option<wgpu::Buffer>,
@@ -61,8 +62,6 @@ pub struct WgpuBackend {
     pub source_buffer: Option<wgpu::Buffer>,
     pub target_buffer: Option<wgpu::Buffer>,
     pub gate_buffer: Option<wgpu::Buffer>,
-    pub distal_buffer: Option<wgpu::Buffer>,
-    pub proximal_buffer: Option<wgpu::Buffer>,
     pub base_threshold_buffer: Option<wgpu::Buffer>,
     pub layer_id_buffer: Option<wgpu::Buffer>,
     pub backprop_buffer: Option<wgpu::Buffer>,
@@ -136,6 +135,7 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 16, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 17, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 18, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 19, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -145,7 +145,7 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
@@ -245,10 +245,11 @@ impl WgpuBackend {
         Self {
             device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
             potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, tick_layout,
+            distal_buffer: None, proximal_buffer: None, apical_buffer: None, basal_buffer: None, gate_threshold_buffer: None,
             pot_buffer: None, threshold_buffer: None, decay_buffer: None, refractory_buffer: None,
             spikes_buffer: None, input_buffer: None, next_update_buffer: None, interval_buffer: None,
             weight_buffer: None, source_buffer: None, target_buffer: None,
-            gate_buffer: None, distal_buffer: None, proximal_buffer: None, base_threshold_buffer: None, layer_id_buffer: None, backprop_buffer: None, config_uniform_buffer: None, tick_buffer: None,
+            gate_buffer: None, base_threshold_buffer: None, layer_id_buffer: None, backprop_buffer: None, config_uniform_buffer: None, tick_buffer: None,
             u_matrix_buffer: None, v_matrix_buffer: None, latent_state_buffer: None,
             sparse_spike_buffer: None, spike_counter_buffer: None, staging_spikes: None, staging_state: None,
             pre_spike_buffer: None, post_spike_buffer: None,
@@ -334,6 +335,11 @@ impl ComputeBackend for WgpuBackend {
                 contents: bytemuck::cast_slice(&model.neurons.basal_potential),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
+            self.gate_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gate Thresholds"),
+                contents: bytemuck::cast_slice(&model.neurons.gate_threshold),
+                usage: wgpu::BufferUsages::STORAGE,
+            }));
             self.base_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Base Thresholds"),
                 contents: bytemuck::cast_slice(&model.neurons.base_threshold),
@@ -409,6 +415,7 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 16, resource: self.config_uniform_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 17, resource: self.apical_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 18, resource: self.basal_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 19, resource: self.gate_threshold_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -445,8 +452,8 @@ impl ComputeBackend for WgpuBackend {
         // 2. Upload inputs and current tick
         self.queue.write_buffer(self.input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(external_inputs));
         self.queue.write_buffer(self.tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[current_tick]));
-        self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[model.config.intrinsic_plasticity_increment]));
-        self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 4, bytemuck::cast_slice(&[model.config.intrinsic_plasticity_decay]));
+        self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[model.config.ip_increment]));
+        self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 4, bytemuck::cast_slice(&[model.config.ip_decay]));
         self.queue.write_buffer(self.distal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.distal_potential));
         self.queue.write_buffer(self.proximal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.proximal_potential));
         self.queue.write_buffer(self.apical_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.apical_potential));
@@ -876,7 +883,6 @@ impl CpuBackend {
 
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         let n_count = model.neurons.len();
-        let coincidence_threshold = model.config.dendritic_coincidence_threshold;
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
 
@@ -897,9 +903,10 @@ impl CpuBackend {
             let distal = model.neurons.distal_potential[i];
             let apical = model.neurons.apical_potential[i];
             let basal = model.neurons.basal_potential[i];
+            let gate_threshold = model.neurons.gate_threshold[i];
 
-            let dist_gated = if proximal >= coincidence_threshold { distal } else { distal >> 2 };
-            let apical_gated = if dist_gated >= coincidence_threshold { apical } else { apical >> 1 };
+            let dist_gated = if proximal >= gate_threshold { distal } else { distal >> 2 };
+            let apical_gated = if dist_gated >= gate_threshold { apical } else { apical >> 1 };
 
             let mod_factor = if basal < 0 { 800 } else { 1024 };
 
@@ -959,10 +966,11 @@ impl ComputeBackend for CpuBackend {
             let pre_spiked = previous_spikes[src];
             let post_spiked = current_spikes[target];
 
+            let comp = model.synapses.compartment[i];
             if let Some(r) = reward {
-                self.plasticity_rule.update_rewarded(&mut model.synapses.weight[i], pre_spiked, post_spiked, r);
+                self.plasticity_rule.update_rewarded(&mut model.synapses.weight[i], pre_spiked, post_spiked, r, comp);
             } else {
-                self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked);
+                self.plasticity_rule.update(&mut model.synapses.weight[i], pre_spiked, post_spiked, comp);
             }
 
             let pre_tick = model.neurons.last_spike_tick[src] as u64;
