@@ -292,9 +292,9 @@ pub struct NetworkConfig {
     // Dendritic Gating
     pub dendritic_coincidence_threshold: IValue,
 
-    // Intrinsic Plasticity
-    pub intrinsic_plasticity_increment: IValue,
-    pub intrinsic_plasticity_decay: IValue,
+    // Intrinsic Plasticity (Core Memory / Adaptive Thresholds)
+    pub ip_increment: IValue,
+    pub ip_decay: IValue,
 
     // STDP Parameters
     pub stdp_tau: u64,
@@ -315,8 +315,8 @@ impl Default for NetworkConfig {
             neurogenesis_reward_threshold: 200,
             pruning_threshold: 10,
             dendritic_coincidence_threshold: 512, // 0.5 * SCALE
-            intrinsic_plasticity_increment: 50,
-            intrinsic_plasticity_decay: 1,
+            ip_increment: 50,
+            ip_decay: 1,
             stdp_tau: 20,
             stdp_a_plus: 100,
             stdp_a_minus: 100,

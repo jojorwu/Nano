@@ -775,18 +775,22 @@ impl CpuBackend {
 
         if active_indices.is_empty() { return; }
 
-        // Optimized spike propagation: pre-group synapses or use active_indices
-        // For now, we optimize by iterating over active indices if that's more efficient,
-        // but given the SoA layout, we'll use a direct loop with source check.
+        // Optimized spike propagation: In a sparse spiking regime, we still iterate over synapses,
+        // but we use a fast branch (the source check) to minimize computation.
+        // For truly large models, a reverse mapping (source -> synapses) would be used.
 
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i];
+
+            // Check if source neuron fired in the previous tick
             if previous_spikes[src as usize] {
                 let target = model.synapses.target_index[i] as usize;
                 let gate = model.neurons.dendritic_gate[target];
 
+                // Selective Dendritic Processing (SDP): Skip nearly closed gates
                 if gate < 8 { continue; }
 
+                // Integer Physics: SCALE=1024 (2^10)
                 let gated_weight = ((model.synapses.weight[i] as i64 * gate as i64) >> 10) as i32;
 
                 match model.synapses.compartment[i] {
@@ -836,8 +840,8 @@ impl CpuBackend {
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         let n_count = model.neurons.len();
         let coincidence_threshold = model.config.dendritic_coincidence_threshold;
-        let ip_inc = model.config.intrinsic_plasticity_increment;
-        let ip_dec = model.config.intrinsic_plasticity_decay;
+        let ip_inc = model.config.ip_increment;
+        let ip_dec = model.config.ip_decay;
 
         // Vectorized-friendly loop for neuron updates
         for i in 0..n_count {

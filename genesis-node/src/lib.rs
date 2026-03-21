@@ -95,6 +95,7 @@ pub struct Runtime {
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u32,
     pub spikes_history: Vec<Vec<u32>>, // Sparse: only active indices
+    pub rolling_spike_count: f32, // For surprise calculation
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
     pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
@@ -214,11 +215,25 @@ impl Runtime {
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
             spikes_history: Vec::new(),
+            rolling_spike_count: 0.0,
             network_manager: None,
             observer: Observer::new(n_count),
             remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             telemetry: Telemetry::default(),
         })
+    }
+
+    pub fn calculate_surprise(&mut self, current_spike_count: usize) -> i32 {
+        let current = current_spike_count as f32;
+        let surprise = (current - self.rolling_spike_count).abs();
+
+        // Update rolling average (EMA)
+        self.rolling_spike_count = self.rolling_spike_count * 0.9 + current * 0.1;
+
+        // Scale to IValue (SCALE=1024)
+        // If current count is double the average, surprise is high.
+        let scaled_surprise = (surprise * 1024.0 / (self.rolling_spike_count + 1.0)) as i32;
+        scaled_surprise.min(2048) // Clamp
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
@@ -275,6 +290,8 @@ impl Runtime {
         }
 
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
+        let surprise = self.calculate_surprise(spike_count);
+
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
@@ -306,7 +323,11 @@ impl Runtime {
                 }
 
                 self.backend.update_weights(&mut self.model, &prev, current, tick, reward, &full_history);
-                self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, reward);
+
+                // Modulate module weight updates with surprise (3rd factor)
+                // We pass reward as the modulation factor for now, but we'll adapt titan
+                // to use internal surprise if needed.
+                self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
                 prev = current.clone();
             }
             self.backend.structural_plasticity(&mut self.model, reward, &full_history);
