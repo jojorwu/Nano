@@ -77,8 +77,16 @@ impl ModelBlueprint {
                         titan_memory = Some(tm);
                     }
                 },
-                ModuleConfig::TextProcessor { .. } => has_text = true,
-                ModuleConfig::Vision { .. } => has_vision = true,
+                ModuleConfig::TextProcessor { .. } => {
+                    has_text = true;
+                    let m = genesis_core::text::TextProcessorModule::new(64);
+                    module_states.insert("text_processor".to_string(), bincode::serialize(&m).unwrap());
+                },
+                ModuleConfig::Vision { resolution } => {
+                    has_vision = true;
+                    let m = genesis_core::vision::VisionModule::new(resolution.0, resolution.1);
+                    module_states.insert("vision".to_string(), bincode::serialize(&m).unwrap());
+                },
                 ModuleConfig::AudioProcessor { .. } => has_audio = true,
                 ModuleConfig::RobotControl { .. } => has_robotics = true,
             }

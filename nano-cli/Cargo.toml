@@ -15,6 +15,7 @@ fusion = ["genesis-core/fusion", "genesis-baker/fusion"]
 [dependencies]
 log = { workspace = true }
 env_logger = { workspace = true }
+bincode = { workspace = true }
 genesis-core = { path = "../genesis-core" }
 genesis-baker = { path = "../genesis-baker" }
 genesis-node = { path = "../genesis-node" }

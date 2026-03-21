@@ -187,6 +187,8 @@ impl Runtime {
             modules.register_factory("titan", move || Box::new(t.clone()));
         }
         modules.register_factory("think", || Box::new(genesis_core::ThinkModule::new(5)));
+        modules.register_factory("text_processor", || Box::new(genesis_core::text::TextProcessorModule::new(64)));
+        modules.register_factory("vision", || Box::new(genesis_core::vision::VisionModule::new(32, 32)));
 
         // Instantiate modules based on model state
         for name in model.module_states.keys() {
@@ -259,6 +261,11 @@ impl Runtime {
                 if let Ok(think) = bincode::deserialize::<genesis_core::ThinkModule>(&state) {
                     if think.active {
                         for _ in 0..think.extra_ticks {
+                            // 0. Reset somatic input buffers for sub-tick
+                            for i in 0..n_count {
+                                self.model.neurons.proximal_potential[i] = 0;
+                                self.model.neurons.distal_potential[i] = 0;
+                            }
                             // Internal cycles: no external input, feed back spikes
                             current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
                         }
