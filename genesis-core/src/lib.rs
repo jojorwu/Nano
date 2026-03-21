@@ -11,6 +11,7 @@ pub mod rl;
 #[cfg(feature = "fusion")]
 pub mod fusion;
 pub mod graph;
+pub mod robotics;
 
 pub mod plasticity;
 
@@ -91,6 +92,7 @@ impl ModuleManager {
         self.register_factory("graph_engine", || Box::new(graph::SpikingGraphModule::new(graph::TopologyType::SmallWorld)));
         self.register_factory("adaptive_lr", || Box::new(plasticity::AdaptiveLearningRateModule::new(10)));
         self.register_factory("think", || Box::new(ThinkModule::new(5)));
+        self.register_factory("cerebellum", || Box::new(robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
 
     pub fn register_factory<F>(&mut self, name: &str, factory: F)

@@ -723,6 +723,10 @@ impl ComputeBackend for WgpuBackend {
 
         // Weight download moved to sync_state to keep weights on GPU during simulation
     }
+
+    pub fn compute_synaptic_metaplasticity(&mut self, model: &mut BakedModel) {
+        // Future implementation: GPU-side metaplasticity kernel
+    }
 }
 
 #[cfg(test)]
@@ -988,7 +992,7 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_activity(&mut model.synapses, model.neurons.len(), r, history);
+            self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_synapses {
                 model.neurons.grow((model.neurons.len() / 20).max(1));

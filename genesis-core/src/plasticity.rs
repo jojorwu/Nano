@@ -83,12 +83,19 @@ impl EvolutionaryOptimizer {
     }
 
     /// Perform structural mutations based on reward and activity.
-    pub fn mutate(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue) {
-        self.mutate_with_activity(synapses, neuron_count, reward, &[]);
+    pub fn mutate(&self, synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, reward: IValue) {
+        self.mutate_with_activity(synapses, neurons, reward, &[]);
     }
 
-    /// Perform structural mutations with activity correlation.
-    pub fn mutate_with_activity(&self, synapses: &mut SynapsesSoA, neuron_count: usize, reward: IValue, activity_history: &[Vec<bool>]) {
+    /// Perform structural mutations with activity correlation and topographic constraints.
+    pub fn mutate_with_activity(
+        &self,
+        synapses: &mut SynapsesSoA,
+        neurons: &crate::NeuronsSoA,
+        reward: IValue,
+        activity_history: &[Vec<bool>]
+    ) {
+        let neuron_count = neurons.len();
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
             let prune_count = (synapses.len() as f32 * self.mutation_rate).max(1.0) as usize;
@@ -128,16 +135,35 @@ impl EvolutionaryOptimizer {
                     if grown >= grow_count { break; }
                 }
             } else {
-                // Fallback to exploratory growth
-                let mut offset = synapses.len() as u32;
+                // Topographic Exploratory Growth: encourage local connections
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
                 for _ in 0..grow_count {
-                    let src = (reward as u32 + offset) % neuron_count as u32;
-                    let target = (reward as u32 * 31 + offset + 7) % neuron_count as u32;
-                    if src != target {
-                        let comp = if (src + target) % 2 == 0 { Compartment::Proximal } else { Compartment::Distal };
-                        grow_synapse_in_compartment(synapses, src, target, 100, comp, &StructuralPlasticityConfig::default());
+                    let src = rng.gen_range(0..neuron_count) as u32;
+
+                    // Gaussian-like distance selection for target
+                    let range = 20; // local radius
+                    let tx = (neurons.x[src as usize] as i32 + rng.gen_range(-range..range)).clamp(0, 1000) as i16;
+                    let ty = (neurons.y[src as usize] as i32 + rng.gen_range(-range..range)).clamp(0, 1000) as i16;
+
+                    // Find a neuron close to these coordinates
+                    // (Simplified: in a large network, we'd use a spatial index)
+                    let mut best_target = (src + 1) % neuron_count as u32;
+                    let mut min_dist = 10000;
+
+                    for _ in 0..10 { // Search a few random candidates
+                        let cand = rng.gen_range(0..neuron_count) as u32;
+                        let dx = (neurons.x[cand as usize] - tx).abs() as i32;
+                        let dy = (neurons.y[cand as usize] - ty).abs() as i32;
+                        let d = dx + dy;
+                        if d < min_dist && cand != src {
+                            min_dist = d;
+                            best_target = cand;
+                        }
                     }
-                    offset = offset.wrapping_add(1);
+
+                    let comp = if min_dist < 10 { Compartment::Proximal } else { Compartment::Distal };
+                    grow_synapse_in_compartment(synapses, src, best_target, 100, comp, &StructuralPlasticityConfig::default());
                 }
             }
         }

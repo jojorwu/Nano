@@ -233,6 +233,12 @@ impl Runtime {
         scaled_surprise.min(2048) // Clamp
     }
 
+    pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, _layer_mask: Option<u16>) -> Vec<bool> {
+        // Targeted rewards enable finer reinforcement signals.
+        // Implementation can be expanded to filter plasticity by layer_mask.
+        self.tick_with_reward(external_inputs, reward)
+    }
+
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         if let Some(r) = reward { self.telemetry.episode_rewards.push(r); }
         self.tick_counter = self.tick_counter.wrapping_add(1);
