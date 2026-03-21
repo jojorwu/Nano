@@ -770,22 +770,24 @@ impl BackendRegistry {
 impl CpuBackend {
 
     fn propagate_sparse_spikes(&self, model: &mut BakedModel, previous_spikes: &[bool]) {
-        let active_indices: Vec<usize> = previous_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+        let active_indices: Vec<u32> = previous_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s).map(|(i, _)| i as u32).collect();
 
         if active_indices.is_empty() { return; }
 
+        // Optimized spike propagation: pre-group synapses or use active_indices
+        // For now, we optimize by iterating over active indices if that's more efficient,
+        // but given the SoA layout, we'll use a direct loop with source check.
+
         for i in 0..model.synapses.len() {
-            let src = model.synapses.source_index[i] as usize;
-            if previous_spikes[src] {
+            let src = model.synapses.source_index[i];
+            if previous_spikes[src as usize] {
                 let target = model.synapses.target_index[i] as usize;
                 let gate = model.neurons.dendritic_gate[target];
 
-                // Selective Dendritic Processing (SDP): Skip nearly closed gates
                 if gate < 8 { continue; }
 
-                let raw_weight = model.synapses.weight[i];
-                let gated_weight = ((raw_weight as i64 * gate as i64) >> 10) as i32;
+                let gated_weight = ((model.synapses.weight[i] as i64 * gate as i64) >> 10) as i32;
 
                 match model.synapses.compartment[i] {
                     Compartment::Proximal => {
@@ -837,13 +839,12 @@ impl CpuBackend {
         let ip_inc = model.config.intrinsic_plasticity_increment;
         let ip_dec = model.config.intrinsic_plasticity_decay;
 
+        // Vectorized-friendly loop for neuron updates
         for i in 0..n_count {
             if current_tick < model.neurons.next_update_tick[i] { continue; }
             if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] { continue; }
 
-            let mut pot = model.neurons.potential[i];
             let refr = model.neurons.refractory_timer[i];
-
             if refr > 0 {
                 model.neurons.refractory_timer[i] = refr - 1;
                 model.neurons.potential[i] = 0;
@@ -851,27 +852,16 @@ impl CpuBackend {
                 continue;
             }
 
-            // Multi-compartment integration
             let proximal = model.neurons.proximal_potential[i];
             let distal = model.neurons.distal_potential[i];
 
-            // Dendritic Gating: proximal somatic potential gates distal integration
-            // If proximal >= threshold * 0.5 (coincidence), distal is fully integrated.
-            let dend_factor = if proximal >= coincidence_threshold {
-                 distal
-            } else {
-                 // Non-coincident distal input is attenuated (shunting inhibition or low gain)
-                 distal / 4
-            };
+            let dend_factor = if proximal >= coincidence_threshold { distal } else { distal >> 2 };
+            let mut pot = model.neurons.potential[i].saturating_add(proximal).saturating_add(dend_factor);
 
-            pot = pot.saturating_add(proximal).saturating_add(dend_factor);
-
-            // LLIF: Liquid Decay modulated by input activity
-            let base_decay = model.neurons.decay[i];
-            let total_input = proximal.abs() + distal.abs();
-            let liquid_mod = (total_input * 10) >> 10;
-            let final_decay = (base_decay - liquid_mod).max(1);
-            pot = (pot as i64 * (SCALE - final_decay) as i64 >> 10) as i32;
+            // LLIF: Dynamic Decay
+            let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
+            let final_decay = (model.neurons.decay[i] - liquid_mod).max(1);
+            pot = ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32;
 
             if pot >= model.neurons.threshold[i] {
                 model.neurons.potential[i] = 0;
@@ -885,7 +875,7 @@ impl CpuBackend {
                 if model.neurons.threshold[i] > model.neurons.base_threshold[i] {
                     model.neurons.threshold[i] = model.neurons.threshold[i].saturating_sub(ip_dec);
                 }
-                model.neurons.backprop_signal[i] = (model.neurons.backprop_signal[i] as i64 * 800 >> 10) as i32;
+                model.neurons.backprop_signal[i] = ((model.neurons.backprop_signal[i] as i64 * 800) >> 10) as i32;
             }
             model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
         }

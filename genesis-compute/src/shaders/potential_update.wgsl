@@ -46,18 +46,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let proximal = proximal_potentials[i];
     let distal = distal_potentials[i];
 
-    var dend_factor = distal / 4;
-    if (proximal > 500) { dend_factor = distal; }
+    // Dendritic Gating (Threshold 512 for coincidence)
+    var dend_factor = distal >> 2;
+    if (proximal > 512) { dend_factor = distal; }
 
-    let gated_input = (inputs[i] * dendritic_gate[i]) / 1024;
+    let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
     var pot = potentials[i] + gated_input + proximal + dend_factor;
 
-    // LLIF: Liquid Decay
-    let base_decay = decays[i];
-    let liquid_mod = (abs(inputs[i]) * 10) / 1024;
-    let final_decay = max(1, base_decay - liquid_mod);
+    // LLIF: Dynamic Decay
+    let liquid_mod = ((abs(proximal) + abs(distal)) * 10) >> 10;
+    let final_decay = max(1, decays[i] - liquid_mod);
 
-    pot = (pot * (1024 - final_decay)) / 1024;
+    pot = (pot * (1024 - final_decay)) >> 10;
 
     if (pot >= thresholds[i]) {
         potentials[i] = 0;
@@ -83,7 +83,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             thresholds[i] = thresholds[i] - config.ip_decay;
         }
         // Decaying backprop signal
-        backprop_signals[i] = (backprop_signals[i] * 800) / 1024;
+        backprop_signals[i] = (backprop_signals[i] * 800) >> 10;
     }
 
     next_update[i] = current_tick + intervals[i];
