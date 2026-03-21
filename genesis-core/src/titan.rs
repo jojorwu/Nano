@@ -114,6 +114,10 @@ impl NanoModule for TitanMemory {
             *self = new_self;
         }
     }
+
+    fn box_clone(&self) -> Box<dyn NanoModule> {
+        Box::new(self.clone())
+    }
 }
 
 #[cfg(test)]

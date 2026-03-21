@@ -33,7 +33,11 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
-            modules: ModuleManager::new(),
+            modules: {
+                let mut mm = ModuleManager::new();
+                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 100)));
+                mm
+            },
             settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],
@@ -76,7 +80,11 @@ mod tests {
 
         let mut runtime = Runtime {
             model,
-            modules: ModuleManager::new(),
+            modules: {
+                let mut mm = ModuleManager::new();
+                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 100)));
+                mm
+            },
             settings: crate::SimulationSettings::default(),
             backend: Box::new(CpuBackend::default()),
             previous_spikes: vec![false; 2],

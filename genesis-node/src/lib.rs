@@ -1,4 +1,4 @@
-use genesis_core::{BakedModel, ModuleManager, NanoModule};
+use genesis_core::{BakedModel, ModuleManager};
 use genesis_compute::{ComputeBackend, CpuBackend};
 use serde::{Serialize, Deserialize};
 
@@ -179,13 +179,28 @@ impl Runtime {
         let n_count = model.neurons.len();
 
         let mut modules = ModuleManager::new();
+
+        // Register available factories
         #[cfg(feature = "titan")]
         if let Some(ref titan) = model.titan_memory {
-            let mut titan_module = titan.clone();
-            if let Some(state) = model.module_states.get("titan") {
-                titan_module.set_state(state);
+            let t = titan.clone();
+            modules.register_factory("titan", move || Box::new(t.clone()));
+        }
+
+        // Instantiate modules based on model state
+        for name in model.module_states.keys() {
+            if modules.instantiate(name) {
+                let state = model.module_states.get(name).unwrap();
+                if let Some(m) = modules.modules.last_mut() {
+                    m.set_state(state);
+                }
             }
-            modules.add_module(Box::new(titan_module));
+        }
+
+        // Fallback for titan if not in module_states but in titan_memory (migration/legacy)
+        #[cfg(feature = "titan")]
+        if model.titan_memory.is_some() && !model.module_states.contains_key("titan") {
+            modules.instantiate("titan");
         }
 
         Ok(Self {

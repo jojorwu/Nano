@@ -64,6 +64,8 @@ impl ModelBlueprint {
         let mut has_robotics = false;
         let mut has_fusion = false;
 
+        let mut module_states = HashMap::new();
+
         for module in &self.modules {
             match module {
                 ModuleConfig::TitanMemory { learning_rate, size, decay_rate } => {
@@ -71,6 +73,7 @@ impl ModelBlueprint {
                     {
                         let mut tm = TitanMemory::new(*size, *learning_rate);
                         if let Some(dr) = decay_rate { tm.decay_rate = *dr; }
+                        module_states.insert("titan".to_string(), bincode::serialize(&tm).unwrap());
                         titan_memory = Some(tm);
                     }
                 },
@@ -93,7 +96,7 @@ impl ModelBlueprint {
             local_range: (0, self.architecture.neuron_count),
             neurons,
             synapses,
-            module_states: HashMap::new(),
+            module_states,
             #[cfg(feature = "titan")]
             titan_memory,
             has_text,

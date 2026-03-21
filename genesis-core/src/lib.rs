@@ -22,19 +22,43 @@ pub trait NanoModule: Send + Sync {
     // Serialization for persistence
     fn get_state(&self) -> Vec<u8> { Vec::new() }
     fn set_state(&mut self, _state: &[u8]) {}
+
+    // Factory registration
+    fn box_clone(&self) -> Box<dyn NanoModule>;
+}
+
+impl Clone for Box<dyn NanoModule> {
+    fn clone(&self) -> Box<dyn NanoModule> {
+        self.box_clone()
+    }
 }
 
 pub struct ModuleManager {
     pub modules: Vec<Box<dyn NanoModule>>,
+    pub factories: HashMap<String, Box<dyn Fn() -> Box<dyn NanoModule> + Send + Sync>>,
 }
 
 impl ModuleManager {
     pub fn new() -> Self {
-        Self { modules: Vec::new() }
+        Self { modules: Vec::new(), factories: HashMap::new() }
+    }
+
+    pub fn register_factory<F>(&mut self, name: &str, factory: F)
+    where F: Fn() -> Box<dyn NanoModule> + Send + Sync + 'static {
+        self.factories.insert(name.to_string(), Box::new(factory));
     }
 
     pub fn add_module(&mut self, module: Box<dyn NanoModule>) {
         self.modules.push(module);
+    }
+
+    pub fn instantiate(&mut self, name: &str) -> bool {
+        if let Some(factory) = self.factories.get(name) {
+            self.modules.push(factory());
+            true
+        } else {
+            false
+        }
     }
 
     pub fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32) {
