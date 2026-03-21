@@ -13,6 +13,33 @@ pub mod fusion;
 
 pub mod plasticity;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ThinkModule {
+    pub extra_ticks: usize,
+    pub active: bool,
+}
+
+impl ThinkModule {
+    pub fn new(ticks: usize) -> Self {
+        Self { extra_ticks: ticks, active: true }
+    }
+}
+
+impl NanoModule for ThinkModule {
+    fn name(&self) -> &str { "think" }
+    fn on_tick(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
+        // Core logic: The Runtime will check for 'think' module and perform extra backend calls
+        // This module acts as a state carrier for that behavior
+    }
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
+    fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
+    fn set_state(&mut self, state: &[u8]) {
+        if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
+    }
+}
+
 pub trait NanoModule: Send + Sync {
     fn name(&self) -> &str;
     fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32);

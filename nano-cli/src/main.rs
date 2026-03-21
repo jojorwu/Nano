@@ -33,6 +33,8 @@ enum Commands {
         #[arg(short, long, default_value = "cartpole")] env: String,
         #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
     },
+    Export { #[arg(short, long)] model: String, #[arg(short, long)] name: String },
+    Shell { #[arg(short, long)] model: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,6 +195,44 @@ vocab_size = 1000
                 run_gym_commands(&mut runtime, env_name, *episodes);
             }
             runtime.model.save(model).expect("Failed to save");
+        }
+        Commands::Export { model, name } => {
+            let dir = format!("models/{}", name);
+            fs::create_dir_all(&dir).expect("Failed to create dir");
+            fs::copy(model, format!("{}/state.bin", dir)).expect("Failed to copy state");
+
+            let config = fs::read_to_string("nano.toml").unwrap_or_default();
+            fs::write(format!("{}/config.toml", dir), config).expect("Failed to write config");
+
+            println!("🚀 Model '{}' exported to {}.", name, dir);
+        }
+        Commands::Shell { model } => {
+            let mut session = SimulationSession::new(model, None);
+            println!("🐚 Nano Interactive Shell");
+            println!("Type 'help' for a list of commands.");
+
+            use std::io::{Write, BufRead};
+            let stdin = std::io::stdin();
+            let mut stdout = std::io::stdout();
+
+            print!("> ");
+            let _ = stdout.flush();
+            for line in stdin.lock().lines() {
+                let l = line.unwrap();
+                let cmd = l.trim();
+                if cmd == "exit" || cmd == "quit" { break; }
+                if cmd == "save" { session.finish(model); }
+                else if cmd.starts_with("run ") {
+                    let input = &cmd[4..];
+                    session.run_text(input, false, 0);
+                }
+                else {
+                    let resp = session.runtime.handle_command(cmd);
+                    println!(">> {}", resp);
+                }
+                print!("> ");
+                let _ = stdout.flush();
+            }
         }
     }
 }

@@ -186,6 +186,7 @@ impl Runtime {
             let t = titan.clone();
             modules.register_factory("titan", move || Box::new(t.clone()));
         }
+        modules.register_factory("think", || Box::new(genesis_core::ThinkModule::new(5)));
 
         // Instantiate modules based on model state
         for name in model.module_states.keys() {
@@ -250,6 +251,21 @@ impl Runtime {
 
         // 1. Day Phase: Inference
         let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, self.tick_counter);
+
+        // Chain-of-Thought Reasoning (Thinking Mode)
+        for module in &self.modules.modules {
+            if module.name() == "think" {
+                let state = module.get_state();
+                if let Ok(think) = bincode::deserialize::<genesis_core::ThinkModule>(&state) {
+                    if think.active {
+                        for _ in 0..think.extra_ticks {
+                            // Internal cycles: no external input, feed back spikes
+                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
+                        }
+                    }
+                }
+            }
+        }
 
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
@@ -344,13 +360,49 @@ impl Runtime {
 
     pub fn reload_settings(&mut self, path: &str) -> std::io::Result<()> {
         let content = std::fs::read_to_string(path)?;
-        // This is a bit tricky as the structure might be GlobalConfig from CLI
-        // For simplicity, we assume SimulationSettings directly or similar
         if let Ok(new_settings) = serde_json::from_str::<SimulationSettings>(&content) {
             self.settings = new_settings;
             log::info!("Simulation settings reloaded from {}", path);
         }
         Ok(())
+    }
+
+    pub fn handle_command(&mut self, cmd: &str) -> String {
+        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+        if parts.is_empty() { return "No command provided".to_string(); }
+
+        match parts[0] {
+            "help" => "Commands: set_lr <val>, set_think <active|ticks>, status, save, exit".to_string(),
+            "set_lr" => {
+                if parts.len() < 2 { return "Usage: set_lr <val>".to_string(); }
+                if let Ok(lr) = parts[1].parse::<i32>() {
+                    self.model.config.learning_rate = lr;
+                    format!("Learning rate set to {}", lr)
+                } else { "Invalid value".to_string() }
+            },
+            "set_think" => {
+                if parts.len() < 2 { return "Usage: set_think <active|ticks> <val>".to_string(); }
+                // Implementation to find think module and update it
+                let mut found = false;
+                for m in &mut self.modules.modules {
+                    if m.name() == "think" {
+                        let mut state: genesis_core::ThinkModule = bincode::deserialize(&m.get_state()).unwrap();
+                        if parts[1] == "active" && parts.len() > 2 {
+                             state.active = parts[2] == "true" || parts[2] == "1";
+                        } else if parts[1] == "ticks" && parts.len() > 2 {
+                             state.extra_ticks = parts[2].parse().unwrap_or(5);
+                        }
+                        m.set_state(&bincode::serialize(&state).unwrap());
+                        found = true;
+                    }
+                }
+                if found { "Think settings updated".to_string() } else { "Think module not found".to_string() }
+            },
+            "status" => {
+                format!("Tick: {}, Synapses: {}, Neurons: {}", self.tick_counter, self.model.synapses.len(), self.model.neurons.len())
+            },
+            _ => format!("Unknown command: {}", parts[0]),
+        }
     }
 }
 
