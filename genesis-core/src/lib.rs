@@ -33,7 +33,17 @@ impl NanoModule for ThinkModule {
         // Core logic: The Runtime will check for 'think' module and perform extra backend calls
         // This module acts as a state carrier for that behavior
     }
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
+        if let Some(s) = surprise {
+            // Noradrenaline-like modulation: deep think more when surprised
+            // Base extra_ticks is modified by novelty
+            if s > 512 {
+                self.extra_ticks = (self.extra_ticks + 1).min(20);
+            } else if s < 100 {
+                self.extra_ticks = self.extra_ticks.saturating_sub(1);
+            }
+        }
+    }
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
@@ -149,6 +159,14 @@ use std::collections::HashMap;
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
+/// Represents the global chemical state of the network.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct NeuromodulationState {
+    pub dopamine: IValue,       // Reward / Prediction Error
+    pub noradrenaline: IValue,  // Surprise / Novelty / Arousal
+    pub serotonin: IValue,      // Stability / Risk Mitigation
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub enum Compartment {
@@ -171,6 +189,7 @@ pub struct PlasticityContext<'a> {
     pub backprop_signal: IValue, // SMBP: signal from soma to dendrites
     pub compartment: Compartment,
     pub reward: Option<IValue>,
+    pub neuromodulation: NeuromodulationState,
     pub pre_last_spike: u32,
     pub post_last_spike: u32,
     pub current_tick: u32,
@@ -206,6 +225,13 @@ impl PlasticityRule for GsopRule {
         } else {
             1
         };
+
+        // Neuromodulation: Noradrenaline amplifies learning (Surprise), Dopamine scales reward
+        let neuromod_gain = (SCALE + ctx.neuromodulation.noradrenaline) as i64;
+        let dopamine_gain = (SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
+
+        let lr = (lr as i64 * neuromod_gain * dopamine_gain) >> 20;
+        let lr = lr as i32;
 
         // If reward is negative, we can invert the learning or inhibit it
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };

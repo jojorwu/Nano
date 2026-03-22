@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
+use crate::{IValue, SCALE, NanoModule, NeuronsSoA, SynapsesSoA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TitanMemory {
@@ -28,13 +28,17 @@ impl TitanMemory {
 
     /// Three-Factor STDP: update = (pre * post * modulator)
     /// Here 'modulator' is the 'surprise' signal.
-    pub fn step_three_factor(&mut self, pre_pattern: &[bool], post_pattern: &[bool], surprise: IValue) {
-        // Gating Mechanism: Forgetting is modulated by surprise.
+    pub fn step_three_factor(&mut self, pre_pattern: &[bool], post_pattern: &[bool], surprise: IValue, serotonin: IValue) {
+        // Gating Mechanism: Forgetting is modulated by surprise and serotonin.
+        // High serotonin (stability) reduces decay rate.
         let dynamic_decay = if surprise < self.surprise_threshold {
             self.decay_rate * 2
         } else {
             self.decay_rate / 2
         };
+
+        let dynamic_decay = (dynamic_decay as i64 * (SCALE - serotonin).max(100) as i64) >> 10;
+        let dynamic_decay = dynamic_decay as i32;
 
         if dynamic_decay > 0 {
             for w in self.weights.iter_mut() {
@@ -113,7 +117,9 @@ impl NanoModule for TitanMemory {
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         if let Some(s) = surprise {
             let min_len = self.associative_size.min(previous_spikes.len()).min(current_spikes.len());
-            self.step_three_factor(&previous_spikes[..min_len], &current_spikes[..min_len], s);
+            // Deriving a serotonin-like stability signal from the inverse of surprise for now
+            let serotonin = (SCALE - s).max(0);
+            self.step_three_factor(&previous_spikes[..min_len], &current_spikes[..min_len], s, serotonin);
         }
     }
 
@@ -147,7 +153,7 @@ mod tests {
     fn test_titan_three_factor() {
         let mut titan = TitanMemory::new(4, 100);
         // High surprise (500 > 100 threshold) triggers learning
-        titan.step_three_factor(&[true, false, false, false], &[false, true, false, false], 500);
+        titan.step_three_factor(&[true, false, false, false], &[false, true, false, false], 500, 500);
 
         let mut potentials = vec![0; 4];
         titan.retrieve(&[true, false, false, false], &mut potentials);
@@ -160,7 +166,7 @@ mod tests {
         titan.weights[0] = 1000;
         titan.decay_rate = 10;
         // Low surprise (50 < 100 threshold) triggers faster forgetting
-        titan.step_three_factor(&[false; 4], &[false; 4], 50);
+        titan.step_three_factor(&[false; 4], &[false; 4], 50, 0);
         assert!(titan.weights[0] < 1000);
     }
 }

@@ -5,6 +5,7 @@ pub trait ComputeBackend {
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool>;
     /// Weight updates (fast phase of learning)
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
+    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, history: &[Vec<bool>]);
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
     fn sync_state(&mut self, _model: &mut BakedModel) {} // Optional: download state from device
     fn name(&self) -> &'static str;
@@ -800,6 +801,10 @@ impl ComputeBackend for WgpuBackend {
         self.pot_buffer = None;
         log::info!("GPU Structural Plasticity: Weights re-synced and buffers cleared for re-initialization.");
     }
+    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _modulation: genesis_core::NeuromodulationState, history: &[Vec<bool>]) {
+        self.update_weights(model, previous_spikes, current_spikes, current_tick, reward, history);
+    }
+
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _history: &[Vec<bool>]) {
         use wgpu::util::DeviceExt;
         let s_count = model.synapses.len();
@@ -1203,7 +1208,11 @@ impl ComputeBackend for CpuBackend {
         new_spikes
     }
 
-    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _history: &[Vec<bool>]) {
+    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {
+        self.update_weights_modulated(model, previous_spikes, current_spikes, current_tick, reward, genesis_core::NeuromodulationState::default(), history);
+    }
+
+    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, _history: &[Vec<bool>]) {
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             let target = model.synapses.target_index[i] as usize;
@@ -1214,6 +1223,7 @@ impl ComputeBackend for CpuBackend {
                 backprop_signal: model.neurons.backprop_signal[target],
                 compartment: model.synapses.compartment[i],
                 reward,
+                neuromodulation: modulation,
                 pre_last_spike: model.neurons.last_spike_tick[src],
                 post_last_spike: model.neurons.last_spike_tick[target],
                 current_tick,

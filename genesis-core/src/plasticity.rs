@@ -20,15 +20,19 @@ impl crate::PlasticityRule for StdpRule {
             crate::SCALE as i64
         };
 
+        // Neuromodulation: Noradrenaline (surprise) amplifies temporal learning
+        let neuromod_mod = (crate::SCALE + ctx.neuromodulation.noradrenaline) as i64;
+        let dopamine_mod = (crate::SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
+
         // 1. Reward-modulated update (R-STDP component)
         if let Some(reward) = ctx.reward {
              if pre_spiked && post_spiked {
-                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * smbp_mod) >> 30) as i32;
+                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * smbp_mod * dopamine_mod) >> 40) as i32;
                 *weight = weight.saturating_add(delta);
             }
         } else {
              if pre_spiked && post_spiked {
-                let delta = (self.a_plus as i64 * smbp_mod >> 11) as i32;
+                let delta = (self.a_plus as i64 * smbp_mod * neuromod_mod >> 21) as i32;
                 *weight = weight.saturating_add(delta);
             }
         }
@@ -269,7 +273,9 @@ mod tests {
         let ctx = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
             compartment: Compartment::Proximal,
-            reward: None, pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
+            reward: None,
+            neuromodulation: crate::NeuromodulationState::default(),
+            pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
             neurons: &neurons,
         };
         stdp.apply(&mut weight, &ctx);
@@ -280,7 +286,9 @@ mod tests {
         let ctx2 = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
             compartment: Compartment::Proximal,
-            reward: None, pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
+            reward: None,
+            neuromodulation: crate::NeuromodulationState::default(),
+            pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
             neurons: &neurons,
         };
         stdp.apply(&mut weight2, &ctx2);

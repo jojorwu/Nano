@@ -111,6 +111,7 @@ pub struct Runtime {
     pub tick_counter: u32,
     pub spikes_history: Vec<SpikeData>, // Optimized history storage
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
+    pub global_modulators: genesis_core::NeuromodulationState,
     pub rolling_spike_count: f32, // For surprise calculation
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
@@ -240,6 +241,7 @@ impl Runtime {
             tick_counter: 0,
             spikes_history: Vec::new(),
             episode_reward_history: Vec::new(),
+            global_modulators: genesis_core::NeuromodulationState::default(),
             rolling_spike_count: 0.0,
             network_manager: None,
             observer: Observer::new(n_count),
@@ -323,6 +325,16 @@ impl Runtime {
 
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
+
+        // Update Neuromodulation State
+        self.global_modulators.noradrenaline = surprise;
+        if let Some(r) = normalized_reward {
+            self.global_modulators.dopamine = r;
+        } else {
+            self.global_modulators.dopamine = (self.global_modulators.dopamine * 9) / 10;
+        }
+        // Serotonin tracks long-term stability
+        self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
@@ -345,6 +357,7 @@ impl Runtime {
     }
 
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
+        let modulators = self.global_modulators;
         let mut prev = self.previous_spikes.clone();
         let reconstructed = self.reconstruct_history(self.spikes_history.len());
 
@@ -361,7 +374,8 @@ impl Runtime {
                 normalized_reward
             };
 
-            self.backend.update_weights(&mut self.model, &prev, current, tick, effective_reward, &reconstructed);
+            // Pass global chemical state to backend for modulated plasticity
+            self.backend.update_weights_modulated(&mut self.model, &prev, current, tick, effective_reward, modulators, &reconstructed);
             self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
             prev = current.clone();
         }
