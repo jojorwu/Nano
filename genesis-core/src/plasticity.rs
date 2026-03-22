@@ -12,15 +12,23 @@ impl crate::PlasticityRule for StdpRule {
         let pre_spiked = ctx.pre_spiked;
         let post_spiked = ctx.post_spiked;
 
+        // SMBP Modulation: backpropagation signal amplifies LTP
+        let smbp_mod = if ctx.compartment != crate::Compartment::Proximal {
+            (crate::SCALE + ctx.backprop_signal) as i64
+        } else {
+            crate::SCALE as i64
+        };
+
         // 1. Reward-modulated update (R-STDP component)
         if let Some(reward) = ctx.reward {
              if pre_spiked && post_spiked {
-                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64) >> 20) as i32;
+                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * smbp_mod) >> 30) as i32;
                 *weight = weight.saturating_add(delta);
             }
         } else {
              if pre_spiked && post_spiked {
-                *weight = weight.saturating_add(self.a_plus / 2);
+                let delta = (self.a_plus as i64 * smbp_mod >> 11) as i32;
+                *weight = weight.saturating_add(delta);
             }
         }
 
@@ -240,7 +248,8 @@ mod tests {
 
         // LTP: pre=5, post=8 (diff=3)
         let ctx = PlasticityContext {
-            pre_spiked: true, post_spiked: true, compartment: Compartment::Proximal,
+            pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            compartment: Compartment::Proximal,
             reward: None, pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
             neurons: &neurons,
         };
@@ -250,7 +259,8 @@ mod tests {
         // LTD: pre=8, post=5 (diff=-3)
         let mut weight2 = 1024;
         let ctx2 = PlasticityContext {
-            pre_spiked: true, post_spiked: true, compartment: Compartment::Proximal,
+            pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            compartment: Compartment::Proximal,
             reward: None, pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
             neurons: &neurons,
         };

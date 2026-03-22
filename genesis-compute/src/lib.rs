@@ -1089,6 +1089,7 @@ impl ComputeBackend for CpuBackend {
             let ctx = genesis_core::PlasticityContext {
                 pre_spiked: previous_spikes[src],
                 post_spiked: current_spikes[target],
+                backprop_signal: model.neurons.backprop_signal[target],
                 compartment: model.synapses.compartment[i],
                 reward,
                 pre_last_spike: model.neurons.last_spike_tick[src],

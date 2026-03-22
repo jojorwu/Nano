@@ -159,6 +159,7 @@ impl Default for Compartment {
 pub struct PlasticityContext<'a> {
     pub pre_spiked: bool,
     pub post_spiked: bool,
+    pub backprop_signal: IValue, // SMBP: signal from soma to dendrites
     pub compartment: Compartment,
     pub reward: Option<IValue>,
     pub pre_last_spike: u32,
@@ -190,9 +191,16 @@ impl PlasticityRule for GsopRule {
             _ => self.learning_rate / 2,
         };
 
+        // SMBP Modulation: active backpropagation signal amplifies learning in distal dendrites
+        let smbp_mod = if ctx.compartment != Compartment::Proximal {
+            (SCALE + ctx.backprop_signal) >> 10
+        } else {
+            1
+        };
+
         // If reward is negative, we can invert the learning or inhibit it
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
-        let lr_mod = lr * reward_mod;
+        let lr_mod = lr * reward_mod * smbp_mod;
 
         if ctx.pre_spiked && ctx.post_spiked {
             *weight = weight.saturating_add(lr_mod);
