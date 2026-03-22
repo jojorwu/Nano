@@ -63,7 +63,7 @@ impl SpikePacket {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SpikeData {
     Sparse(Vec<usize>),
     Dense(Vec<u8>), // Bitmask
@@ -108,8 +108,11 @@ pub struct Runtime {
     pub settings: SimulationSettings,
     pub backend: Box<dyn ComputeBackend + Send + Sync>,
     pub previous_spikes: Vec<bool>,
+    pub current_spikes_buffer: Vec<bool>,
+    pub merged_inputs_buffer: Vec<i32>,
     pub tick_counter: u32,
     pub spikes_history: Vec<SpikeData>, // Optimized history storage
+    pub history_ptr: usize,             // Ring-buffer pointer
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub global_modulators: genesis_core::NeuromodulationState,
     pub rolling_spike_count: f32, // For surprise calculation
@@ -235,11 +238,14 @@ impl Runtime {
         Ok(Self {
             model,
             modules,
-            settings,
+            settings: settings.clone(),
             backend,
             previous_spikes: vec![false; n_count],
+            current_spikes_buffer: vec![false; n_count],
+            merged_inputs_buffer: vec![0; n_count],
             tick_counter: 0,
-            spikes_history: Vec::new(),
+            spikes_history: vec![SpikeData::Sparse(Vec::new()); settings.night_phase_interval.max(16) as usize],
+            history_ptr: 0,
             episode_reward_history: Vec::new(),
             global_modulators: genesis_core::NeuromodulationState::default(),
             rolling_spike_count: 0.0,
@@ -275,7 +281,13 @@ impl Runtime {
 
     fn reconstruct_history(&self, window: usize) -> Vec<Vec<bool>> {
         let n_count = self.model.neurons.len();
-        self.spikes_history.iter().rev().take(window).map(|data| {
+        let hist_len = self.spikes_history.len();
+
+        (0..window.min(hist_len)).map(|i| {
+            // Circular access: start from (history_ptr - 1 - i) % hist_len
+            let idx = (self.history_ptr + hist_len - 1 - i) % hist_len;
+            let data = &self.spikes_history[idx];
+
             let mut vec = vec![false; n_count];
             match data {
                 SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
@@ -304,15 +316,16 @@ impl Runtime {
 
         self.reset_potential_buffers();
 
-        let mut merged_inputs = vec![0; n_count];
+        // Use pre-allocated buffer for inputs
+        self.merged_inputs_buffer.fill(0);
         for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { merged_inputs[i] = val; }
+            if i < n_count { self.merged_inputs_buffer[i] = val; }
         }
 
         {
             let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
             for &idx in remote_spikes.iter() {
-                if idx < n_count { merged_inputs[idx] = merged_inputs[idx].saturating_add(1024); }
+                if idx < n_count { self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(1024); }
             }
             remote_spikes.clear();
         }
@@ -320,10 +333,10 @@ impl Runtime {
         self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
 
         let full_history = self.reconstruct_history(16);
-        let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, &full_history, self.tick_counter);
-        current_spikes = self.process_thinking_cycles(current_spikes, n_count);
+        self.current_spikes_buffer = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter);
+        self.current_spikes_buffer = self.process_thinking_cycles(self.current_spikes_buffer.clone(), n_count);
 
-        let spike_count = current_spikes.iter().filter(|&&s| s).count();
+        let spike_count = self.current_spikes_buffer.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
 
         // Update Neuromodulation State
@@ -335,34 +348,39 @@ impl Runtime {
         }
         // Serotonin tracks long-term stability
         self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
-        self.observer.process_spikes(&mut current_spikes, &mut self.model);
+        self.observer.process_spikes(&mut self.current_spikes_buffer, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
-        let active_indices: Vec<usize> = current_spikes.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-        if active_indices.len() < current_spikes.len() / 32 {
-            self.spikes_history.push(SpikeData::Sparse(active_indices));
+        let active_indices: Vec<usize> = self.current_spikes_buffer.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+        let data = if active_indices.len() < self.current_spikes_buffer.len() / 32 {
+            SpikeData::Sparse(active_indices)
         } else {
-            let mut mask = vec![0u8; (current_spikes.len() + 7) / 8];
+            let mut mask = vec![0u8; (self.current_spikes_buffer.len() + 7) / 8];
             for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
-            self.spikes_history.push(SpikeData::Dense(mask));
-        }
+            SpikeData::Dense(mask)
+        };
 
-        if self.tick_counter % self.settings.night_phase_interval == 0 {
+        // Ring-buffer push: zero allocation once stabilized
+        self.spikes_history[self.history_ptr] = data;
+        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
+
+        if self.tick_counter > 0 && self.tick_counter % self.settings.night_phase_interval == 0 {
             self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
         }
 
-        self.previous_spikes = current_spikes.clone();
-        self.broadcast_ghost_spikes(&current_spikes);
-        current_spikes
+        self.previous_spikes.copy_from_slice(&self.current_spikes_buffer);
+        self.broadcast_ghost_spikes(&self.previous_spikes);
+        self.previous_spikes.clone()
     }
 
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
         let modulators = self.global_modulators;
         let mut prev = self.previous_spikes.clone();
-        let reconstructed = self.reconstruct_history(self.spikes_history.len());
+        let reconstructed = self.reconstruct_history(self.settings.night_phase_interval as usize);
 
-        for (i, current) in reconstructed.iter().enumerate() {
-            let tick = self.tick_counter - (reconstructed.len() as u32) + (i as u32) + 1;
+        for (i, current) in reconstructed.iter().rev().enumerate() {
+            let hist_len = reconstructed.len() as u32;
+            let tick = self.tick_counter.saturating_sub(hist_len).saturating_add(i as u32).saturating_add(1);
             for (n_idx, &spiked) in current.iter().enumerate() {
                 if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
             }
@@ -384,7 +402,9 @@ impl Runtime {
         self.backend.structural_plasticity(&mut self.model, raw_reward, &reconstructed);
         self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, raw_reward);
         self.sync_modules_to_model();
-        self.spikes_history.clear();
+        // Reset history pointer after consolidation if desired,
+        // though strictly not needed as pointers are tick-based.
+        self.history_ptr = 0;
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
@@ -404,7 +424,11 @@ impl Runtime {
                                 self.model.neurons.apical_potential[i] = 0;
                                 self.model.neurons.basal_potential[i] = 0;
                             }
-                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, &[], self.tick_counter);
+                            let next_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, &[], self.tick_counter);
+
+                            // Early Exit: stop thinking if the spike pattern has converged
+                            if next_spikes == current_spikes { break; }
+                            current_spikes = next_spikes;
                         }
                     }
                 }
