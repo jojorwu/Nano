@@ -15,6 +15,7 @@ fusion = ["genesis-core/fusion"]
 
 [dependencies]
 log = { workspace = true }
+thiserror = { workspace = true }
 genesis-core = { path = "../genesis-core" }
 genesis-compute = { path = "../genesis-compute" }
 tokio = { workspace = true }

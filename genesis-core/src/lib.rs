@@ -42,10 +42,19 @@ impl NanoModule for ThinkModule {
     }
 }
 
+/// Represents a modular functional unit within the Spiking Neural Network.
+/// Modules can inject signals, observe activity, and manage their own internal plasticity rules.
 pub trait NanoModule: Send + Sync {
+    /// Unique identifier for the module type.
     fn name(&self) -> &str;
+
+    /// Called every simulation tick. Use this to inject external signals or perform per-tick state updates.
     fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32);
+
+    /// Called during the learning phase to update module-specific internal weights or states.
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
+
+    /// Called during the structural plasticity phase (Night Phase). Use this for periodic maintenance or consolidation.
     fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, synapses: &mut SynapsesSoA, reward: Option<IValue>);
 
     // Serialization for persistence
@@ -217,8 +226,11 @@ impl PlasticityRule for GsopRule {
     }
 }
 
+/// Structure of Arrays (SoA) layout for neural state data.
+/// Optimized for SIMD access and GPU memory alignment.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NeuronsSoA {
+    /// Optional identifier for neural functional columns/layers.
     pub layer_id: Vec<u16>,
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)

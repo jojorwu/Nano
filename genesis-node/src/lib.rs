@@ -1,6 +1,19 @@
 use genesis_core::{BakedModel, ModuleManager};
 use genesis_compute::ComputeBackend;
 use serde::{Serialize, Deserialize};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum RuntimeError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] bincode::Error),
+    #[error("Configuration error: {0}")]
+    Config(#[from] serde_json::Error),
+    #[error("Model load failure: {0}")]
+    ModelLoad(String),
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SpikePacket {
@@ -174,12 +187,12 @@ impl NetworkManager {
 }
 
 impl Runtime {
-    pub fn load(path: &str) -> std::io::Result<Self> {
+    pub fn load(path: &str) -> Result<Self, RuntimeError> {
         Self::load_with_settings(path, SimulationSettings::default())
     }
 
-    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> std::io::Result<Self> {
-        let model = BakedModel::load(path)?;
+    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
+        let model = BakedModel::load(path).map_err(|e| RuntimeError::ModelLoad(e.to_string()))?;
         let n_count = model.neurons.len();
 
         let backend_name = settings.preferred_backend.as_deref()
@@ -248,52 +261,19 @@ impl Runtime {
         scaled_surprise.min(2048) // Clamp
     }
 
-    pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
-        let normalized_reward = if let Some(r) = reward {
-            self.telemetry.episode_rewards.push(r);
-            self.episode_reward_history.push(r);
-            if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
-
-            // GRPO-lite: Normalize reward against recent group history
-            let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
-            Some(r - (mean as i32))
-        } else {
-            None
-        };
-
-        self.tick_counter = self.tick_counter.wrapping_add(1);
-
+    fn reset_potential_buffers(&mut self) {
         let n_count = self.model.neurons.len();
-
-        // 0. Reset somatic input buffers each tick before module injection
         for i in 0..n_count {
             self.model.neurons.proximal_potential[i] = 0;
             self.model.neurons.distal_potential[i] = 0;
             self.model.neurons.apical_potential[i] = 0;
             self.model.neurons.basal_potential[i] = 0;
         }
+    }
 
-        let mut merged_inputs = vec![0; n_count];
-        for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { merged_inputs[i] = val; }
-        }
-
-        {
-            let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
-            for &idx in remote_spikes.iter() {
-                if idx < n_count {
-                    merged_inputs[idx] = merged_inputs[idx].saturating_add(1024);
-                }
-            }
-            remote_spikes.clear();
-        }
-
-        // Module Pre-tick logic (e.g. Signal Injection)
-        self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
-
-        // 1. Day Phase: Inference
-        // Reconstruct history for delayed propagation if needed
-        let full_history: Vec<Vec<bool>> = self.spikes_history.iter().rev().take(16).map(|data| {
+    fn reconstruct_history(&self, window: usize) -> Vec<Vec<bool>> {
+        let n_count = self.model.neurons.len();
+        self.spikes_history.iter().rev().take(window).map(|data| {
             let mut vec = vec![false; n_count];
             match data {
                 SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
@@ -303,26 +283,50 @@ impl Runtime {
                 _ => {}
             }
             vec
-        }).collect();
+        }).collect()
+    }
 
+    pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
+        let normalized_reward = if let Some(r) = reward {
+            self.telemetry.episode_rewards.push(r);
+            self.episode_reward_history.push(r);
+            if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
+            let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
+            Some(r - (mean as i32))
+        } else {
+            None
+        };
+
+        self.tick_counter = self.tick_counter.wrapping_add(1);
+        let n_count = self.model.neurons.len();
+
+        self.reset_potential_buffers();
+
+        let mut merged_inputs = vec![0; n_count];
+        for (i, &val) in external_inputs.iter().enumerate() {
+            if i < n_count { merged_inputs[i] = val; }
+        }
+
+        {
+            let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
+            for &idx in remote_spikes.iter() {
+                if idx < n_count { merged_inputs[idx] = merged_inputs[idx].saturating_add(1024); }
+            }
+            remote_spikes.clear();
+        }
+
+        self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
+
+        let full_history = self.reconstruct_history(16);
         let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, &full_history, self.tick_counter);
-
-        // Chain-of-Thought Reasoning (Thinking Mode)
         current_spikes = self.process_thinking_cycles(current_spikes, n_count);
 
         let spike_count = current_spikes.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
-
-        // Asynchronous Observation: process safety and energy in background
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
-        let active_indices: Vec<usize> = current_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s)
-            .map(|(i, _)| i)
-            .collect();
-
-        // Memory-efficient storage based on density
+        let active_indices: Vec<usize> = current_spikes.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
         if active_indices.len() < current_spikes.len() / 32 {
             self.spikes_history.push(SpikeData::Sparse(active_indices));
         } else {
@@ -331,71 +335,42 @@ impl Runtime {
             self.spikes_history.push(SpikeData::Dense(mask));
         }
 
-        // 2. Night Phase: Learning
         if self.tick_counter % self.settings.night_phase_interval == 0 {
-            let n_count = self.model.neurons.len();
-            let mut prev = self.previous_spikes.clone();
-
-            // Reconstruct full boolean history for Correlational Growth
-            let reconstructed_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|data| {
-                let mut vec = vec![false; n_count];
-                match data {
-                    SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
-                    SpikeData::Dense(mask) => {
-                        for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
-                    }
-                    _ => {}
-                }
-                vec
-            }).collect();
-
-            for (i, current) in reconstructed_history.iter().enumerate() {
-                let tick = self.tick_counter - (reconstructed_history.len() as u32) + (i as u32) + 1;
-
-                // Update neuron last_spike_tick for the replayed tick
-                for (n_idx, &spiked) in current.iter().enumerate() {
-                    if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
-                }
-
-                // Targeted Reinforcement Logic
-                let effective_reward = if let Some(m) = layer_mask {
-                    let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.model.neurons.layer_id[idx] == m);
-                    if in_mask { normalized_reward } else { None }
-                } else {
-                    normalized_reward
-                };
-
-                self.backend.update_weights(&mut self.model, &prev, current, tick, effective_reward, &reconstructed_history);
-
-                // Modulate module weight updates with surprise (3rd factor)
-                self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
-
-                // Synchronize dynamic settings (like learning rate) from modules
-                for m in &self.modules.modules {
-                    if m.name() == "adaptive_lr" {
-                        let state = m.get_state();
-                        if let Ok(alr) = bincode::deserialize::<genesis_core::plasticity::AdaptiveLearningRateModule>(&state) {
-                            self.model.config.learning_rate = alr.current_lr;
-                        }
-                    }
-                }
-                prev = current.clone();
-            }
-            self.backend.structural_plasticity(&mut self.model, reward, &reconstructed_history);
-            self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, reward);
-
-            // Sync module states back to model for persistence
-            self.sync_modules_to_model();
-
-            self.spikes_history.clear();
+            self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
         }
 
         self.previous_spikes = current_spikes.clone();
-
-        // Ghost Axons: Transmit spikes to remote nodes
         self.broadcast_ghost_spikes(&current_spikes);
-
         current_spikes
+    }
+
+    fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
+        let mut prev = self.previous_spikes.clone();
+        let reconstructed = self.reconstruct_history(self.spikes_history.len());
+
+        for (i, current) in reconstructed.iter().enumerate() {
+            let tick = self.tick_counter - (reconstructed.len() as u32) + (i as u32) + 1;
+            for (n_idx, &spiked) in current.iter().enumerate() {
+                if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
+            }
+
+            let effective_reward = if let Some(m) = layer_mask {
+                let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.model.neurons.layer_id[idx] == m);
+                if in_mask { normalized_reward } else { None }
+            } else {
+                normalized_reward
+            };
+
+            self.backend.update_weights(&mut self.model, &prev, current, tick, effective_reward, &reconstructed);
+            self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
+            prev = current.clone();
+        }
+
+        // Structural plasticity and Global Module updates use raw reward
+        self.backend.structural_plasticity(&mut self.model, raw_reward, &reconstructed);
+        self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, raw_reward);
+        self.sync_modules_to_model();
+        self.spikes_history.clear();
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
@@ -494,19 +469,12 @@ impl Runtime {
         }
     }
 
-    pub fn reload_settings(&mut self, path: &str) -> std::io::Result<()> {
+    pub fn reload_settings(&mut self, path: &str) -> Result<(), RuntimeError> {
         let content = std::fs::read_to_string(path)?;
-        match serde_json::from_str::<SimulationSettings>(&content) {
-            Ok(new_settings) => {
-                self.settings = new_settings;
-                log::info!("Simulation settings reloaded from {}", path);
-                Ok(())
-            }
-            Err(e) => {
-                log::error!("Failed to parse settings from {}: {}", path, e);
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            }
-        }
+        let new_settings: SimulationSettings = serde_json::from_str(&content)?;
+        self.settings = new_settings;
+        log::info!("Simulation settings reloaded from {}", path);
+        Ok(())
     }
 
     pub fn handle_command(&mut self, cmd: &str) -> String {

@@ -204,7 +204,8 @@ fn test_evolutionary_structural_growth() {
         let mut inputs = vec![0; 100];
         inputs[0] = 5000;
         inputs[1] = 5000;
-        runtime.tick_with_reward(&inputs, Some(500));
+        // Targeted reward to ensure growth logic triggers correctly
+        runtime.tick_with_reward_targeted(&inputs, Some(500), None);
     }
 
     // After 10 ticks (interval=10), structural plasticity should have run
