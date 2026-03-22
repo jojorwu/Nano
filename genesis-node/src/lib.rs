@@ -97,6 +97,7 @@ pub struct Runtime {
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u32,
     pub spikes_history: Vec<SpikeData>, // Optimized history storage
+    pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub rolling_spike_count: f32, // For surprise calculation
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
@@ -225,6 +226,7 @@ impl Runtime {
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
             spikes_history: Vec::new(),
+            episode_reward_history: Vec::new(),
             rolling_spike_count: 0.0,
             network_manager: None,
             observer: Observer::new(n_count),
@@ -247,7 +249,18 @@ impl Runtime {
     }
 
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
-        if let Some(r) = reward { self.telemetry.episode_rewards.push(r); }
+        let normalized_reward = if let Some(r) = reward {
+            self.telemetry.episode_rewards.push(r);
+            self.episode_reward_history.push(r);
+            if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
+
+            // GRPO-lite: Normalize reward against recent group history
+            let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
+            Some(r - (mean as i32))
+        } else {
+            None
+        };
+
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
         let n_count = self.model.neurons.len();
@@ -347,9 +360,9 @@ impl Runtime {
                 // Targeted Reinforcement Logic
                 let effective_reward = if let Some(m) = layer_mask {
                     let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.model.neurons.layer_id[idx] == m);
-                    if in_mask { reward } else { None }
+                    if in_mask { normalized_reward } else { None }
                 } else {
-                    reward
+                    normalized_reward
                 };
 
                 self.backend.update_weights(&mut self.model, &prev, current, tick, effective_reward, &reconstructed_history);

@@ -91,7 +91,13 @@ impl ModelBlueprint {
                     module_states.insert("vision".to_string(), bincode::serialize(&m).unwrap());
                 },
                 ModuleConfig::AudioProcessor { .. } => has_audio = true,
-                ModuleConfig::RobotControl { .. } => has_robotics = true,
+                ModuleConfig::RobotControl { num_motors } => {
+                    has_robotics = true;
+                    // Map motor neurons to the end of the population
+                    let start = self.architecture.neuron_count.saturating_sub(*num_motors);
+                    let m = genesis_core::robotics::RobotControlModule::new((start..self.architecture.neuron_count).collect());
+                    module_states.insert("robot_control".to_string(), bincode::serialize(&m).unwrap());
+                }
             }
         }
 

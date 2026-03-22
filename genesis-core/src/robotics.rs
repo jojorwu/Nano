@@ -61,3 +61,72 @@ impl NanoModule for SpikingCerebellumModule {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RobotControlModule {
+    pub motor_neuron_indices: Vec<usize>,
+    pub spike_counters: Vec<u32>,
+    pub window_size: u32,
+    pub current_motor_outputs: Vec<f32>,
+}
+
+impl RobotControlModule {
+    pub fn new(neurons: Vec<usize>) -> Self {
+        let count = neurons.len();
+        Self {
+            motor_neuron_indices: neurons,
+            spike_counters: vec![0; count],
+            window_size: 10,
+            current_motor_outputs: vec![0.0; count],
+        }
+    }
+
+    pub fn decode_motor_outputs(&mut self) -> Vec<f32> {
+        for (i, counter) in self.spike_counters.iter_mut().enumerate() {
+            // Rate encoding: density of spikes over the window
+            self.current_motor_outputs[i] = (*counter as f32) / (self.window_size as f32);
+            *counter = 0; // Reset for next window
+        }
+        self.current_motor_outputs.clone()
+    }
+}
+
+impl NanoModule for RobotControlModule {
+    fn name(&self) -> &str { "robot_control" }
+
+    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], _tick: u32) {
+        // Intrinsic Motivation (Surprise-driven exploration):
+        // If the network is stagnant (low activity/surprise), inject exploratory noise
+        // specifically into motor-assigned neurons to trigger trial-and-error behavior.
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        // Heuristic: Inject noise if total activity is low (derived from previous spikes)
+        let total_active = previous_spikes.iter().filter(|&&s| s).count();
+        if total_active < self.motor_neuron_indices.len() / 2 {
+            for &idx in &self.motor_neuron_indices {
+                if idx < neurons.len() {
+                    // Stochastic boost to proximal potential
+                    if rng.gen::<f32>() < 0.1 {
+                        neurons.proximal_potential[idx] = neurons.proximal_potential[idx].saturating_add(500);
+                    }
+                }
+            }
+        }
+
+        for (i, &idx) in self.motor_neuron_indices.iter().enumerate() {
+            if idx < previous_spikes.len() && previous_spikes[idx] {
+                self.spike_counters[i] += 1;
+            }
+        }
+    }
+
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+
+    fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
+    fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
+    fn set_state(&mut self, state: &[u8]) {
+        if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
+    }
+}
