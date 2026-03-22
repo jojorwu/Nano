@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use serde::{Serialize, Deserialize};
 use std::fs;
 use genesis_baker::ModelBlueprint;
-use genesis_node::Runtime;
+use genesis_node::{Runtime, SimulationSettings};
 
 #[derive(Parser)]
 struct Cli {
@@ -12,7 +12,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Init,
-    Bake { #[arg(short, long)] blueprint: String, #[arg(short, long, default_value = "model.state")] output: String },
+    Bake {
+        #[arg(short, long)] blueprint: String,
+        #[arg(short, long, default_value = "model.state")] output: String,
+        #[arg(long)] backend: Option<String>,
+    },
     Run {
         #[arg(short, long)] model: String,
         #[arg(short, long)] input: Option<String>,
@@ -21,14 +25,19 @@ enum Commands {
         #[arg(short, long, default_value_t = false)] byte_level: bool,
         #[arg(short, long, default_value_t = 0)] reasoning: usize,
         #[arg(short, long)] learning_rate: Option<i32>,
+        #[arg(long)] backend: Option<String>,
     },
     Gym {
         #[arg(short, long)] model: String,
         #[arg(short, long, default_value = "cartpole")] env: String,
         #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
+        #[arg(long)] backend: Option<String>,
     },
     Export { #[arg(short, long)] model: String, #[arg(short, long)] name: String },
-    Shell { #[arg(short, long)] model: String },
+    Shell {
+        #[arg(short, long)] model: String,
+        #[arg(long)] backend: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,13 +51,17 @@ struct SimulationSession {
 }
 
 impl SimulationSession {
-    fn new(model_path: &str, lr_override: Option<i32>) -> Self {
-        let settings = if let Ok(content) = fs::read_to_string("nano.toml") {
+    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Self {
+        let mut settings = if let Ok(content) = fs::read_to_string("nano.toml") {
             let global: GlobalConfig = toml::from_str(&content).unwrap_or_else(|_| GlobalConfig { simulation: None, network: None });
             global.simulation.unwrap_or_default()
         } else {
             genesis_node::SimulationSettings::default()
         };
+
+        if backend_override.is_some() {
+            settings.preferred_backend = backend_override;
+        }
 
         let mut runtime = Runtime::load_with_settings(model_path, settings).expect("Failed to load model");
 
@@ -136,20 +149,28 @@ vocab_size = 1000
             fs::write("blueprint.toml", blueprint).expect("Failed to write blueprint.toml");
             println!("✨ Nano environment initialized. Edit nano.toml and blueprint.toml, then run 'bake'.");
         }
-        Commands::Bake { blueprint, output } => {
+        Commands::Bake { blueprint, output, backend } => {
             let content = fs::read_to_string(blueprint).expect("Failed to read");
-            let bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            let mut bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            if let Some(b) = backend {
+                if bp.config.is_none() { bp.config = Some(Default::default()); }
+                if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
+            }
             let baked = bp.bake();
             baked.save(output).expect("Failed to save");
-            println!("✅ Model '{}' baked to {}.", bp.name, output);
+            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate } => {
-            let mut session = SimulationSession::new(model, *learning_rate);
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
+            let mut session = SimulationSession::new(model, *learning_rate, backend.clone());
             session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level);
             session.finish(model);
         }
-        Commands::Gym { model, env: env_name, episodes } => {
-            let mut runtime = Runtime::load(model).expect("Failed to load");
+        Commands::Gym { model, env: env_name, episodes, backend } => {
+            let settings = SimulationSettings {
+                preferred_backend: backend.clone(),
+                ..Default::default()
+            };
+            let mut runtime = Runtime::load_with_settings(model, settings).expect("Failed to load");
             #[cfg(feature = "rl")]
             {
                 run_gym_commands(&mut runtime, env_name, *episodes);
@@ -178,9 +199,9 @@ vocab_size = 1000
 
             println!("🚀 Model '{}' exported to {}. Use ./run.sh to start the interactive console.", name, dir);
         }
-        Commands::Shell { model } => {
-            let mut session = SimulationSession::new(model, None);
-            println!("🐚 Nano Interactive Shell");
+        Commands::Shell { model, backend } => {
+            let mut session = SimulationSession::new(model, None, backend.clone());
+            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.backend.name());
             println!("Type 'help' for a list of commands.");
 
             use std::io::{Write, BufRead};

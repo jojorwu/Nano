@@ -1,5 +1,5 @@
 use genesis_core::{BakedModel, ModuleManager};
-use genesis_compute::{ComputeBackend, CpuBackend};
+use genesis_compute::ComputeBackend;
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -65,6 +65,7 @@ pub struct SimulationSettings {
     pub distributed_port: u16,
     pub save_on_exit: bool,
     pub telemetry_enabled: bool,
+    pub preferred_backend: Option<String>,
 }
 
 impl Default for SimulationSettings {
@@ -76,6 +77,7 @@ impl Default for SimulationSettings {
             distributed_port: 8080,
             save_on_exit: true,
             telemetry_enabled: true,
+            preferred_backend: None,
         }
     }
 }
@@ -179,6 +181,17 @@ impl Runtime {
         let model = BakedModel::load(path)?;
         let n_count = model.neurons.len();
 
+        let backend_name = settings.preferred_backend.as_deref()
+            .unwrap_or(&model.config.preferred_backend);
+
+        let registry = genesis_compute::BackendRegistry::new();
+        let backend = registry.create(backend_name)
+            .or_else(|| {
+                log::warn!("Backend '{}' not found, falling back to CPU", backend_name);
+                registry.create("cpu")
+            })
+            .expect("Failed to create any compute backend");
+
         let mut modules = ModuleManager::new();
 
         // Register model-specific factories (e.g. pre-initialized Titan from BakedModel)
@@ -208,7 +221,7 @@ impl Runtime {
             model,
             modules,
             settings,
-            backend: Box::new(CpuBackend::default()),
+            backend,
             previous_spikes: vec![false; n_count],
             tick_counter: 0,
             spikes_history: Vec::new(),

@@ -369,6 +369,9 @@ pub struct NetworkConfig {
 
     // Stochastic Firing (Neural Noise)
     pub noise_amplitude: IValue, // SCALE = 1.0 (max noise)
+
+    // Hardware Backend
+    pub preferred_backend: String,
 }
 
 impl Default for NetworkConfig {
@@ -388,6 +391,7 @@ impl Default for NetworkConfig {
             stdp_a_minus: 100,
             metaplasticity_enabled: true,
             noise_amplitude: 50, // 5% noise by default
+            preferred_backend: "cpu".to_string(),
         }
     }
 }
