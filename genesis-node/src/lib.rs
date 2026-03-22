@@ -246,13 +246,7 @@ impl Runtime {
         scaled_surprise.min(2048) // Clamp
     }
 
-    pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, _layer_mask: Option<u16>) -> Vec<bool> {
-        // Targeted rewards enable finer reinforcement signals.
-        // Implementation can be expanded to filter plasticity by layer_mask.
-        self.tick_with_reward(external_inputs, reward)
-    }
-
-    pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
+    pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
         if let Some(r) = reward { self.telemetry.episode_rewards.push(r); }
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
@@ -307,7 +301,6 @@ impl Runtime {
         let surprise = self.calculate_surprise(spike_count);
 
         // Asynchronous Observation: process safety and energy in background
-        // Note: For deterministic threshold updates, we still need some sync
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
@@ -331,27 +324,35 @@ impl Runtime {
             let mut prev = self.previous_spikes.clone();
 
             // Reconstruct full boolean history for Correlational Growth
-            let full_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|data| {
+            let reconstructed_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|data| {
                 let mut vec = vec![false; n_count];
                 match data {
                     SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
                     SpikeData::Dense(mask) => {
                         for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
                     }
-                    _ => {} // Compressed not used in history yet
+                    _ => {}
                 }
                 vec
             }).collect();
 
-            for (i, current) in full_history.iter().enumerate() {
-                let tick = self.tick_counter - (full_history.len() as u32) + (i as u32) + 1;
+            for (i, current) in reconstructed_history.iter().enumerate() {
+                let tick = self.tick_counter - (reconstructed_history.len() as u32) + (i as u32) + 1;
 
                 // Update neuron last_spike_tick for the replayed tick
                 for (n_idx, &spiked) in current.iter().enumerate() {
                     if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
                 }
 
-                self.backend.update_weights(&mut self.model, &prev, current, tick, reward, &full_history);
+                // Targeted Reinforcement Logic
+                let effective_reward = if let Some(m) = layer_mask {
+                    let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.model.neurons.layer_id[idx] == m);
+                    if in_mask { reward } else { None }
+                } else {
+                    reward
+                };
+
+                self.backend.update_weights(&mut self.model, &prev, current, tick, effective_reward, &reconstructed_history);
 
                 // Modulate module weight updates with surprise (3rd factor)
                 self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
@@ -367,7 +368,7 @@ impl Runtime {
                 }
                 prev = current.clone();
             }
-            self.backend.structural_plasticity(&mut self.model, reward, &full_history);
+            self.backend.structural_plasticity(&mut self.model, reward, &reconstructed_history);
             self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, reward);
 
             // Sync module states back to model for persistence
@@ -382,6 +383,10 @@ impl Runtime {
         self.broadcast_ghost_spikes(&current_spikes);
 
         current_spikes
+    }
+
+    pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
+        self.tick_with_reward_targeted(external_inputs, reward, None)
     }
 
     fn process_thinking_cycles(&mut self, mut current_spikes: Vec<bool>, n_count: usize) -> Vec<bool> {

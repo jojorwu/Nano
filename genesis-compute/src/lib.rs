@@ -15,7 +15,7 @@ pub struct CpuBackend {
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
     pub expert_masks: Vec<bool>, // MoE: which neuron groups are active
-    pub synapse_index: Vec<Vec<usize>>, // source_neuron -> list of synapse indices
+    pub synapse_index: Vec<Vec<(usize, u8)>>, // source_neuron -> list of (synapse_index, delay)
 }
 
 impl Default for CpuBackend {
@@ -937,8 +937,9 @@ impl CpuBackend {
         self.synapse_index = vec![Vec::new(); n_count];
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
+            let delay = model.synapses.delay[i];
             if src < n_count {
-                self.synapse_index[src].push(i);
+                self.synapse_index[src].push((i, delay));
             }
         }
     }
@@ -948,9 +949,8 @@ impl CpuBackend {
             self.rebuild_index(model);
         }
 
-        // We check temporal spikes from current-1 to current-16.
-        // previous_spikes is current-1.
-        // history[0] is current-1, history[1] is current-2, ...
+        // Optimized O(active_spikes * average_fanout) lookup.
+        // We only iterate over spiked neurons across the rolling temporal window.
         for d in 1..=16 {
             let spikes = if d == 1 {
                 previous_spikes
@@ -960,13 +960,13 @@ impl CpuBackend {
                 continue;
             };
 
-            // Sparse Propagation: Only iterate over spiked source neurons
             for (src, &fired) in spikes.iter().enumerate() {
                 if !fired { continue; }
                 if src >= self.synapse_index.len() { continue; }
 
-                for &syn_idx in &self.synapse_index[src] {
-                    if model.synapses.delay[syn_idx] as usize == d {
+                // Only check synapses whose delay matches the current temporal offset 'd'
+                for &(syn_idx, delay) in &self.synapse_index[src] {
+                    if delay as usize == d {
                         let target = model.synapses.target_index[syn_idx] as usize;
                         let gate = model.neurons.dendritic_gate[target];
                         if gate < 8 { continue; }
@@ -1035,6 +1035,8 @@ impl CpuBackend {
             let refr = model.neurons.refractory_timer[i];
             if refr > 0 {
                 model.neurons.refractory_timer[i] = refr - 1;
+                // Relative Refractory Period: potential is suppressed but not necessarily zero
+                // (Though for v4.2 hard reset, we still keep it at 0 to prevent noise accumulation)
                 model.neurons.potential[i] = 0;
                 model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
                 continue;
