@@ -225,6 +225,7 @@ pub struct NeuronsSoA {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
+    pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
 }
 
 impl NeuronsSoA {
@@ -249,6 +250,7 @@ impl NeuronsSoA {
             x: vec![0; size],
             y: vec![0; size],
             gate_threshold: vec![512; size],
+            activity_ema: vec![0; size],
         }
     }
     pub fn len(&self) -> usize {
@@ -276,6 +278,7 @@ impl NeuronsSoA {
         self.x.resize(new_size, 0);
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
+        self.activity_ema.resize(new_size, 0);
     }
 }
 

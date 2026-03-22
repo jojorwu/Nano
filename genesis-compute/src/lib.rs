@@ -986,6 +986,8 @@ impl CpuBackend {
         let ip_dec = model.config.ip_decay;
         let noise_amp = model.config.noise_amplitude;
 
+        let target_activity = 100; // Aim for 10% activity
+
         // Vectorized-friendly loop for neuron updates
         for i in 0..n_count {
             if current_tick < model.neurons.next_update_tick[i] { continue; }
@@ -1037,12 +1039,24 @@ impl CpuBackend {
                 model.neurons.last_spike_tick[i] = current_tick;
                 model.neurons.backprop_signal[i] = SCALE;
                 model.neurons.threshold[i] = model.neurons.threshold[i].saturating_add(ip_inc);
+
+                // Homeostatic update: increase base threshold if too active
+                model.neurons.activity_ema[i] = (model.neurons.activity_ema[i] * 99 + 100) / 100;
             } else {
                 model.neurons.potential[i] = pot;
                 if model.neurons.threshold[i] > model.neurons.base_threshold[i] {
                     model.neurons.threshold[i] = model.neurons.threshold[i].saturating_sub(ip_dec);
                 }
                 model.neurons.backprop_signal[i] = ((model.neurons.backprop_signal[i] as i64 * 800) >> 10) as i32;
+
+                model.neurons.activity_ema[i] = (model.neurons.activity_ema[i] * 99) / 100;
+            }
+
+            // Long-term Homeostasis: Adjust base threshold to maintain target firing rate
+            if model.neurons.activity_ema[i] > target_activity {
+                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_add(1);
+            } else if model.neurons.activity_ema[i] < target_activity && model.neurons.base_threshold[i] > 512 {
+                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_sub(1);
             }
             model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
         }

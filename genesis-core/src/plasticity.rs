@@ -141,28 +141,43 @@ impl EvolutionaryOptimizer {
                     let src = rng.gen_range(0..neuron_count) as u32;
 
                     // Gaussian-like distance selection for target
-                    let range = 20; // local radius
-                    let tx = (neurons.x[src as usize] as i32 + rng.gen_range(-range..range)).clamp(0, 1000) as i16;
-                    let ty = (neurons.y[src as usize] as i32 + rng.gen_range(-range..range)).clamp(0, 1000) as i16;
+                    let range = 30; // Modular columnar radius
+                    let sx = neurons.x[src as usize];
+                    let sy = neurons.y[src as usize];
 
-                    // Find a neuron close to these coordinates
-                    // (Simplified: in a large network, we'd use a spatial index)
+                    // Search for a target that balances spatial proximity with functional diversity
                     let mut best_target = (src + 1) % neuron_count as u32;
-                    let mut min_dist = 10000;
+                    let mut min_score = 1000000i32;
 
-                    for _ in 0..10 { // Search a few random candidates
+                    for _ in 0..15 {
                         let cand = rng.gen_range(0..neuron_count) as u32;
-                        let dx = (neurons.x[cand as usize] - tx).abs() as i32;
-                        let dy = (neurons.y[cand as usize] - ty).abs() as i32;
-                        let d = dx + dy;
-                        if d < min_dist && cand != src {
-                            min_dist = d;
+                        if cand == src { continue; }
+
+                        let dx = (neurons.x[cand as usize] - sx) as i32;
+                        let dy = (neurons.y[cand as usize] - sy) as i32;
+                        let dist_sq = dx*dx + dy*dy; // L2 Norm squared for sharper locality
+
+                        // Score: prefer nearby neurons, but add noise for exploratory distal connections
+                        let score = dist_sq + rng.gen_range(0..range*range);
+
+                        if score < min_score {
+                            min_score = score;
                             best_target = cand;
                         }
                     }
 
-                    let comp = if min_dist < 10 { Compartment::Proximal } else { Compartment::Distal };
-                    grow_synapse_in_compartment(synapses, src, best_target, 100, comp, &StructuralPlasticityConfig::default());
+                    // Targeted compartment selection based on distance
+                    // Proximal = very local, Distal/Apical = inter-columnar
+                    let dist = (min_score as f32).sqrt();
+                    let comp = if dist < 10.0 {
+                        Compartment::Proximal
+                    } else if dist < 50.0 {
+                        Compartment::Distal
+                    } else {
+                        Compartment::Apical
+                    };
+
+                    grow_synapse_in_compartment(synapses, src, best_target, 150, comp, &StructuralPlasticityConfig::default());
                 }
             }
         }
