@@ -80,6 +80,9 @@ pub struct WgpuBackend {
     pub staging_state: Option<wgpu::Buffer>,
     pub pre_spike_buffer: Option<wgpu::Buffer>,
     pub post_spike_buffer: Option<wgpu::Buffer>,
+    pub last_spike_tick_buffer: Option<wgpu::Buffer>,
+    pub is_excitatory_buffer: Option<wgpu::Buffer>,
+    pub spike_history_buffer: Option<wgpu::Buffer>,
     pub expert_mask_buffer: Option<wgpu::Buffer>,
     pub bind_group: Option<wgpu::BindGroup>,
     pub tick_bind_group: Option<wgpu::BindGroup>,
@@ -152,6 +155,8 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 18, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 19, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 20, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 21, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 22, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -200,6 +205,7 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -287,7 +293,8 @@ impl WgpuBackend {
             tick_buffer: None, lr_buffer: None,
             u_matrix_buffer: None, v_matrix_buffer: None, latent_state_buffer: None,
             sparse_spike_buffer: None, spike_counter_buffer: None, staging_spikes: None, staging_state: None,
-            pre_spike_buffer: None, post_spike_buffer: None, expert_mask_buffer: None,
+            pre_spike_buffer: None, post_spike_buffer: None, last_spike_tick_buffer: None, is_excitatory_buffer: None,
+            spike_history_buffer: None, expert_mask_buffer: None,
             bind_group: None, tick_bind_group: None, lr_bind_group: None, cached_neuron_count: 0
         }
     }
@@ -438,6 +445,22 @@ impl ComputeBackend for WgpuBackend {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
+            self.spike_history_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Spike History Buffer (GPU)"),
+                size: (n_count * 16 * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.last_spike_tick_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Last Spike Ticks"),
+                contents: bytemuck::cast_slice(&model.neurons.last_spike_tick),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            }));
+            self.is_excitatory_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Is Excitatory Flags"),
+                contents: bytemuck::cast_slice(&model.neurons.is_excitatory.iter().map(|&b| if b { 1u32 } else { 0u32 }).collect::<Vec<u32>>()),
+                usage: wgpu::BufferUsages::STORAGE,
+            }));
 
             // Re-create Bind Group
             self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -464,6 +487,8 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 18, resource: self.basal_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 19, resource: self.gate_threshold_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 20, resource: self.expert_mask_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 21, resource: self.last_spike_tick_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 22, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -549,6 +574,7 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.apical_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.apical_potential));
         self.queue.write_buffer(self.basal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.basal_potential));
         self.queue.write_buffer(self.gate_threshold_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.gate_threshold));
+        self.queue.write_buffer(self.last_spike_tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.last_spike_tick));
 
         let mask_data: Vec<u32> = if self.expert_masks.is_empty() {
             vec![1u32; n_count]
@@ -575,9 +601,18 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 7, resource: self.apical_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 8, resource: self.basal_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 9, resource: self.gate_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: self.spike_history_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: Some("Prop Bind Group"),
             });
+
+            // Update history buffer slot for the current tick
+            let history_slot = (current_tick % 16) as u64;
+            self.queue.write_buffer(
+                self.spike_history_buffer.as_ref().unwrap(),
+                history_slot * (n_count * 4) as u64,
+                bytemuck::cast_slice(&prev_spikes_u32)
+            );
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
@@ -706,6 +741,7 @@ impl ComputeBackend for WgpuBackend {
         encoder.copy_buffer_to_buffer(self.threshold_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 4) as u64, (n_count * 4) as u64);
         encoder.copy_buffer_to_buffer(self.refractory_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 8) as u64, (n_count * 4) as u64);
         encoder.copy_buffer_to_buffer(self.next_update_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 12) as u64, (n_count * 4) as u64);
+        encoder.copy_buffer_to_buffer(self.last_spike_tick_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 16) as u64, (n_count * 4) as u64);
 
         // Download weights
         let weight_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -732,6 +768,7 @@ impl ComputeBackend for WgpuBackend {
                 model.neurons.threshold[i] = state_data[n_count + i];
                 model.neurons.refractory_timer[i] = state_data[2 * n_count + i];
                 model.neurons.next_update_tick[i] = state_data[3 * n_count + i] as u32;
+                model.neurons.last_spike_tick[i] = state_data[4 * n_count + i] as u32;
             }
         }
 
@@ -790,7 +827,7 @@ impl ComputeBackend for WgpuBackend {
         if self.pre_spike_buffer.is_none() || n_count != self.cached_neuron_count {
             self.pre_spike_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Pre Spikes"),
-                size: (n_count * 4) as u64,
+            size: (n_count * 5 * 4) as u64, // potential, threshold, refractory, next_update, last_spike
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
@@ -819,8 +856,10 @@ impl ComputeBackend for WgpuBackend {
                 wgpu::BindGroupEntry { binding: 4, resource: self.post_spike_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: self.compartment_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.backprop_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: self.last_spike_tick_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
             ],
-            label: None,
+            label: Some("GSOP Bind Group (Enhanced)"),
         });
 
         // 4. Update Learning Rate Uniform
@@ -954,8 +993,11 @@ impl CpuBackend {
         for d in 1..=16 {
             let spikes = if d == 1 {
                 previous_spikes
-            } else if d - 1 < history.len() {
-                &history[d - 1]
+            } else if d - 2 < history.len() {
+                // history is reversed: [t-2, t-3, t-4...]
+                // d=2 should access history[0] (t-2)
+                // d=3 should access history[1] (t-3)
+                &history[d - 2]
             } else {
                 continue;
             };
@@ -971,7 +1013,18 @@ impl CpuBackend {
                         let gate = model.neurons.dendritic_gate[target];
                         if gate < 8 { continue; }
 
-                        let gated_weight = ((model.synapses.weight[syn_idx] as i64 * gate as i64) >> 10) as i32;
+                        // Short-Term Plasticity (STP): modulate weight by available resources and calcium
+                        let u_facilitation = model.synapses.stp_calcium[syn_idx];
+                        let r_depression = model.synapses.stp_resources[syn_idx];
+
+                        let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
+                        let stp_weight = ((stp_weight as i64 * (SCALE + u_facilitation) as i64) >> 10) as i32;
+
+                        // Consumption: firing uses resources and increases calcium
+                        model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] * 800) >> 10;
+                        model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] + 200).min(SCALE);
+
+                        let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
                         match model.synapses.compartment[syn_idx] {
                             Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
                             Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
@@ -1074,10 +1127,13 @@ impl CpuBackend {
                 0
             };
 
+            let liquid = model.neurons.liquid_current[i];
+
             let mut pot = model.neurons.potential[i]
                 .saturating_add(proximal)
                 .saturating_add(dist_gated)
                 .saturating_add(apical_gated)
+                .saturating_add(liquid)
                 .saturating_add(noise);
 
             pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
@@ -1135,6 +1191,12 @@ impl ComputeBackend for CpuBackend {
 
         self.propagate_sparse_delayed_spikes(model, previous_spikes, history);
         self.propagate_latent_spikes(model, previous_spikes);
+
+        // STP Recovery: gradual return to baseline for all synapses
+        for i in 0..model.synapses.len() {
+            model.synapses.stp_resources[i] = (model.synapses.stp_resources[i] * 99 + SCALE) / 100;
+            model.synapses.stp_calcium[i] = (model.synapses.stp_calcium[i] * 95) / 100;
+        }
 
         let mut new_spikes = vec![false; n_count];
         self.update_neuron_states(model, current_tick, &mut new_spikes);

@@ -10,6 +10,8 @@
 @group(0) @binding(8) var<storage, read_write> basal_potentials: array<atomic<i32>>;
 
 @group(0) @binding(9) var<storage, read> dendritic_gates: array<i32>;
+@group(0) @binding(10) var<storage, read> spike_history: array<u32>; // Circular buffer [16 * neurons]
+@group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -17,6 +19,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (idx >= arrayLength(&source_indices)) { return; }
 
     let src = source_indices[idx];
+    let delay = u32(weights[idx]); // placeholder? No, let's use a true binding or layout
+
+    // For true axonal delays on GPU:
+    // 1. Get syn_delay for this synapse
+    // 2. Look back in circular history buffer: history[(tick - delay) % 16][src]
+
+    // Temporary logic: use instantaneous propagation if delay=1, else check history
+    // (Assuming binding 3 'prev_spikes' is history[current-1])
+
     if (prev_spikes[src] != 0u) {
         let target = target_indices[idx];
         let gate = dendritic_gates[target];

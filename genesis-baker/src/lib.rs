@@ -39,6 +39,12 @@ pub enum ModuleConfig {
 impl ModelBlueprint {
     pub fn bake(&self) -> BakedModel {
         let mut neurons = NeuronsSoA::new(self.architecture.neuron_count);
+
+        // Balanced E-I: 80% Excitatory, 20% Inhibitory by default
+        for i in 0..neurons.len() {
+            neurons.is_excitatory[i] = (i % 5) != 0;
+        }
+
         if let Some(ref layers) = self.architecture.layers {
             for layer in layers {
                 for i in layer.range.0..layer.range.1 {
@@ -51,12 +57,20 @@ impl ModelBlueprint {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         for i in 0..self.architecture.synapse_count {
-            let src = (i % self.architecture.neuron_count) as u32;
-            let tgt = ((i + 1) % self.architecture.neuron_count) as u32;
+            let src = rng.gen_range(0..self.architecture.neuron_count) as u32;
+            let tgt = rng.gen_range(0..self.architecture.neuron_count) as u32;
+            if src == tgt { continue; }
 
-            // Random delay between 1 and 8 ticks for temporal variety
             let delay = rng.gen_range(1..9);
-            synapses.push_delayed(src, tgt, 500, delay);
+
+            // Inhibitory neurons target Basal (lateral inhibition) or Proximal
+            let comp = if !neurons.is_excitatory[src as usize] {
+                if rng.gen_bool(0.7) { genesis_core::Compartment::Basal } else { genesis_core::Compartment::Proximal }
+            } else {
+                if rng.gen_bool(0.8) { genesis_core::Compartment::Proximal } else { genesis_core::Compartment::Distal }
+            };
+
+            synapses.push_polarized(src, tgt, 500, delay, comp, &neurons);
         }
 
         #[cfg(feature = "titan")]

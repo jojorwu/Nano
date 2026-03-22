@@ -202,11 +202,16 @@ impl PlasticityRule for GsopRule {
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
         let lr_mod = lr * reward_mod * smbp_mod;
 
+        let old_weight = *weight;
         if ctx.pre_spiked && ctx.post_spiked {
             *weight = weight.saturating_add(lr_mod);
         } else if ctx.pre_spiked && !ctx.post_spiked {
             *weight = weight.saturating_sub(lr_mod / 2);
         }
+
+        // Sign Preservation: Ensure weight never crosses zero (Dale's Law)
+        if old_weight > 0 && *weight < 0 { *weight = 1; }
+        if old_weight < 0 && *weight > 0 { *weight = -1; }
         if *weight > SCALE * 5 { *weight = SCALE * 5; }
         if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
     }
@@ -234,6 +239,7 @@ pub struct NeuronsSoA {
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
+    pub is_excitatory: Vec<bool>,
 }
 
 impl NeuronsSoA {
@@ -259,6 +265,7 @@ impl NeuronsSoA {
             y: vec![0; size],
             gate_threshold: vec![512; size],
             activity_ema: vec![0; size],
+            is_excitatory: vec![true; size],
         }
     }
     pub fn len(&self) -> usize {
@@ -287,6 +294,7 @@ impl NeuronsSoA {
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
         self.activity_ema.resize(new_size, 0);
+        self.is_excitatory.resize(new_size, true);
     }
 }
 
@@ -296,6 +304,8 @@ pub struct SynapsesSoA {
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
     pub delay: Vec<u8>, // Axonal delays (1-16 ticks)
+    pub stp_resources: Vec<IValue>, // Short-Term Depression (SCALE = 1.0)
+    pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
@@ -314,6 +324,8 @@ impl SynapsesSoA {
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
             delay: Vec::with_capacity(capacity),
+            stp_resources: Vec::with_capacity(capacity),
+            stp_calcium: Vec::with_capacity(capacity),
             compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
@@ -332,7 +344,18 @@ impl SynapsesSoA {
         self.target_index.push(target);
         self.weight.push(weight);
         self.delay.push(delay.max(1));
+        self.stp_resources.push(SCALE); // Start fully charged
+        self.stp_calcium.push(0);       // Start at baseline
         self.compartment.push(compartment);
+    }
+
+    pub fn push_polarized(&mut self, source: u32, target: u32, weight: IValue, delay: u8, compartment: Compartment, neurons: &NeuronsSoA) {
+        let polarized_weight = if neurons.is_excitatory[source as usize] {
+            weight.abs()
+        } else {
+            -weight.abs()
+        };
+        self.push_to_compartment(source, target, polarized_weight, delay, compartment);
     }
 
     pub fn set_latent(&mut self, u: Vec<IValue>, v: Vec<IValue>, rank: usize) {
@@ -348,6 +371,8 @@ impl SynapsesSoA {
         self.target_index.swap_remove(index);
         self.weight.swap_remove(index);
         self.delay.swap_remove(index);
+        self.stp_resources.swap_remove(index);
+        self.stp_calcium.swap_remove(index);
         self.compartment.swap_remove(index);
     }
 }

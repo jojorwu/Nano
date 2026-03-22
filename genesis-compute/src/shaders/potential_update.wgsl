@@ -30,6 +30,7 @@ struct Config {
 @group(0) @binding(8) var<storage, read> dendritic_gate: array<i32>;
 @group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
 @group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
+@group(0) @binding(21) var<storage, read_write> last_spike_ticks: array<u32>;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
@@ -79,8 +80,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if (pot >= thresholds[i]) {
         potentials[i] = 0;
-        refractory[i] = 2;
+        refractory[i] = 4;
         spikes[i] = 1;
+        last_spike_ticks[i] = current_tick;
 
         // SMBP: Active backpropagation signal
         backprop_signals[i] = 1024;

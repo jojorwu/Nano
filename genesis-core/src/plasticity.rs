@@ -9,6 +9,7 @@ pub struct StdpRule {
 
 impl crate::PlasticityRule for StdpRule {
     fn apply(&self, weight: &mut IValue, ctx: &crate::PlasticityContext) {
+        let weight_before = *weight;
         let pre_spiked = ctx.pre_spiked;
         let post_spiked = ctx.post_spiked;
 
@@ -57,6 +58,10 @@ impl crate::PlasticityRule for StdpRule {
             let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) * ltd_scale as i64 / (self.tau as i64 * 1024)) as i32;
             *weight = weight.saturating_sub(delta);
         }
+
+        // Sign Preservation (Dale's Law)
+        if weight_before > 0 && *weight < 0 { *weight = 1; }
+        if weight_before < 0 && *weight > 0 { *weight = -1; }
 
         // Clamp weights
         if *weight > 5000 { *weight = 5000; }
