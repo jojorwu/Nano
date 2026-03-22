@@ -1033,14 +1033,12 @@ impl CpuBackend {
             if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] { continue; }
 
             let refr = model.neurons.refractory_timer[i];
-            if refr > 0 {
+            let refr_multiplier = if refr > 0 {
                 model.neurons.refractory_timer[i] = refr - 1;
-                // Relative Refractory Period: potential is suppressed but not necessarily zero
-                // (Though for v4.2 hard reset, we still keep it at 0 to prevent noise accumulation)
-                model.neurons.potential[i] = 0;
-                model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
-                continue;
-            }
+                4 // Threshold is 4x higher during refractory period
+            } else {
+                1
+            };
 
             let proximal = model.neurons.proximal_potential[i];
             let distal = model.neurons.distal_potential[i];
@@ -1048,8 +1046,24 @@ impl CpuBackend {
             let basal = model.neurons.basal_potential[i];
             let gate_threshold = model.neurons.gate_threshold[i];
 
-            let dist_gated = if proximal >= gate_threshold { distal } else { distal >> 2 };
-            let apical_gated = if dist_gated >= gate_threshold { apical } else { apical >> 1 };
+            // Non-linear Dendritic Gating (Approximate NMDA spikes)
+            let dist_gain = if proximal >= gate_threshold {
+                1024 // 1.0x gain
+            } else if proximal >= gate_threshold / 2 {
+                512  // 0.5x gain
+            } else {
+                256  // 0.25x gain
+            };
+            let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
+
+            let apical_gain = if dist_gated >= gate_threshold {
+                1024
+            } else if dist_gated >= gate_threshold / 2 {
+                768
+            } else {
+                512
+            };
+            let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
 
             let mod_factor = if basal < 0 { 800 } else { 1024 };
 
@@ -1073,9 +1087,11 @@ impl CpuBackend {
             let final_decay = (model.neurons.decay[i] - liquid_mod).max(1);
             pot = ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32;
 
-            if pot >= model.neurons.threshold[i] {
+            let effective_threshold = model.neurons.threshold[i] * refr_multiplier;
+
+            if pot >= effective_threshold {
                 model.neurons.potential[i] = 0;
-                model.neurons.refractory_timer[i] = 2;
+                model.neurons.refractory_timer[i] = 4;
                 new_spikes[i] = true;
                 model.neurons.last_spike_tick[i] = current_tick;
                 model.neurons.backprop_signal[i] = SCALE;
@@ -1094,8 +1110,11 @@ impl CpuBackend {
             }
 
             // Long-term Homeostasis: Adjust base threshold to maintain target firing rate
+            // Calibration: Use Surprise to modulate the rate of homeostatic adjustment
+            let homeo_rate = if model.neurons.activity_ema[i] > target_activity * 2 { 2 } else { 1 };
+
             if model.neurons.activity_ema[i] > target_activity {
-                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_add(1);
+                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_add(homeo_rate);
             } else if model.neurons.activity_ema[i] < target_activity && model.neurons.base_threshold[i] > 512 {
                 model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_sub(1);
             }

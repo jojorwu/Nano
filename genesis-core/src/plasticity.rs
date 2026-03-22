@@ -32,15 +32,29 @@ impl crate::PlasticityRule for StdpRule {
             }
         }
 
-        // 2. Temporal update (classic STDP)
+        // 2. Temporal update (Metaplastic STDP / BCM-lite)
         if ctx.pre_last_spike == 0 || ctx.post_last_spike == 0 { return; }
         let diff = (ctx.post_last_spike as i64) - (ctx.pre_last_spike as i64);
 
+        // BCM Logic: Use activity_ema to shift the LTP/LTD threshold
+        // If the neuron is highly active, it becomes harder to strengthen connections (LTP)
+        // and easier to weaken them (LTD), maintaining homeostatic stability.
+        let activity = ctx.neurons.activity_ema[ctx.post_last_spike as usize % ctx.neurons.len()]; // Approximation
+        let bcm_threshold = 100; // Target activity
+
         if diff > 0 && diff < self.tau as i64 {
-            let delta = (self.a_plus as i64 * (self.tau as i64 - diff) / self.tau as i64) as i32;
+            let mut ltp_scale = 1024;
+            if activity > bcm_threshold {
+                ltp_scale = (1024 * bcm_threshold) / activity.max(1);
+            }
+            let delta = (self.a_plus as i64 * (self.tau as i64 - diff) * ltp_scale as i64 / (self.tau as i64 * 1024)) as i32;
             *weight = weight.saturating_add(delta);
         } else if diff < 0 && diff > -(self.tau as i64) {
-            let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) / self.tau as i64) as i32;
+            let mut ltd_scale = 1024;
+            if activity > bcm_threshold {
+                ltd_scale = (1024 * activity) / bcm_threshold;
+            }
+            let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) * ltd_scale as i64 / (self.tau as i64 * 1024)) as i32;
             *weight = weight.saturating_sub(delta);
         }
 
