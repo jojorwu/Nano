@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<storage, read> source_indices: array<u32>;
 @group(0) @binding(1) var<storage, read> target_indices: array<u32>;
 @group(0) @binding(2) var<storage, read> weights: array<i32>;
-@group(0) @binding(3) var<storage, read> prev_spikes: array<u32>;
+@group(0) @binding(3) var<storage, read> delays: array<u32>;
 @group(0) @binding(4) var<storage, read> compartments: array<u32>;
 
 @group(0) @binding(5) var<storage, read_write> proximal_potentials: array<atomic<i32>>;
@@ -19,16 +19,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (idx >= arrayLength(&source_indices)) { return; }
 
     let src = source_indices[idx];
-    let delay = u32(weights[idx]); // placeholder? No, let's use a true binding or layout
+    let delay = delays[idx];
+    let n_count = arrayLength(&dendritic_gates);
 
-    // For true axonal delays on GPU:
-    // 1. Get syn_delay for this synapse
-    // 2. Look back in circular history buffer: history[(tick - delay) % 16][src]
+    // Get spike state from history based on axonal delay (1-16 ticks)
+    // Delay=1 is the previous tick spikes.
+    // Spike history is stored as: [slot_0: n_count][slot_1: n_count]...[slot_15: n_count]
 
-    // Temporary logic: use instantaneous propagation if delay=1, else check history
-    // (Assuming binding 3 'prev_spikes' is history[current-1])
+    // Calculate history slot: (current_tick - delay) % 16
+    let slot = (current_tick + 16u - delay) % 16u;
+    let fired = spike_history[slot * n_count + src];
 
-    if (prev_spikes[src] != 0u) {
+    if (fired != 0u) {
         let target = target_indices[idx];
         let gate = dendritic_gates[target];
         if (gate < 8) { return; }

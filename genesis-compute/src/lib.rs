@@ -1,5 +1,6 @@
 use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue, Compartment};
 use genesis_core::plasticity::{prune_synapses, StructuralPlasticityConfig};
+use rayon::prelude::*;
 
 pub trait ComputeBackend {
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool>;
@@ -85,10 +86,14 @@ pub struct WgpuBackend {
     pub is_excitatory_buffer: Option<wgpu::Buffer>,
     pub spike_history_buffer: Option<wgpu::Buffer>,
     pub expert_mask_buffer: Option<wgpu::Buffer>,
+    pub delay_buffer: Option<wgpu::Buffer>,
+    pub stp_resources_buffer: Option<wgpu::Buffer>,
+    pub stp_calcium_buffer: Option<wgpu::Buffer>,
     pub bind_group: Option<wgpu::BindGroup>,
     pub tick_bind_group: Option<wgpu::BindGroup>,
     pub lr_bind_group: Option<wgpu::BindGroup>,
     pub cached_neuron_count: usize,
+    pub cached_synapse_count: usize,
 }
 
 #[cfg(feature = "wgpu")]
@@ -171,6 +176,8 @@ impl WgpuBackend {
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -295,8 +302,10 @@ impl WgpuBackend {
             u_matrix_buffer: None, v_matrix_buffer: None, latent_state_buffer: None,
             sparse_spike_buffer: None, spike_counter_buffer: None, staging_spikes: None, staging_state: None,
             pre_spike_buffer: None, post_spike_buffer: None, last_spike_tick_buffer: None, is_excitatory_buffer: None,
-            spike_history_buffer: None, expert_mask_buffer: None,
-            bind_group: None, tick_bind_group: None, lr_bind_group: None, cached_neuron_count: 0
+            spike_history_buffer: None, expert_mask_buffer: None, delay_buffer: None,
+            stp_resources_buffer: None, stp_calcium_buffer: None,
+            bind_group: None, tick_bind_group: None, lr_bind_group: None,
+            cached_neuron_count: 0, cached_synapse_count: 0
         }
     }
 }
@@ -539,7 +548,7 @@ impl ComputeBackend for WgpuBackend {
 
         // 2. Weight/Synapse buffers (lazy init)
         let s_count = model.synapses.len();
-        if self.weight_buffer.is_none() || s_count != model.synapses.len() {
+        if self.weight_buffer.is_none() || s_count != self.cached_synapse_count {
              self.weight_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Synapse Weights"),
                 contents: bytemuck::cast_slice(&model.synapses.weight),
@@ -561,6 +570,22 @@ impl ComputeBackend for WgpuBackend {
                 contents: bytemuck::cast_slice(&comp_data),
                 usage: wgpu::BufferUsages::STORAGE,
             }));
+            self.delay_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Synapse Delays"),
+                contents: bytemuck::cast_slice(&model.synapses.delay.iter().map(|&d| d as u32).collect::<Vec<u32>>()),
+                usage: wgpu::BufferUsages::STORAGE,
+            }));
+            self.stp_resources_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("STP Resources"),
+                contents: bytemuck::cast_slice(&model.synapses.stp_resources),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            }));
+            self.stp_calcium_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("STP Calcium"),
+                contents: bytemuck::cast_slice(&model.synapses.stp_calcium),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            }));
+            self.cached_synapse_count = s_count;
         }
 
         // 3. Upload inputs and current tick
@@ -568,14 +593,10 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.prev_spikes_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&prev_spikes_u32));
         self.queue.write_buffer(self.input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(external_inputs));
         self.queue.write_buffer(self.tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[current_tick]));
+
+        // Lazy upload of configuration (only if changed or first run)
         self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[model.config.ip_increment]));
         self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 4, bytemuck::cast_slice(&[model.config.ip_decay]));
-        self.queue.write_buffer(self.distal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.distal_potential));
-        self.queue.write_buffer(self.proximal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.proximal_potential));
-        self.queue.write_buffer(self.apical_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.apical_potential));
-        self.queue.write_buffer(self.basal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.basal_potential));
-        self.queue.write_buffer(self.gate_threshold_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.gate_threshold));
-        self.queue.write_buffer(self.last_spike_tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.last_spike_tick));
 
         let mask_data: Vec<u32> = if self.expert_masks.is_empty() {
             vec![1u32; n_count]
@@ -595,7 +616,7 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 0, resource: self.source_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.target_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: self.weight_buffer.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: self.prev_spikes_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.delay_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 4, resource: self.compartment_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 5, resource: self.proximal_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: self.distal_buffer.as_ref().unwrap().as_entire_binding() },
@@ -805,14 +826,14 @@ impl ComputeBackend for WgpuBackend {
         self.update_weights(model, previous_spikes, current_spikes, current_tick, reward, history);
     }
 
-    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _history: &[Vec<bool>]) {
+    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, _reward: Option<IValue>, _history: &[Vec<bool>]) {
         use wgpu::util::DeviceExt;
         let s_count = model.synapses.len();
         let n_count = model.neurons.len();
         if s_count == 0 { return; }
 
         // 1. Re-initialize buffers if needed
-        if self.weight_buffer.is_none() || s_count != model.synapses.len() {
+        if self.weight_buffer.is_none() || s_count != self.cached_synapse_count {
              self.weight_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Synapse Weights"),
                 contents: bytemuck::cast_slice(&model.synapses.weight),
@@ -828,11 +849,12 @@ impl ComputeBackend for WgpuBackend {
                 contents: bytemuck::cast_slice(&model.synapses.target_index),
                 usage: wgpu::BufferUsages::STORAGE,
             }));
+            self.cached_synapse_count = s_count;
         }
         if self.pre_spike_buffer.is_none() || n_count != self.cached_neuron_count {
             self.pre_spike_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Pre Spikes"),
-            size: (n_count * 5 * 4) as u64, // potential, threshold, refractory, next_update, last_spike
+                size: (n_count * 4) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
@@ -864,7 +886,7 @@ impl ComputeBackend for WgpuBackend {
                 wgpu::BindGroupEntry { binding: 7, resource: self.last_spike_tick_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
             ],
-            label: Some("GSOP Bind Group (Enhanced)"),
+            label: Some("GSOP Bind Group"),
         });
 
         // 4. Update Learning Rate Uniform
@@ -880,22 +902,9 @@ impl ComputeBackend for WgpuBackend {
             cpass.dispatch_workgroups((s_count as u32 + 63) / 64, 1, 1);
         }
 
-        // 5. Download weights (Slow, but necessary for now until we move save logic to GPU)
-        let staging_weights = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Staging Weights"),
-            size: (s_count * 4) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(self.weight_buffer.as_ref().unwrap(), 0, &staging_weights, 0, (s_count * 4) as u64);
-
         self.queue.submit(Some(encoder.finish()));
-
-        let weights_slice = staging_weights.slice(..);
-        weights_slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
-
-        // Weight download moved to sync_state to keep weights on GPU during simulation
+        // Note: Weights are NOT downloaded here to avoid blocking the GPU pipeline.
+        // Sync back to CPU only happens in sync_state() or perform_night_phase().
     }
 
     pub fn compute_synaptic_metaplasticity(&mut self, model: &mut BakedModel) {
@@ -1076,111 +1085,99 @@ impl CpuBackend {
 
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
 
         let n_count = model.neurons.len();
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
         let noise_amp = model.config.noise_amplitude;
-
         let target_activity = 100; // Aim for 10% activity
+        let expert_masks = &self.expert_masks;
 
-        // Vectorized-friendly loop for neuron updates
-        for i in 0..n_count {
-            if current_tick < model.neurons.next_update_tick[i] { continue; }
-            if !self.expert_masks.is_empty() && !self.expert_masks[i % self.expert_masks.len()] { continue; }
+        // Use Rayon to zip all SoA slices for parallel processing without unsafe raw pointers
+        let neurons = &mut model.neurons;
 
-            let refr = model.neurons.refractory_timer[i];
-            let refr_multiplier = if refr > 0 {
-                model.neurons.refractory_timer[i] = refr - 1;
-                4 // Threshold is 4x higher during refractory period
-            } else {
-                1
-            };
+        // Split NeuronsSoA into component mutable and immutable slices
+        let (pot, next_upd, refr, last_spk, bprop, thresh, activity, b_thresh) = (
+            &mut neurons.potential, &mut neurons.next_update_tick, &mut neurons.refractory_timer,
+            &mut neurons.last_spike_tick, &mut neurons.backprop_signal, &mut neurons.threshold,
+            &mut neurons.activity_ema, &mut neurons.base_threshold
+        );
 
-            let proximal = model.neurons.proximal_potential[i];
-            let distal = model.neurons.distal_potential[i];
-            let apical = model.neurons.apical_potential[i];
-            let basal = model.neurons.basal_potential[i];
-            let gate_threshold = model.neurons.gate_threshold[i];
+        let spike_results: Vec<bool> = pot.par_iter_mut()
+            .zip(next_upd.par_iter_mut())
+            .zip(refr.par_iter_mut())
+            .zip(last_spk.par_iter_mut())
+            .zip(bprop.par_iter_mut())
+            .zip(thresh.par_iter_mut())
+            .zip(activity.par_iter_mut())
+            .zip(b_thresh.par_iter_mut())
+            .zip(0..n_count)
+            .map(|((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), i)| {
+                if current_tick < *next_upd { return false; }
+                if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
-            // Non-linear Dendritic Gating (Approximate NMDA spikes)
-            let dist_gain = if proximal >= gate_threshold {
-                1024 // 1.0x gain
-            } else if proximal >= gate_threshold / 2 {
-                512  // 0.5x gain
-            } else {
-                256  // 0.25x gain
-            };
-            let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
+                let mut rng = rand::thread_rng();
+                let mut fired = false;
 
-            let apical_gain = if dist_gated >= gate_threshold {
-                1024
-            } else if dist_gated >= gate_threshold / 2 {
-                768
-            } else {
-                512
-            };
-            let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
+                let refr_multiplier = if *refr > 0 { 4 } else { 1 };
+                let proximal = neurons.proximal_potential[i];
+                let distal = neurons.distal_potential[i];
+                let apical = neurons.apical_potential[i];
+                let basal = neurons.basal_potential[i];
+                let gate_threshold = neurons.gate_threshold[i];
 
-            let mod_factor = if basal < 0 { 800 } else { 1024 };
+                // Non-linear Dendritic Gating (Approximate NMDA spikes)
+                let dist_gain = if proximal >= gate_threshold { 1024 } else if proximal >= gate_threshold / 2 { 512 } else { 256 };
+                let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
 
-            // Stochastic Noise: Add random jitter to potential to prevent artificial synchronization
-            let noise = if noise_amp > 0 {
-                rng.gen_range(-(noise_amp as i32)..noise_amp as i32)
-            } else {
-                0
-            };
+                let apical_gain = if dist_gated >= gate_threshold { 1024 } else if dist_gated >= gate_threshold / 2 { 768 } else { 512 };
+                let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
 
-            let liquid = model.neurons.liquid_current[i];
+                let mod_factor = if basal < 0 { 800 } else { 1024 };
+                let noise = if noise_amp > 0 { rng.gen_range(-(noise_amp as i32)..noise_amp as i32) } else { 0 };
 
-            let mut pot = model.neurons.potential[i]
-                .saturating_add(proximal)
-                .saturating_add(dist_gated)
-                .saturating_add(apical_gated)
-                .saturating_add(liquid)
-                .saturating_add(noise);
+                let mut current_pot = pot.saturating_add(proximal)
+                    .saturating_add(dist_gated)
+                    .saturating_add(apical_gated)
+                    .saturating_add(neurons.liquid_current[i])
+                    .saturating_add(noise);
 
-            pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
+                current_pot = ((current_pot as i64 * mod_factor as i64) >> 10) as i32;
 
-            // LLIF: Dynamic Decay
-            let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
-            let final_decay = (model.neurons.decay[i] - liquid_mod).max(1);
-            pot = ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32;
+                // LLIF: Dynamic Decay
+                let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
+                let final_decay = (neurons.decay[i] - liquid_mod).max(1);
+                current_pot = ((current_pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32;
 
-            let effective_threshold = model.neurons.threshold[i] * refr_multiplier;
+                let effective_threshold = *thresh * refr_multiplier;
+                if current_pot >= effective_threshold { fired = true; }
 
-            if pot >= effective_threshold {
-                model.neurons.potential[i] = 0;
-                model.neurons.refractory_timer[i] = 4;
-                new_spikes[i] = true;
-                model.neurons.last_spike_tick[i] = current_tick;
-                model.neurons.backprop_signal[i] = SCALE;
-                model.neurons.threshold[i] = model.neurons.threshold[i].saturating_add(ip_inc);
-
-                // Homeostatic update: increase base threshold if too active
-                model.neurons.activity_ema[i] = (model.neurons.activity_ema[i] * 99 + 100) / 100;
-            } else {
-                model.neurons.potential[i] = pot;
-                if model.neurons.threshold[i] > model.neurons.base_threshold[i] {
-                    model.neurons.threshold[i] = model.neurons.threshold[i].saturating_sub(ip_dec);
+                if fired {
+                    *pot = 0;
+                    *refr = 4;
+                    *last_spk = current_tick;
+                    *bprop = SCALE;
+                    *thresh = thresh.saturating_add(ip_inc);
+                    *activity = (*activity * 99 + 100) / 100;
+                } else {
+                    *pot = current_pot;
+                    if *refr > 0 { *refr -= 1; }
+                    if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
+                    *bprop = ((*bprop as i64 * 800) >> 10) as i32;
+                    *activity = (*activity * 99) / 100;
                 }
-                model.neurons.backprop_signal[i] = ((model.neurons.backprop_signal[i] as i64 * 800) >> 10) as i32;
 
-                model.neurons.activity_ema[i] = (model.neurons.activity_ema[i] * 99) / 100;
-            }
+                let homeo_rate = if *activity > target_activity * 2 { 2 } else { 1 };
+                if *activity > target_activity {
+                    *b_thresh = b_thresh.saturating_add(homeo_rate);
+                } else if *activity < target_activity && *b_thresh > 512 {
+                    *b_thresh = b_thresh.saturating_sub(1);
+                }
+                *next_upd = current_tick + neurons.update_interval[i];
+                fired
+            }).collect();
 
-            // Long-term Homeostasis: Adjust base threshold to maintain target firing rate
-            // Calibration: Use Surprise to modulate the rate of homeostatic adjustment
-            let homeo_rate = if model.neurons.activity_ema[i] > target_activity * 2 { 2 } else { 1 };
-
-            if model.neurons.activity_ema[i] > target_activity {
-                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_add(homeo_rate);
-            } else if model.neurons.activity_ema[i] < target_activity && model.neurons.base_threshold[i] > 512 {
-                model.neurons.base_threshold[i] = model.neurons.base_threshold[i].saturating_sub(1);
-            }
-            model.neurons.next_update_tick[i] = current_tick + model.neurons.update_interval[i];
-        }
+        for i in 0..n_count { if spike_results[i] { new_spikes[i] = true; } }
     }
 }
 
@@ -1258,20 +1255,29 @@ impl ComputeBackend for CpuBackend {
             }
         }
 
-        // Local Homeostatic Scaling
+        // Parallelized Local Homeostatic Scaling: O(S / Cores)
         let n_count = model.neurons.len();
+        let s_count = model.synapses.len();
+        if s_count == 0 { return; }
+
         let mut sum_weights = vec![0i64; n_count];
-        for i in 0..model.synapses.len() {
+        for i in 0..s_count {
             let target = model.synapses.target_index[i] as usize;
-            sum_weights[target] += model.synapses.weight[i].abs() as i64;
-        }
-        let max_neuron_sum = 1024 * 16;
-        for i in 0..model.synapses.len() {
-            let target = model.synapses.target_index[i] as usize;
-            if sum_weights[target] > max_neuron_sum {
-                let scale_factor = (max_neuron_sum << 10) / sum_weights[target];
-                model.synapses.weight[i] = ((model.synapses.weight[i] as i64 * scale_factor) >> 10) as i32;
+            if target < n_count {
+                sum_weights[target] += model.synapses.weight[i].abs() as i64;
             }
         }
+
+        let max_neuron_sum = 1024 * 16;
+        let synapses = &mut model.synapses;
+
+        // Use chunks to parallelize weight adjustment across large synapse populations
+        synapses.weight.par_iter_mut().enumerate().for_each(|(i, w)| {
+            let target = synapses.target_index[i] as usize;
+            if target < n_count && sum_weights[target] > max_neuron_sum {
+                let scale_factor = (max_neuron_sum << 10) / sum_weights[target];
+                *w = ((*w as i64 * scale_factor) >> 10) as i32;
+            }
+        });
     }
 }

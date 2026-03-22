@@ -11,6 +11,7 @@ wgpu = ["dep:wgpu"]
 [dependencies]
 log = { workspace = true }
 rand = { workspace = true }
+rayon = "1.8"
 genesis-core = { path = "../genesis-core" }
 wgpu = { workspace = true, optional = true }
 pollster = { workspace = true }
