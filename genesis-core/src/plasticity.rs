@@ -198,7 +198,7 @@ pub fn grow_synapse_in_compartment(
         }
     }
 
-    synapses.push_to_compartment(source, target, initial_weight, compartment);
+    synapses.push_to_compartment(source, target, initial_weight, 1, compartment);
     true
 }
 

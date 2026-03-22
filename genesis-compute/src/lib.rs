@@ -2,7 +2,7 @@ use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue, Compartm
 use genesis_core::plasticity::{prune_synapses, StructuralPlasticityConfig};
 
 pub trait ComputeBackend {
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool>;
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool>;
     /// Weight updates (fast phase of learning)
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
@@ -289,7 +289,7 @@ impl WgpuBackend {
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32) -> Vec<bool> {
         use wgpu::util::DeviceExt;
 
         let n_count = model.neurons.len();
@@ -855,13 +855,13 @@ mod tests {
 
         // 1. Open gate (1.0)
         model.neurons.dendritic_gate[1] = 1024;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, 1);
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 1);
         assert!(spikes[1]); // Should spike
 
         // 2. Closed gate (0.0)
         model.neurons.potential[1] = 0;
         model.neurons.dendritic_gate[1] = 0;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, 2);
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 2);
         assert!(!spikes[1]); // Should not spike
     }
 }
@@ -904,40 +904,41 @@ impl CpuBackend {
         }
     }
 
-    fn propagate_sparse_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool]) {
-        let active_indices: Vec<usize> = previous_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-
-        if active_indices.is_empty() { return; }
-
-        // Ensure index is ready (Lazy initialization or rebuild after structural changes)
+    fn propagate_sparse_delayed_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool], history: &[Vec<bool>]) {
         if self.synapse_index.len() != model.neurons.len() {
             self.rebuild_index(model);
         }
 
-        // Optimized spike propagation: O(active_spikes * average_fanout)
-        for &src in &active_indices {
-            if src >= self.synapse_index.len() { continue; }
-            for &syn_idx in &self.synapse_index[src] {
-                let target = model.synapses.target_index[syn_idx] as usize;
-                let gate = model.neurons.dendritic_gate[target];
+        // We check temporal spikes from current-1 to current-16.
+        // previous_spikes is current-1.
+        // history[0] is current-1, history[1] is current-2, ...
+        for d in 1..=16 {
+            let spikes = if d == 1 {
+                previous_spikes
+            } else if d - 1 < history.len() {
+                &history[d - 1]
+            } else {
+                continue;
+            };
 
-                if gate < 8 { continue; }
+            // Sparse Propagation: Only iterate over spiked source neurons
+            for (src, &fired) in spikes.iter().enumerate() {
+                if !fired { continue; }
+                if src >= self.synapse_index.len() { continue; }
 
-                let gated_weight = ((model.synapses.weight[syn_idx] as i64 * gate as i64) >> 10) as i32;
+                for &syn_idx in &self.synapse_index[src] {
+                    if model.synapses.delay[syn_idx] as usize == d {
+                        let target = model.synapses.target_index[syn_idx] as usize;
+                        let gate = model.neurons.dendritic_gate[target];
+                        if gate < 8 { continue; }
 
-                match model.synapses.compartment[syn_idx] {
-                    Compartment::Proximal => {
-                        model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
-                    }
-                    Compartment::Distal => {
-                        model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight);
-                    }
-                    Compartment::Apical => {
-                        model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight);
-                    }
-                    Compartment::Basal => {
-                        model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight);
+                        let gated_weight = ((model.synapses.weight[syn_idx] as i64 * gate as i64) >> 10) as i32;
+                        match model.synapses.compartment[syn_idx] {
+                            Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
+                            Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
+                            Compartment::Apical => { model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight); }
+                            Compartment::Basal => { model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight); }
+                        }
                     }
                 }
             }
@@ -977,9 +978,13 @@ impl CpuBackend {
     }
 
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
         let n_count = model.neurons.len();
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
+        let noise_amp = model.config.noise_amplitude;
 
         // Vectorized-friendly loop for neuron updates
         for i in 0..n_count {
@@ -1005,10 +1010,18 @@ impl CpuBackend {
 
             let mod_factor = if basal < 0 { 800 } else { 1024 };
 
+            // Stochastic Noise: Add random jitter to potential to prevent artificial synchronization
+            let noise = if noise_amp > 0 {
+                rng.gen_range(-(noise_amp as i32)..noise_amp as i32)
+            } else {
+                0
+            };
+
             let mut pot = model.neurons.potential[i]
                 .saturating_add(proximal)
                 .saturating_add(dist_gated)
-                .saturating_add(apical_gated);
+                .saturating_add(apical_gated)
+                .saturating_add(noise);
 
             pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
 
@@ -1038,7 +1051,7 @@ impl CpuBackend {
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], current_tick: u32) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool> {
         let n_count = model.neurons.len();
 
         // Apply external inputs directly to proximal potential
@@ -1046,7 +1059,7 @@ impl ComputeBackend for CpuBackend {
             if i < n_count { model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(val); }
         }
 
-        self.propagate_sparse_spikes(model, previous_spikes);
+        self.propagate_sparse_delayed_spikes(model, previous_spikes, history);
         self.propagate_latent_spikes(model, previous_spikes);
 
         let mut new_spikes = vec![false; n_count];

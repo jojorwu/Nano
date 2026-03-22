@@ -272,7 +272,20 @@ impl Runtime {
         self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
 
         // 1. Day Phase: Inference
-        let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, self.tick_counter);
+        // Reconstruct history for delayed propagation if needed
+        let full_history: Vec<Vec<bool>> = self.spikes_history.iter().rev().take(16).map(|data| {
+            let mut vec = vec![false; n_count];
+            match data {
+                SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
+                SpikeData::Dense(mask) => {
+                    for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
+                }
+                _ => {}
+            }
+            vec
+        }).collect();
+
+        let mut current_spikes = self.backend.day_phase(&mut self.model, &merged_inputs, &self.previous_spikes, &full_history, self.tick_counter);
 
         // Chain-of-Thought Reasoning (Thinking Mode)
         current_spikes = self.process_thinking_cycles(current_spikes, n_count);
@@ -371,7 +384,7 @@ impl Runtime {
                                 self.model.neurons.apical_potential[i] = 0;
                                 self.model.neurons.basal_potential[i] = 0;
                             }
-                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, self.tick_counter);
+                            current_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, &[], self.tick_counter);
                         }
                     }
                 }

@@ -48,12 +48,15 @@ impl ModelBlueprint {
         }
         let mut synapses = SynapsesSoA::with_capacity(self.architecture.synapse_count);
 
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         for i in 0..self.architecture.synapse_count {
-            synapses.push(
-                (i % self.architecture.neuron_count) as u32,
-                ((i + 1) % self.architecture.neuron_count) as u32,
-                500,
-            );
+            let src = (i % self.architecture.neuron_count) as u32;
+            let tgt = ((i + 1) % self.architecture.neuron_count) as u32;
+
+            // Random delay between 1 and 8 ticks for temporal variety
+            let delay = rng.gen_range(1..9);
+            synapses.push_delayed(src, tgt, 500, delay);
         }
 
         #[cfg(feature = "titan")]

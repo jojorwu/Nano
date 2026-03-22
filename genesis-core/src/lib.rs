@@ -284,6 +284,7 @@ pub struct SynapsesSoA {
     pub source_index: Vec<u32>,
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
+    pub delay: Vec<u8>, // Axonal delays (1-16 ticks)
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
@@ -301,19 +302,25 @@ impl SynapsesSoA {
             source_index: Vec::with_capacity(capacity),
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
+            delay: Vec::with_capacity(capacity),
             compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
     }
 
     pub fn push(&mut self, source: u32, target: u32, weight: IValue) {
-        self.push_to_compartment(source, target, weight, Compartment::Proximal);
+        self.push_to_compartment(source, target, weight, 1, Compartment::Proximal);
     }
 
-    pub fn push_to_compartment(&mut self, source: u32, target: u32, weight: IValue, compartment: Compartment) {
+    pub fn push_delayed(&mut self, source: u32, target: u32, weight: IValue, delay: u8) {
+        self.push_to_compartment(source, target, weight, delay, Compartment::Proximal);
+    }
+
+    pub fn push_to_compartment(&mut self, source: u32, target: u32, weight: IValue, delay: u8, compartment: Compartment) {
         self.source_index.push(source);
         self.target_index.push(target);
         self.weight.push(weight);
+        self.delay.push(delay.max(1));
         self.compartment.push(compartment);
     }
 
@@ -329,6 +336,7 @@ impl SynapsesSoA {
         self.source_index.swap_remove(index);
         self.target_index.swap_remove(index);
         self.weight.swap_remove(index);
+        self.delay.swap_remove(index);
         self.compartment.swap_remove(index);
     }
 }
@@ -358,6 +366,9 @@ pub struct NetworkConfig {
 
     // Metaplasticity
     pub metaplasticity_enabled: bool,
+
+    // Stochastic Firing (Neural Noise)
+    pub noise_amplitude: IValue, // SCALE = 1.0 (max noise)
 }
 
 impl Default for NetworkConfig {
@@ -376,6 +387,7 @@ impl Default for NetworkConfig {
             stdp_a_plus: 100,
             stdp_a_minus: 100,
             metaplasticity_enabled: true,
+            noise_amplitude: 50, // 5% noise by default
         }
     }
 }
