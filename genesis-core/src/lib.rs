@@ -34,7 +34,7 @@ impl NanoModule for ThinkModule {
         // This module acts as a state carrier for that behavior
     }
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
-    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
     fn set_state(&mut self, state: &[u8]) {
@@ -46,7 +46,7 @@ pub trait NanoModule: Send + Sync {
     fn name(&self) -> &str;
     fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32);
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
-    fn on_night_phase(&mut self, synapses: &mut SynapsesSoA, reward: Option<IValue>);
+    fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, synapses: &mut SynapsesSoA, reward: Option<IValue>);
 
     // Serialization for persistence
     fn get_state(&self) -> Vec<u8> { Vec::new() }
@@ -125,9 +125,9 @@ impl ModuleManager {
         }
     }
 
-    pub fn on_night_phase(&mut self, synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+    pub fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, synapses: &mut SynapsesSoA, reward: Option<IValue>) {
         for module in &mut self.modules {
-            module.on_night_phase(synapses, reward);
+            module.on_night_phase(neurons, synapses, reward);
         }
     }
 }
@@ -141,11 +141,12 @@ pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
 pub enum Compartment {
-    Proximal,
-    Distal,
-    Apical, // New Apical compartment for hierarchical feedback
-    Basal,  // New Basal compartment for lateral inhibition
+    Proximal = 0,
+    Distal = 1,
+    Apical = 2,
+    Basal = 3,
 }
 
 impl Default for Compartment {
@@ -154,24 +155,26 @@ impl Default for Compartment {
     }
 }
 
+/// Context passed to plasticity rules to improve flexibility and reduce argument count.
+pub struct PlasticityContext<'a> {
+    pub pre_spiked: bool,
+    pub post_spiked: bool,
+    pub compartment: Compartment,
+    pub reward: Option<IValue>,
+    pub pre_last_spike: u32,
+    pub post_last_spike: u32,
+    pub current_tick: u32,
+    pub neurons: &'a NeuronsSoA,
+}
+
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, compartment: Compartment);
+    fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
+
     fn update_contrastive(&self, weight: &mut IValue, layer_correlation: IValue) {
-        // Default: Reduce weight if correlation in layer is too high (penalize redundancy)
         if layer_correlation > 512 {
              *weight = (*weight as i64 * (1024 - (layer_correlation / 10)) as i64 >> 10) as i32;
         }
-    }
-    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue, compartment: Compartment) {
-        // Default: just do normal update if reward is positive, or nothing if negative?
-        // Usually RL uses a third factor.
-        if reward > 0 {
-            self.update(weight, pre_spiked, post_spiked, compartment);
-        }
-    }
-    fn update_temporal(&self, _weight: &mut IValue, _pre_tick: u64, _post_tick: u64, _current_tick: u64) {
-        // Default implementation does nothing
     }
 }
 
@@ -180,17 +183,21 @@ pub struct GsopRule {
 }
 
 impl PlasticityRule for GsopRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, compartment: Compartment) {
-        let lr = match compartment {
+    fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext) {
+        let lr = match ctx.compartment {
             Compartment::Proximal => self.learning_rate,
             Compartment::Distal => self.learning_rate * 8 / 10,
-            _ => self.learning_rate / 2, // Slower learning in secondary compartments
+            _ => self.learning_rate / 2,
         };
 
-        if pre_spiked && post_spiked {
-            *weight = weight.saturating_add(lr);
-        } else if pre_spiked && !post_spiked {
-            *weight = weight.saturating_sub(lr / 2);
+        // If reward is negative, we can invert the learning or inhibit it
+        let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
+        let lr_mod = lr * reward_mod;
+
+        if ctx.pre_spiked && ctx.post_spiked {
+            *weight = weight.saturating_add(lr_mod);
+        } else if ctx.pre_spiked && !ctx.post_spiked {
+            *weight = weight.saturating_sub(lr_mod / 2);
         }
         if *weight > SCALE * 5 { *weight = SCALE * 5; }
         if *weight < -SCALE * 5 { *weight = -SCALE * 5; }

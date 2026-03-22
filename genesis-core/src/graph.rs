@@ -32,18 +32,20 @@ impl NanoModule for SpikingGraphModule {
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
 
-    fn on_night_phase(&mut self, synapses: &mut SynapsesSoA, _reward: Option<IValue>) {
+    fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, synapses: &mut SynapsesSoA, _reward: Option<IValue>) {
         // Perform structural graph maintenance
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
+        let n_count = neurons.len();
+        if n_count == 0 { return; }
+
         if rng.gen::<f32>() < self.rewiring_rate && synapses.len() > 10 {
             // Small-World Rewiring Heuristic: rewire a random synapse
             let idx = rng.gen_range(0..synapses.len());
-            let new_target = rng.gen_range(0..100) as u32; // Simplified
 
-            // Note: In a real implementation, we'd ensure target_index is within valid range
-            // and maintain the weight/compartment.
+            // Safety: Constraint new target within valid neuron indices
+            let new_target = rng.gen_range(0..n_count) as u32;
             synapses.target_index[idx] = new_target;
         }
     }

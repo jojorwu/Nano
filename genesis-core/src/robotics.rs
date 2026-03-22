@@ -53,7 +53,7 @@ impl NanoModule for SpikingCerebellumModule {
     }
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
-    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
 
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }

@@ -8,31 +8,30 @@ pub struct StdpRule {
 }
 
 impl crate::PlasticityRule for StdpRule {
-    fn update(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, _compartment: crate::Compartment) {
-        if pre_spiked && post_spiked {
-            *weight = weight.saturating_add(self.a_plus / 2);
-        }
-    }
+    fn apply(&self, weight: &mut IValue, ctx: &crate::PlasticityContext) {
+        let pre_spiked = ctx.pre_spiked;
+        let post_spiked = ctx.post_spiked;
 
-    fn update_rewarded(&self, weight: &mut IValue, pre_spiked: bool, post_spiked: bool, reward: IValue, _compartment: crate::Compartment) {
-        // R-STDP: Reward modulates the base temporal update
-        if pre_spiked && post_spiked {
-            // (a * reward * scale) >> 20
-            let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64) >> 20) as i32;
-            *weight = weight.saturating_add(delta);
+        // 1. Reward-modulated update (R-STDP component)
+        if let Some(reward) = ctx.reward {
+             if pre_spiked && post_spiked {
+                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64) >> 20) as i32;
+                *weight = weight.saturating_add(delta);
+            }
+        } else {
+             if pre_spiked && post_spiked {
+                *weight = weight.saturating_add(self.a_plus / 2);
+            }
         }
-    }
 
-    fn update_temporal(&self, weight: &mut IValue, pre_tick: u64, post_tick: u64, _current_tick: u64) {
-        if pre_tick == 0 || post_tick == 0 { return; }
-        let diff = (post_tick as i64) - (pre_tick as i64);
+        // 2. Temporal update (classic STDP)
+        if ctx.pre_last_spike == 0 || ctx.post_last_spike == 0 { return; }
+        let diff = (ctx.post_last_spike as i64) - (ctx.pre_last_spike as i64);
 
         if diff > 0 && diff < self.tau as i64 {
-            // Long-Term Potentiation (LTP)
             let delta = (self.a_plus as i64 * (self.tau as i64 - diff) / self.tau as i64) as i32;
             *weight = weight.saturating_add(delta);
         } else if diff < 0 && diff > -(self.tau as i64) {
-            // Long-Term Depression (LTD)
             let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) / self.tau as i64) as i32;
             *weight = weight.saturating_sub(delta);
         }
@@ -219,17 +218,28 @@ mod tests {
 
     #[test]
     fn test_stdp() {
-        use crate::PlasticityRule;
+        use crate::{PlasticityRule, PlasticityContext, NeuronsSoA, Compartment};
         let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100, reward_scale: 1024 };
         let mut weight = 1024;
+        let neurons = NeuronsSoA::new(1);
 
         // LTP: pre=5, post=8 (diff=3)
-        stdp.update_temporal(&mut weight, 5, 8, 10);
+        let ctx = PlasticityContext {
+            pre_spiked: true, post_spiked: true, compartment: Compartment::Proximal,
+            reward: None, pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
+            neurons: &neurons,
+        };
+        stdp.apply(&mut weight, &ctx);
         assert!(weight > 1024);
 
         // LTD: pre=8, post=5 (diff=-3)
         let mut weight2 = 1024;
-        stdp.update_temporal(&mut weight2, 8, 5, 10);
+        let ctx2 = PlasticityContext {
+            pre_spiked: true, post_spiked: true, compartment: Compartment::Proximal,
+            reward: None, pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
+            neurons: &neurons,
+        };
+        stdp.apply(&mut weight2, &ctx2);
         assert!(weight2 < 1024);
     }
 
@@ -286,7 +296,7 @@ impl NanoModule for AdaptiveLearningRateModule {
         }
     }
 
-    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
         if let Some(r) = reward {
             self.window_reward.push(r);
             if self.window_reward.len() > 10 { self.window_reward.remove(0); }

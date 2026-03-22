@@ -94,7 +94,7 @@ pub struct Runtime {
     pub backend: Box<dyn ComputeBackend + Send + Sync>,
     pub previous_spikes: Vec<bool>,
     pub tick_counter: u32,
-    pub spikes_history: Vec<Vec<u32>>, // Sparse: only active indices
+    pub spikes_history: Vec<SpikeData>, // Optimized history storage
     pub rolling_spike_count: f32, // For surprise calculation
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
@@ -285,22 +285,35 @@ impl Runtime {
         self.observer.process_spikes(&mut current_spikes, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
-        let sparse_spikes: Vec<u32> = current_spikes.iter().enumerate()
+        let active_indices: Vec<usize> = current_spikes.iter().enumerate()
             .filter(|&(_, &s)| s)
-            .map(|(i, _)| i as u32)
+            .map(|(i, _)| i)
             .collect();
-        self.spikes_history.push(sparse_spikes);
+
+        // Memory-efficient storage based on density
+        if active_indices.len() < current_spikes.len() / 32 {
+            self.spikes_history.push(SpikeData::Sparse(active_indices));
+        } else {
+            let mut mask = vec![0u8; (current_spikes.len() + 7) / 8];
+            for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
+            self.spikes_history.push(SpikeData::Dense(mask));
+        }
 
         // 2. Night Phase: Learning
         if self.tick_counter % self.settings.night_phase_interval == 0 {
-            // Replay history for learning
-            let mut prev = self.previous_spikes.clone();
             let n_count = self.model.neurons.len();
+            let mut prev = self.previous_spikes.clone();
 
             // Reconstruct full boolean history for Correlational Growth
-            let full_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|sparse| {
+            let full_history: Vec<Vec<bool>> = self.spikes_history.iter().map(|data| {
                 let mut vec = vec![false; n_count];
-                for &idx in sparse { if (idx as usize) < n_count { vec[idx as usize] = true; } }
+                match data {
+                    SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
+                    SpikeData::Dense(mask) => {
+                        for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
+                    }
+                    _ => {} // Compressed not used in history yet
+                }
                 vec
             }).collect();
 
@@ -329,7 +342,7 @@ impl Runtime {
                 prev = current.clone();
             }
             self.backend.structural_plasticity(&mut self.model, reward, &full_history);
-            self.modules.on_night_phase(&mut self.model.synapses, reward);
+            self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, reward);
 
             // Sync module states back to model for persistence
             self.sync_modules_to_model();
@@ -402,9 +415,12 @@ impl Runtime {
     pub fn inject_text(&mut self, text: &str) {
         for m in &mut self.modules.modules {
             if m.name() == "text_processor" {
-                let mut state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.tokenize_and_queue(text);
-                m.set_state(&bincode::serialize(&state).unwrap());
+                if let Ok(mut state) = bincode::deserialize::<genesis_core::text::TextProcessorModule>(&m.get_state()) {
+                    state.tokenize_and_queue(text);
+                    if let Ok(encoded) = bincode::serialize(&state) {
+                        m.set_state(&encoded);
+                    }
+                }
             }
         }
     }
@@ -413,9 +429,12 @@ impl Runtime {
     pub fn inject_image(&mut self, pixels: &[u8]) {
         for m in &mut self.modules.modules {
             if m.name() == "vision" {
-                let mut state: genesis_core::vision::VisionModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.set_input(pixels);
-                m.set_state(&bincode::serialize(&state).unwrap());
+                if let Ok(mut state) = bincode::deserialize::<genesis_core::vision::VisionModule>(&m.get_state()) {
+                    state.set_input(pixels);
+                    if let Ok(encoded) = bincode::serialize(&state) {
+                        m.set_state(&encoded);
+                    }
+                }
             }
         }
     }
@@ -433,11 +452,17 @@ impl Runtime {
 
     pub fn reload_settings(&mut self, path: &str) -> std::io::Result<()> {
         let content = std::fs::read_to_string(path)?;
-        if let Ok(new_settings) = serde_json::from_str::<SimulationSettings>(&content) {
-            self.settings = new_settings;
-            log::info!("Simulation settings reloaded from {}", path);
+        match serde_json::from_str::<SimulationSettings>(&content) {
+            Ok(new_settings) => {
+                self.settings = new_settings;
+                log::info!("Simulation settings reloaded from {}", path);
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to parse settings from {}: {}", path, e);
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }
         }
-        Ok(())
     }
 
     pub fn handle_command(&mut self, cmd: &str) -> String {
