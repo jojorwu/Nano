@@ -360,6 +360,7 @@ pub struct NetworkConfig {
 
     // Advanced Structural Plasticity
     pub max_synapses: usize,
+    pub max_neurons: usize,
     pub neurogenesis_reward_threshold: IValue,
     pub pruning_threshold: IValue,
 
@@ -392,6 +393,7 @@ impl Default for NetworkConfig {
             default_decay: 50,
             learning_rate: 10,
             max_synapses: 1_000_000,
+            max_neurons: 100_000,
             neurogenesis_reward_threshold: 200,
             pruning_threshold: 10,
             dendritic_coincidence_threshold: 512, // 0.5 * SCALE

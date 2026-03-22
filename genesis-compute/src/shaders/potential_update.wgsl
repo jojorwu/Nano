@@ -29,12 +29,16 @@ struct Config {
 @group(0) @binding(7) var<storage, read> intervals: array<u32>;
 @group(0) @binding(8) var<storage, read> dendritic_gate: array<i32>;
 @group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
+@group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&potentials)) { return; }
+
+    // Mixture-of-Experts: Skip updates if neuron is masked out
+    if (expert_mask[i] == 0u) { return; }
 
     if (current_tick < next_update[i]) { return; }
 
