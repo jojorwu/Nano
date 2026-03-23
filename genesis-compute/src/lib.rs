@@ -774,6 +774,23 @@ mod tests {
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA};
 
     #[test]
+    fn test_membrane_potential_calc() {
+        use crate::calculate_membrane_potential;
+
+        // Base case: minimal decay (1) applied
+        let pot = calculate_membrane_potential(500, 0, 0, 0, 0, 512, 0, 0, 0);
+        assert!(pot <= 500 && pot >= 499);
+
+        // Gated Distal Input: proximal (600) > threshold (512) -> Full gain (1.0)
+        let pot = calculate_membrane_potential(0, 600, 100, 0, 0, 512, 0, 0, 0);
+        assert!(pot >= 695); // 600 (prox) + 100 (dist) - minimal decay
+
+        // Blocked Distal Input: proximal (100) < threshold (512) -> Quarter gain (0.25)
+        let pot = calculate_membrane_potential(0, 100, 100, 0, 0, 512, 0, 0, 0);
+        assert!(pot >= 120 && pot <= 130); // 100 (prox) + 25 (dist_gated) - decay
+    }
+
+    #[test]
     fn test_cpu_dendritic_gating() {
         use crate::ComputeBackend;
         let mut model = BakedModel {
@@ -882,9 +899,9 @@ impl CpuBackend {
     pub fn rebuild_index(&mut self, model: &BakedModel) {
         let n_count = model.neurons.len();
         self.synapse_index = vec![Vec::new(); n_count];
-        for i in 0..model.synapses.len() {
-            let src = model.synapses.source_index[i] as usize;
-            let delay = model.synapses.delay[i];
+
+        for (i, (&src, &delay)) in model.synapses.source_index.iter().zip(&model.synapses.delay).enumerate() {
+            let src = src as usize;
             if src < n_count {
                 self.synapse_index[src].push((i, delay));
             }
@@ -1110,14 +1127,16 @@ impl ComputeBackend for CpuBackend {
             self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
-                model.neurons.grow((model.neurons.len() / 20).max(1));
+                let grow_size = (model.neurons.len() / 20).max(1);
+                log::info!("Neurogenesis: growing population by {} neurons", grow_size);
+                model.neurons.grow(grow_size);
             }
 
             if model.config.metaplasticity_enabled {
                 if r.abs() < 10 {
-                    model.config.learning_rate = (model.config.learning_rate as i64 * 900 >> 10) as i32;
+                    model.config.learning_rate = (model.config.learning_rate as i64 * 900 / 1024) as i32;
                 } else if r.abs() > 500 {
-                    model.config.learning_rate = (model.config.learning_rate as i64 * 1100 >> 10) as i32;
+                    model.config.learning_rate = (model.config.learning_rate as i64 * 1100 / 1024) as i32;
                 }
             }
         }

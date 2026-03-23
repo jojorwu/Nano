@@ -159,6 +159,19 @@ use std::collections::HashMap;
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
+// --- Physics Constants ---
+pub const DEFAULT_REFRACTORY_TICKS: i32 = 4;
+pub const SMBP_DECAY: i64 = 800; // Multiplier out of SCALE
+pub const ACTIVITY_EMA_ALPHA: i64 = 99; // Alpha out of 100
+pub const TARGET_ACTIVITY_LEVEL: IValue = 100; // 10% target firing rate
+pub const WEIGHT_CLAMP_LIMIT: IValue = SCALE * 5;
+
+// --- Dendritic Gating Constants ---
+pub const GATE_OPEN: IValue = SCALE;
+pub const GATE_HALF: IValue = SCALE / 2;
+pub const GATE_QUARTER: IValue = SCALE / 4;
+pub const GATE_THREE_QUARTERS: IValue = SCALE * 3 / 4;
+
 /// Represents the global chemical state of the network.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct NeuromodulationState {
@@ -247,8 +260,8 @@ impl PlasticityRule for GsopRule {
         // Sign Preservation: Ensure weight never crosses zero (Dale's Law)
         if old_weight > 0 && *weight < 0 { *weight = 1; }
         if old_weight < 0 && *weight > 0 { *weight = -1; }
-        if *weight > SCALE * 5 { *weight = SCALE * 5; }
-        if *weight < -SCALE * 5 { *weight = -SCALE * 5; }
+        if *weight > WEIGHT_CLAMP_LIMIT { *weight = WEIGHT_CLAMP_LIMIT; }
+        if *weight < -WEIGHT_CLAMP_LIMIT { *weight = -WEIGHT_CLAMP_LIMIT; }
     }
 }
 
@@ -308,6 +321,21 @@ impl NeuronsSoA {
     }
     pub fn len(&self) -> usize {
         self.potential.len()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let l = self.len();
+        if self.layer_id.len() != l { return Err("layer_id length mismatch".into()); }
+        if self.threshold.len() != l { return Err("threshold length mismatch".into()); }
+        if self.base_threshold.len() != l { return Err("base_threshold length mismatch".into()); }
+        if self.decay.len() != l { return Err("decay length mismatch".into()); }
+        if self.refractory_timer.len() != l { return Err("refractory_timer length mismatch".into()); }
+        if self.last_spike_tick.len() != l { return Err("last_spike_tick length mismatch".into()); }
+        if self.update_interval.len() != l { return Err("update_interval length mismatch".into()); }
+        if self.next_update_tick.len() != l { return Err("next_update_tick length mismatch".into()); }
+        if self.activity_ema.len() != l { return Err("activity_ema length mismatch".into()); }
+        if self.is_excitatory.len() != l { return Err("is_excitatory length mismatch".into()); }
+        Ok(())
     }
 
     pub fn grow(&mut self, additional: usize) {
@@ -505,6 +533,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_neurons_validation() {
+        let mut neurons = NeuronsSoA::new(10);
+        assert!(neurons.validate().is_ok());
+
+        neurons.potential.push(0); // Break length consistency
+        assert!(neurons.validate().is_err());
+    }
+
+    #[test]
     fn test_neurons_init_and_grow() {
         let mut neurons = NeuronsSoA::new(10);
         assert_eq!(neurons.len(), 10);
@@ -536,8 +573,15 @@ impl BakedModel {
             std::io::Error::new(std::io::ErrorKind::Other, e)
         })?;
 
-        if model.version != "4.0" {
-             log::warn!("Loading model version {} into v4.0 engine. Physics scaling (1024) may differ from older versions.", model.version);
+        if model.version != "4.2" {
+             log::warn!("Loading model version {} into v4.2 engine. Physics scaling (1024) may differ from older versions.", model.version);
+        }
+
+        model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let n_count = model.neurons.len();
+        if model.local_range.1 > n_count {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Local range out of bounds"));
         }
 
         Ok(model)

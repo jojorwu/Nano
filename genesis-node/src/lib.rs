@@ -272,13 +272,10 @@ impl Runtime {
     }
 
     fn reset_potential_buffers(&mut self) {
-        let n_count = self.model.neurons.len();
-        for i in 0..n_count {
-            self.model.neurons.proximal_potential[i] = 0;
-            self.model.neurons.distal_potential[i] = 0;
-            self.model.neurons.apical_potential[i] = 0;
-            self.model.neurons.basal_potential[i] = 0;
-        }
+        self.model.neurons.proximal_potential.fill(0);
+        self.model.neurons.distal_potential.fill(0);
+        self.model.neurons.apical_potential.fill(0);
+        self.model.neurons.basal_potential.fill(0);
     }
 
     fn reconstruct_history(&self, window: usize) -> Vec<Vec<bool>> {
@@ -348,13 +345,17 @@ impl Runtime {
 
     fn prepare_merged_inputs(&mut self, external_inputs: &[i32], n_count: usize) {
         self.merged_inputs_buffer.fill(0);
-        for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { self.merged_inputs_buffer[i] = val; }
-        }
 
+        // Merge external inputs
+        let merge_len = external_inputs.len().min(n_count);
+        self.merged_inputs_buffer[..merge_len].copy_from_slice(&external_inputs[..merge_len]);
+
+        // Merge remote spikes
         let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
         for &idx in remote_spikes.iter() {
-            if idx < n_count { self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(1024); }
+            if idx < n_count {
+                self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(genesis_core::SCALE);
+            }
         }
         remote_spikes.clear();
     }
