@@ -6,122 +6,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    #[test]
-    fn test_runtime_synapse_propagation() {
-        let mut model = BakedModel {
-            version: "4.2".to_string(),
-            config: genesis_core::NetworkConfig::default(),
-            node_id: 0,
-            local_range: (0, 2),
-            neurons: NeuronsSoA::new(2),
-            synapses: {
-                let mut s = SynapsesSoA::with_capacity(1);
-                s.push(0, 1, 1500);
-                s
-            },
-            module_states: HashMap::new(),
-            #[cfg(feature = "titan")]
-            titan_memory: None,
-            has_text: false,
-            has_vision: false,
-            has_audio: false,
-            has_robotics: false,
-            has_fusion: false,
-            vocabulary: HashMap::new(),
-        };
-        model.neurons.threshold[1] = genesis_core::SCALE;
-
-        let mut runtime = Runtime {
-            model,
-            modules: {
-                let mut mm = ModuleManager::new();
-                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 100)));
-                mm
-            },
-            settings: crate::SimulationSettings::default(),
-            backend: Box::new(CpuBackend::default()),
-            previous_spikes: vec![false; 2],
-            current_spikes_buffer: vec![false; 2],
-            merged_inputs_buffer: vec![0; 2],
-            tick_counter: 0,
-            spikes_history: vec![crate::SpikeData::Sparse(Vec::new()); 100],
-            history_ptr: 0,
-            episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
-            network_manager: None,
-            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
-            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(2),
-            telemetry: Telemetry::default(),
-        };
-        runtime.previous_spikes[0] = true;
-
-        let spikes = runtime.tick(&[0, 0]);
-        assert!(spikes[1]);
-    }
-
-    #[test]
-    fn test_night_phase_pruning() {
+    fn create_test_runtime(n_count: usize) -> Runtime {
         let model = BakedModel {
             version: "4.2".to_string(),
             config: genesis_core::NetworkConfig::default(),
             node_id: 0,
-            local_range: (0, 2),
-            neurons: NeuronsSoA::new(2),
-            synapses: {
-                let mut s = SynapsesSoA::with_capacity(1);
-                s.push(0, 1, 5);
-                s
-            },
-            module_states: HashMap::new(),
-            #[cfg(feature = "titan")]
-            titan_memory: None,
-            has_text: false,
-            has_vision: false,
-            has_audio: false,
-            has_robotics: false,
-            has_fusion: false,
-            vocabulary: HashMap::new(),
-        };
-
-        let mut runtime = Runtime {
-            model,
-            modules: {
-                let mut mm = ModuleManager::new();
-                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 100)));
-                mm
-            },
-            settings: crate::SimulationSettings::default(),
-            backend: Box::new(CpuBackend::default()),
-            previous_spikes: vec![false; 2],
-            current_spikes_buffer: vec![false; 2],
-            merged_inputs_buffer: vec![0; 2],
-            tick_counter: 99,
-            spikes_history: vec![crate::SpikeData::Sparse(Vec::new()); 100],
-            history_ptr: 0,
-            episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
-            network_manager: None,
-            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
-            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(2),
-            telemetry: Telemetry::default(),
-        };
-
-        runtime.tick(&[0, 0]);
-        assert_eq!(runtime.model.synapses.len(), 0);
-    }
-
-    #[test]
-    fn test_observer_graceful_degradation() {
-        let mut model = BakedModel {
-            version: "4.2".to_string(),
-            config: genesis_core::NetworkConfig::default(),
-            node_id: 0,
-            local_range: (0, 10),
-            neurons: NeuronsSoA::new(10),
+            local_range: (0, n_count),
+            neurons: NeuronsSoA::new(n_count),
             synapses: SynapsesSoA::default(),
             module_states: HashMap::new(),
             #[cfg(feature = "titan")]
@@ -133,23 +24,65 @@ mod tests {
             has_fusion: false,
             vocabulary: HashMap::new(),
         };
-        let initial_threshold = model.neurons.threshold[0];
 
-        let mut observer = Observer {
-            max_spikes_per_tick: 100,
-            energy_budget_per_tick: 2, // Very low budget
-            current_energy_usage: 0,
-            total_energy_consumed: 0,
-        };
+        Runtime {
+            model,
+            modules: ModuleManager::new(),
+            settings: crate::SimulationSettings::default(),
+            backend: Box::new(CpuBackend::default()),
+            previous_spikes: vec![false; n_count],
+            current_spikes_buffer: vec![false; n_count],
+            merged_inputs_buffer: vec![0; n_count],
+            tick_counter: 0,
+            spikes_history: vec![crate::SpikeData::Sparse(Vec::new()); 100],
+            history_ptr: 0,
+            episode_reward_history: Vec::new(),
+            global_modulators: genesis_core::NeuromodulationState::default(),
+            rolling_spike_count: 0.0,
+            network_manager: None,
+            observer: Observer::new(n_count),
+            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
+            input_bus: genesis_core::InputBus::new(n_count),
+            telemetry: Telemetry::default(),
+        }
+    }
+
+    #[test]
+    fn test_runtime_synapse_propagation() {
+        let mut runtime = create_test_runtime(2);
+        runtime.model.synapses.push(0, 1, 1500);
+        runtime.model.neurons.threshold[1] = genesis_core::SCALE;
+        runtime.previous_spikes[0] = true;
+
+        let spikes = runtime.tick(&[0, 0]);
+        assert!(spikes[1]);
+    }
+
+    #[test]
+    fn test_night_phase_pruning() {
+        let mut runtime = create_test_runtime(2);
+        runtime.model.synapses.push(0, 1, 5);
+        runtime.tick_counter = 99;
+
+        runtime.tick(&[0, 0]);
+        assert_eq!(runtime.model.synapses.len(), 0);
+    }
+
+    #[test]
+    fn test_observer_graceful_degradation() {
+        let mut runtime = create_test_runtime(10);
+        let initial_threshold = runtime.model.neurons.threshold[0];
+
+        runtime.observer.energy_budget_per_tick = 2; // Very low budget
 
         let mut spikes = vec![true; 5]; // 5 spikes > 2 budget
         spikes.extend(vec![false; 5]);
 
-        observer.process_spikes(&mut spikes, &mut model);
+        runtime.observer.process_spikes(&mut spikes, &mut runtime.model);
 
         // Threshold should have increased due to budget violation
-        assert!(model.neurons.threshold[0] > initial_threshold);
-        assert_eq!(observer.current_energy_usage, 5);
+        assert!(runtime.model.neurons.threshold[0] > initial_threshold);
+        assert_eq!(runtime.observer.current_energy_usage, 5);
     }
 
     #[test]
@@ -196,50 +129,10 @@ mod tests {
 
     #[test]
     fn test_temporal_delay_consistency() {
-        let mut model = BakedModel {
-            version: "4.2".to_string(),
-            config: genesis_core::NetworkConfig::default(),
-            node_id: 0,
-            local_range: (0, 2),
-            neurons: NeuronsSoA::new(2),
-            synapses: {
-                let mut s = SynapsesSoA::with_capacity(1);
-                // Delay of 3 ticks
-                s.push_delayed(0, 1, 1500, 3);
-                s
-            },
-            module_states: HashMap::new(),
-            #[cfg(feature = "titan")]
-            titan_memory: None,
-            has_text: false,
-            has_vision: false,
-            has_audio: false,
-            has_robotics: false,
-            has_fusion: false,
-            vocabulary: HashMap::new(),
-        };
-        model.neurons.threshold[1] = genesis_core::SCALE;
-
-        let mut runtime = Runtime {
-            model,
-            modules: ModuleManager::new(),
-            settings: crate::SimulationSettings::default(),
-            backend: Box::new(CpuBackend::default()),
-            previous_spikes: vec![false; 2],
-            current_spikes_buffer: vec![false; 2],
-            merged_inputs_buffer: vec![0; 2],
-            tick_counter: 0,
-            spikes_history: vec![SpikeData::Sparse(Vec::new()); 100],
-            history_ptr: 0,
-            episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
-            network_manager: None,
-            observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
-            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(2),
-            telemetry: Telemetry::default(),
-        };
+        let mut runtime = create_test_runtime(2);
+        // Delay of 3 ticks
+        runtime.model.synapses.push_delayed(0, 1, 1500, 3);
+        runtime.model.neurons.threshold[1] = genesis_core::SCALE;
 
         // Fire neuron 0 at T=1
         runtime.tick(&[2000, 0]);
@@ -300,51 +193,67 @@ mod tests {
     }
 
     #[test]
-    fn test_temporal_delay_consistency_multi() {
-        let mut model = BakedModel {
-            version: "4.2".to_string(),
-            config: genesis_core::NetworkConfig::default(),
-            node_id: 0,
-            local_range: (0, 3),
-            neurons: NeuronsSoA::new(3),
-            synapses: {
-                let mut s = SynapsesSoA::with_capacity(2);
-                s.push_delayed(0, 1, 1500, 2); // 0 -> 1, delay 2
-                s.push_delayed(0, 2, 1500, 5); // 0 -> 2, delay 5
-                s
-            },
-            module_states: HashMap::new(),
-            #[cfg(feature = "titan")]
-            titan_memory: None,
-            has_text: false,
-            has_vision: false,
-            has_audio: false,
-            has_robotics: false,
-            has_fusion: false,
-            vocabulary: HashMap::new(),
-        };
-        model.neurons.threshold.fill(genesis_core::SCALE);
+    fn test_multimodal_concurrent_injection() {
+        let n_count = 10;
+        let mut runtime = create_test_runtime(n_count);
+        // Tier 0 modules
+        runtime.modules.add_module(Box::new(genesis_core::text::TextProcessorModule::new(n_count)));
+        runtime.modules.add_module(Box::new(genesis_core::vision::VisionModule::new(1, n_count as u32)));
+        // Tier 1 module
+        runtime.modules.add_module(Box::new(genesis_core::fusion::SpikingFusionModule::new(vec![5])));
 
-        let mut runtime = Runtime {
-            model,
-            modules: ModuleManager::new(),
-            settings: crate::SimulationSettings::default(),
-            backend: Box::new(CpuBackend::default()),
-            previous_spikes: vec![false; 3],
-            current_spikes_buffer: vec![false; 3],
-            merged_inputs_buffer: vec![0; 3],
-            tick_counter: 0,
-            spikes_history: vec![SpikeData::Sparse(Vec::new()); 16],
-            history_ptr: 0,
-            episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
-            network_manager: None,
-            observer: Observer::new(3),
-            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(3),
-            telemetry: Telemetry::default(),
-        };
+        runtime.inject_text("hello");
+        #[cfg(feature = "vision")]
+        runtime.inject_image(&vec![255; n_count]);
+
+        runtime.tick(&vec![0; n_count]);
+
+        // Fusion neuron (index 5) should have received combined signals
+        assert!(runtime.input_bus.proximal[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_sfa_dynamics() {
+        let mut runtime = create_test_runtime(1);
+        runtime.model.neurons.decay[0] = 0; // No decay for simpler tracking
+        runtime.model.neurons.threshold[0] = 500;
+        runtime.model.neurons.base_threshold[0] = 500;
+
+        // Stimulate constantly
+        let mut spikes = 0;
+        for _ in 0..50 {
+            let res = runtime.tick(&[1000]);
+            if res[0] { spikes += 1; }
+        }
+
+        // Without SFA, it would fire every tick (since potential=1000, thresh=500+adaptation).
+        // With SFA, adaptation current builds up and slows down the firing.
+        assert!(spikes < 50, "SFA should have reduced the firing rate");
+        assert!(runtime.model.neurons.adaptation_current[0] > 0);
+    }
+
+    #[test]
+    fn test_think_command() {
+        let mut runtime = create_test_runtime(1);
+        runtime.modules.instantiate("think");
+
+        // Use handle_command
+        let res = runtime.handle_command("set_think ticks 10");
+        assert_eq!(res, "Think settings updated");
+
+        // Verify state via serialize/deserialize (standard flow in sync_modules_to_model)
+        runtime.sync_modules_to_model();
+        let state = runtime.model.module_states.get("think").unwrap();
+        let think: genesis_core::ThinkModule = bincode::deserialize(state).unwrap();
+        assert_eq!(think.extra_ticks, 10);
+    }
+
+    #[test]
+    fn test_temporal_delay_consistency_multi() {
+        let mut runtime = create_test_runtime(3);
+        runtime.model.synapses.push_delayed(0, 1, 1500, 2); // 0 -> 1, delay 2
+        runtime.model.synapses.push_delayed(0, 2, 1500, 5); // 0 -> 2, delay 5
+        runtime.model.neurons.threshold.fill(genesis_core::SCALE);
 
         // Tick 1: Fire neuron 0
         runtime.tick(&[2000, 0, 0]);

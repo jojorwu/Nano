@@ -686,6 +686,36 @@ mod tests {
     }
 
     #[test]
+    fn test_input_bus_parallel_injection() {
+        use std::sync::Arc;
+        let bus = Arc::new(InputBus::new(100));
+        let threads: Vec<_> = (0..10).map(|_| {
+            let b = Arc::clone(&bus);
+            std::thread::spawn(move || {
+                for i in 0..100 {
+                    InputBus::atomic_saturating_add(&b.proximal[i], 10);
+                }
+            })
+        }).collect();
+
+        for t in threads { t.join().unwrap(); }
+        for i in 0..100 {
+            assert_eq!(bus.proximal[i].load(Ordering::Relaxed), 100);
+        }
+
+        bus.clear();
+        assert_eq!(bus.proximal[0].load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_input_bus_clear_mut() {
+        let mut bus = InputBus::new(100);
+        bus.proximal[50].store(500, Ordering::Relaxed);
+        bus.clear_mut();
+        assert_eq!(bus.proximal[50].load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn test_neurons_init_and_grow() {
         let mut neurons = NeuronsSoA::new(10);
         assert_eq!(neurons.len(), 10);

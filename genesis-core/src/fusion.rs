@@ -112,3 +112,44 @@ impl NanoModule for SpikingFusionModule {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InputBus;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_fusion_gating_logic() {
+        let module = SpikingFusionModule::new(vec![0]);
+
+        // Balanced input
+        let res_balanced = module.fuse_scalar(500, 500, 0);
+        // cross_term = (500*500) >> 10 = 244
+        // sum = 500 + 500 + 244 = 1244
+        assert!(res_balanced > 1000);
+
+        // Vision dominance suppression
+        let res_dominant = module.fuse_scalar(900, 400, 0);
+        // v_gate = 900, t_gate = 400
+        // cross = (900*400) >> 10 = 351
+        // sum = 900 + 400 + 351 = 1651
+        // suppression = 400 / 4 = 100
+        // final = 1551
+        assert!(res_dominant < 1651);
+    }
+
+    #[test]
+    fn test_fusion_on_tick() {
+        let mut module = SpikingFusionModule::new(vec![0]);
+        let bus = InputBus::new(1);
+
+        bus.vision[0].store(1000, Ordering::Relaxed);
+        bus.text[0].store(1000, Ordering::Relaxed);
+
+        module.on_tick(&bus, &[false], 1);
+
+        assert!(bus.proximal[0].load(Ordering::Relaxed) > 0);
+        assert!(bus.distal[0].load(Ordering::Relaxed) > 0);
+    }
+}

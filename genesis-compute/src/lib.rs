@@ -868,6 +868,31 @@ mod tests {
     }
 
     #[test]
+    fn test_sigmoidal_gating_curve() {
+        use crate::calculate_membrane_potential;
+        let thresh = 512;
+
+        // Far below threshold
+        let pot_low = calculate_membrane_potential(0, 100, 1000, 0, 0, thresh, 0, 0, 0, 0);
+        // sigmoid_gate(100, 512) -> diff = -412, result = -412 + 512 = 100.
+        // distal_gated = (1000 * 100) >> 10 = 97.
+        // total = proximal (100) + distal_gated (97) = 197.
+        assert!(pot_low < 200);
+
+        // Near threshold
+        let pot_near = calculate_membrane_potential(0, 512, 1000, 0, 0, thresh, 0, 0, 0, 0);
+        // sigmoid_gate(512, 512) -> diff = 0, result = 512.
+        // distal_gated = (1000 * 512) >> 10 = 500.
+        assert!(pot_near >= 500 && pot_near < 1024);
+
+        // Far above threshold
+        let pot_high = calculate_membrane_potential(0, 1500, 1000, 0, 0, thresh, 0, 0, 0, 0);
+        // diff = 988 > 512 -> result = 1024 (fully open)
+        // distal_gated = 1000
+        assert!(pot_high >= 1000);
+    }
+
+    #[test]
     fn test_cpu_dendritic_gating() {
         use crate::ComputeBackend;
         let mut model = BakedModel {
