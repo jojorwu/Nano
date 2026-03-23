@@ -1,5 +1,8 @@
 use genesis_core::BakedModel;
 
+use crate::events::{SimulationObserver, SimulationEvent};
+use crate::engine::SimulationEngine;
+
 pub struct Observer {
     pub max_spikes_per_tick: usize,
     pub energy_budget_per_tick: u64,
@@ -39,4 +42,15 @@ impl Observer {
         // 3. Telemetry Path: (Could be async, keeping count for now)
         self.total_energy_consumed += spike_count as u64;
     }
+}
+
+impl SimulationObserver for Observer {
+    fn on_event(&mut self, event: &SimulationEvent, _engine: &mut SimulationEngine) {
+        // Observer mostly works in process_spikes for sync safety,
+        // but can use events for async logging or cleanup.
+        if let SimulationEvent::NightPhaseStarted(tick) = event {
+            log::info!("Night phase started at tick {}", tick);
+        }
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

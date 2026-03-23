@@ -72,9 +72,9 @@ impl NanoModule for SpikingFusionModule {
 
         if range.end > 0 {
             for i in range {
-                let v = bus.vision[i].load(Ordering::Relaxed);
-                let t = bus.text[i].load(Ordering::Relaxed);
-                let a = bus.audio[i].load(Ordering::Relaxed);
+                let v = bus.get_modality("vision", i);
+                let t = bus.get_modality("text", i);
+                let a = bus.get_modality("audio", i);
 
                 let fused_val = self.fuse_scalar(v, t, a);
                 if fused_val > 0 {
@@ -85,9 +85,9 @@ impl NanoModule for SpikingFusionModule {
         } else {
             for &i in &self.fusion_neuron_indices {
                 if i < bus.proximal.len() {
-                    let v = bus.vision[i].load(Ordering::Relaxed);
-                    let t = bus.text[i].load(Ordering::Relaxed);
-                    let a = bus.audio[i].load(Ordering::Relaxed);
+                    let v = bus.get_modality("vision", i);
+                    let t = bus.get_modality("text", i);
+                    let a = bus.get_modality("audio", i);
                     let fused_val = self.fuse_scalar(v, t, a);
                     crate::InputBus::atomic_saturating_add(&bus.proximal[i], fused_val);
                     crate::InputBus::atomic_saturating_add(&bus.distal[i], fused_val / 2);
@@ -144,8 +144,8 @@ mod tests {
         let mut module = SpikingFusionModule::new(vec![0]);
         let bus = InputBus::new(1);
 
-        bus.vision[0].store(1000, Ordering::Relaxed);
-        bus.text[0].store(1000, Ordering::Relaxed);
+        bus.set_modality("vision", 0, 1000);
+        bus.set_modality("text", 0, 1000);
 
         module.on_tick(&bus, &[false], 1);
 

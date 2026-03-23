@@ -72,32 +72,34 @@ pub struct InputBus {
     pub basal: Vec<AtomicI32>,
 
     // Modality-specific buffers for high-order fusion
-    pub vision: Vec<AtomicI32>,
-    pub text: Vec<AtomicI32>,
-    pub audio: Vec<AtomicI32>,
+    pub modalities: HashMap<String, Vec<AtomicI32>>,
 }
 
 impl InputBus {
     pub fn new(size: usize) -> Self {
+        let mut modalities = HashMap::new();
+        modalities.insert("vision".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
+        modalities.insert("text".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
+        modalities.insert("audio".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
+
         Self {
             proximal: (0..size).map(|_| AtomicI32::new(0)).collect(),
             distal: (0..size).map(|_| AtomicI32::new(0)).collect(),
             apical: (0..size).map(|_| AtomicI32::new(0)).collect(),
             basal: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            vision: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            text: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            audio: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            modalities,
         }
     }
 
     pub fn clear(&self) {
         use rayon::prelude::*;
-        let iterators = [
-            &self.proximal, &self.distal, &self.apical, &self.basal,
-            &self.vision, &self.text, &self.audio
-        ];
 
-        iterators.par_iter().for_each(|&vec| {
+        self.proximal.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
+        self.distal.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
+        self.apical.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
+        self.basal.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
+
+        self.modalities.par_iter().for_each(|(_, vec)| {
             vec.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
         });
     }
@@ -115,9 +117,27 @@ impl InputBus {
         clear_vec(&mut self.distal);
         clear_vec(&mut self.apical);
         clear_vec(&mut self.basal);
-        clear_vec(&mut self.vision);
-        clear_vec(&mut self.text);
-        clear_vec(&mut self.audio);
+
+        for vec in self.modalities.values_mut() {
+            clear_vec(vec);
+        }
+    }
+
+    pub fn set_modality(&self, name: &str, index: usize, val: i32) {
+        if let Some(vec) = self.modalities.get(name) {
+            if index < vec.len() {
+                Self::atomic_saturating_add(&vec[index], val);
+            }
+        }
+    }
+
+    pub fn get_modality(&self, name: &str, index: usize) -> i32 {
+        if let Some(vec) = self.modalities.get(name) {
+            if index < vec.len() {
+                return vec[index].load(Ordering::Relaxed);
+            }
+        }
+        0
     }
 
     pub fn atomic_saturating_add(target: &AtomicI32, val: i32) {
@@ -183,22 +203,15 @@ impl Clone for Box<dyn NanoModule> {
     }
 }
 
-pub struct ModuleManager {
-    pub modules: Vec<Box<dyn NanoModule>>,
+pub struct ModuleRegistry {
     pub factories: HashMap<String, Box<dyn Fn() -> Box<dyn NanoModule> + Send + Sync>>,
 }
 
-impl Default for ModuleManager {
-    fn default() -> Self {
-        let mut mm = Self { modules: Vec::new(), factories: HashMap::new() };
-        mm.register_defaults();
-        mm
-    }
-}
-
-impl ModuleManager {
+impl ModuleRegistry {
     pub fn new() -> Self {
-        Self::default()
+        let mut registry = Self { factories: HashMap::new() };
+        registry.register_defaults();
+        registry
     }
 
     pub fn register_defaults(&mut self) {
@@ -221,13 +234,44 @@ impl ModuleManager {
         self.factories.insert(name.to_string(), Box::new(factory));
     }
 
+    pub fn create(&self, name: &str) -> Option<Box<dyn NanoModule>> {
+        self.factories.get(name).map(|f| f())
+    }
+}
+
+pub struct ModuleManager {
+    pub modules: Vec<Box<dyn NanoModule>>,
+    pub registry: ModuleRegistry,
+}
+
+impl Default for ModuleManager {
+    fn default() -> Self {
+        let mut registry = ModuleRegistry::new();
+        registry.register_defaults();
+        Self {
+            modules: Vec::new(),
+            registry,
+        }
+    }
+}
+
+impl ModuleManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_factory<F>(&mut self, name: &str, factory: F)
+    where F: Fn() -> Box<dyn NanoModule> + Send + Sync + 'static {
+        self.registry.register_factory(name, factory);
+    }
+
     pub fn add_module(&mut self, module: Box<dyn NanoModule>) {
         self.modules.push(module);
     }
 
     pub fn instantiate(&mut self, name: &str) -> bool {
-        if let Some(factory) = self.factories.get(name) {
-            self.modules.push(factory());
+        if let Some(m) = self.registry.create(name) {
+            self.modules.push(m);
             true
         } else {
             false

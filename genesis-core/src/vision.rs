@@ -62,7 +62,7 @@ impl NanoModule for VisionModule {
 
                     if spiked {
                         let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
-                        crate::InputBus::atomic_saturating_add(&bus.vision[i], val);
+                        bus.set_modality("vision", i, val);
                         crate::InputBus::atomic_saturating_add(&bus.proximal[i], val);
                     }
                 }

@@ -74,8 +74,8 @@ impl NanoModule for TextProcessorModule {
         if let Some(token) = self.last_tokens.get(0) {
             let pattern = self.encode_token(*token);
             for (i, &spiked) in pattern.iter().enumerate() {
-                if spiked && i < bus.text.len() {
-                    crate::InputBus::atomic_saturating_add(&bus.text[i], SCALE);
+                if spiked {
+                    bus.set_modality("text", i, SCALE);
                     crate::InputBus::atomic_saturating_add(&bus.proximal[i], SCALE);
                 }
             }

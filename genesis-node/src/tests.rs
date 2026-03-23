@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{Runtime, Observer, Telemetry};
+    use crate::{Runtime, Observer, Telemetry, SimulationEngine};
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
@@ -25,24 +25,16 @@ mod tests {
             vocabulary: HashMap::new(),
         };
 
+        let settings = crate::SimulationSettings::default();
+        let modules = ModuleManager::new();
+        let backend = Box::new(CpuBackend::default());
+
         Runtime {
-            model,
-            modules: ModuleManager::new(),
-            settings: crate::SimulationSettings::default(),
-            backend: Box::new(CpuBackend::default()),
-            previous_spikes: vec![false; n_count],
-            current_spikes_buffer: vec![false; n_count],
-            merged_inputs_buffer: vec![0; n_count],
-            tick_counter: 0,
-            spikes_history: vec![crate::SpikeData::Sparse(Vec::new()); 100],
-            history_ptr: 0,
+            engine: SimulationEngine::new(model, modules, backend, &settings),
+            settings,
             episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
             network_manager: None,
-            observer: Observer::new(n_count),
-            remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(n_count),
+            observers: vec![Box::new(Observer::new(n_count))],
             telemetry: Telemetry::default(),
         }
     }
@@ -50,9 +42,9 @@ mod tests {
     #[test]
     fn test_runtime_synapse_propagation() {
         let mut runtime = create_test_runtime(2);
-        runtime.model.synapses.push(0, 1, 1500);
-        runtime.model.neurons.threshold[1] = genesis_core::SCALE;
-        runtime.previous_spikes[0] = true;
+        runtime.engine.model.synapses.push(0, 1, 1500);
+        runtime.engine.model.neurons.threshold[1] = genesis_core::SCALE;
+        runtime.engine.previous_spikes[0] = true;
 
         let spikes = runtime.tick(&[0, 0]);
         assert!(spikes[1]);
@@ -61,28 +53,41 @@ mod tests {
     #[test]
     fn test_night_phase_pruning() {
         let mut runtime = create_test_runtime(2);
-        runtime.model.synapses.push(0, 1, 5);
-        runtime.tick_counter = 99;
+        runtime.engine.model.synapses.push(0, 1, 5);
+        runtime.engine.tick_counter = 99;
 
         runtime.tick(&[0, 0]);
-        assert_eq!(runtime.model.synapses.len(), 0);
+        assert_eq!(runtime.engine.model.synapses.len(), 0);
     }
 
     #[test]
     fn test_observer_graceful_degradation() {
         let mut runtime = create_test_runtime(10);
-        let initial_threshold = runtime.model.neurons.threshold[0];
+        let initial_threshold = runtime.engine.model.neurons.threshold[0];
 
-        runtime.observer.energy_budget_per_tick = 2; // Very low budget
+        for obs in &mut runtime.observers {
+            if let Some(o) = obs.as_any_mut().downcast_mut::<Observer>() {
+                o.energy_budget_per_tick = 2; // Very low budget
+            }
+        }
 
         let mut spikes = vec![true; 5]; // 5 spikes > 2 budget
         spikes.extend(vec![false; 5]);
 
-        runtime.observer.process_spikes(&mut spikes, &mut runtime.model);
+        for obs in &mut runtime.observers {
+            if let Some(o) = obs.as_any_mut().downcast_mut::<Observer>() {
+                o.process_spikes(&mut spikes, &mut runtime.engine.model);
+            }
+        }
 
         // Threshold should have increased due to budget violation
-        assert!(runtime.model.neurons.threshold[0] > initial_threshold);
-        assert_eq!(runtime.observer.current_energy_usage, 5);
+        assert!(runtime.engine.model.neurons.threshold[0] > initial_threshold);
+
+        for obs in &mut runtime.observers {
+            if let Some(o) = obs.as_any_mut().downcast_mut::<Observer>() {
+                assert_eq!(o.current_energy_usage, 5);
+            }
+        }
     }
 
     #[test]
@@ -131,25 +136,25 @@ mod tests {
     fn test_temporal_delay_consistency() {
         let mut runtime = create_test_runtime(2);
         // Delay of 3 ticks
-        runtime.model.synapses.push_delayed(0, 1, 1500, 3);
-        runtime.model.neurons.threshold[1] = genesis_core::SCALE;
+        runtime.engine.model.synapses.push_delayed(0, 1, 1500, 3);
+        runtime.engine.model.neurons.threshold[1] = genesis_core::SCALE;
 
         // Fire neuron 0 at T=1
         runtime.tick(&[2000, 0]);
-        assert!(runtime.previous_spikes[0]);
-        assert!(!runtime.previous_spikes[1]);
+        assert!(runtime.engine.previous_spikes[0]);
+        assert!(!runtime.engine.previous_spikes[1]);
 
         // T=2: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.previous_spikes[1]);
+        assert!(!runtime.engine.previous_spikes[1]);
 
         // T=3: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.previous_spikes[1]);
+        assert!(!runtime.engine.previous_spikes[1]);
 
         // T=4: signal arrives (Delay=3 means t+3)
         runtime.tick(&[0, 0]);
-        assert!(runtime.previous_spikes[1], "Signal should have arrived at T=4");
+        assert!(runtime.engine.previous_spikes[1], "Signal should have arrived at T=4");
     }
 
     #[test]
@@ -197,10 +202,10 @@ mod tests {
         let n_count = 10;
         let mut runtime = create_test_runtime(n_count);
         // Tier 0 modules
-        runtime.modules.add_module(Box::new(genesis_core::text::TextProcessorModule::new(n_count)));
-        runtime.modules.add_module(Box::new(genesis_core::vision::VisionModule::new(1, n_count as u32)));
+        runtime.engine.modules.add_module(Box::new(genesis_core::text::TextProcessorModule::new(n_count)));
+        runtime.engine.modules.add_module(Box::new(genesis_core::vision::VisionModule::new(1, n_count as u32)));
         // Tier 1 module
-        runtime.modules.add_module(Box::new(genesis_core::fusion::SpikingFusionModule::new(vec![5])));
+        runtime.engine.modules.add_module(Box::new(genesis_core::fusion::SpikingFusionModule::new(vec![5])));
 
         runtime.inject_text("hello");
         #[cfg(feature = "vision")]
@@ -209,15 +214,15 @@ mod tests {
         runtime.tick(&vec![0; n_count]);
 
         // Fusion neuron (index 5) should have received combined signals
-        assert!(runtime.input_bus.proximal[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert!(runtime.engine.input_bus.proximal[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 
     #[test]
     fn test_sfa_dynamics() {
         let mut runtime = create_test_runtime(1);
-        runtime.model.neurons.decay[0] = 0; // No decay for simpler tracking
-        runtime.model.neurons.threshold[0] = 500;
-        runtime.model.neurons.base_threshold[0] = 500;
+        runtime.engine.model.neurons.decay[0] = 0; // No decay for simpler tracking
+        runtime.engine.model.neurons.threshold[0] = 500;
+        runtime.engine.model.neurons.base_threshold[0] = 500;
 
         // Stimulate constantly
         let mut spikes = 0;
@@ -229,13 +234,13 @@ mod tests {
         // Without SFA, it would fire every tick (since potential=1000, thresh=500+adaptation).
         // With SFA, adaptation current builds up and slows down the firing.
         assert!(spikes < 50, "SFA should have reduced the firing rate");
-        assert!(runtime.model.neurons.adaptation_current[0] > 0);
+        assert!(runtime.engine.model.neurons.adaptation_current[0] > 0);
     }
 
     #[test]
     fn test_think_command() {
         let mut runtime = create_test_runtime(1);
-        runtime.modules.instantiate("think");
+        runtime.engine.modules.instantiate("think");
 
         // Use handle_command
         let res = runtime.handle_command("set_think ticks 10");
@@ -243,7 +248,7 @@ mod tests {
 
         // Verify state via serialize/deserialize (standard flow in sync_modules_to_model)
         runtime.sync_modules_to_model();
-        let state = runtime.model.module_states.get("think").unwrap();
+        let state = runtime.engine.model.module_states.get("think").unwrap();
         let think: genesis_core::ThinkModule = bincode::deserialize(state).unwrap();
         assert_eq!(think.extra_ticks, 10);
     }
@@ -251,30 +256,30 @@ mod tests {
     #[test]
     fn test_temporal_delay_consistency_multi() {
         let mut runtime = create_test_runtime(3);
-        runtime.model.synapses.push_delayed(0, 1, 1500, 2); // 0 -> 1, delay 2
-        runtime.model.synapses.push_delayed(0, 2, 1500, 5); // 0 -> 2, delay 5
-        runtime.model.neurons.threshold.fill(genesis_core::SCALE);
+        runtime.engine.model.synapses.push_delayed(0, 1, 1500, 2); // 0 -> 1, delay 2
+        runtime.engine.model.synapses.push_delayed(0, 2, 1500, 5); // 0 -> 2, delay 5
+        runtime.engine.model.neurons.threshold.fill(genesis_core::SCALE);
 
         // Tick 1: Fire neuron 0
         runtime.tick(&[2000, 0, 0]);
-        assert!(runtime.previous_spikes[0]);
+        assert!(runtime.engine.previous_spikes[0]);
 
         // Tick 2: Signal 0->1 in transit
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.previous_spikes[1]);
+        assert!(!runtime.engine.previous_spikes[1]);
 
         // Tick 3: Signal 0->1 arrives (delay 2 means t+2)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.previous_spikes[1], "Neuron 1 should fire at T=3");
-        assert!(!runtime.previous_spikes[2]);
+        assert!(runtime.engine.previous_spikes[1], "Neuron 1 should fire at T=3");
+        assert!(!runtime.engine.previous_spikes[2]);
 
         // Tick 4, 5: Signal 0->2 in transit
         runtime.tick(&[0, 0, 0]);
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.previous_spikes[2]);
+        assert!(!runtime.engine.previous_spikes[2]);
 
         // Tick 6: Signal 0->2 arrives (delay 5 means t+5)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.previous_spikes[2], "Neuron 2 should fire at T=6");
+        assert!(runtime.engine.previous_spikes[2], "Neuron 2 should fire at T=6");
     }
 }
