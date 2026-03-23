@@ -353,6 +353,7 @@ pub struct NeuronsSoA {
     pub gate_threshold: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
     pub is_excitatory: Vec<bool>,
+    pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
 }
 
 impl NeuronsSoA {
@@ -379,6 +380,7 @@ impl NeuronsSoA {
             gate_threshold: vec![512; size],
             activity_ema: vec![0; size],
             is_excitatory: vec![true; size],
+            adaptation_current: vec![0; size],
         }
     }
     pub fn len(&self) -> usize {
@@ -397,6 +399,7 @@ impl NeuronsSoA {
         if self.next_update_tick.len() != l { return Err("next_update_tick length mismatch".into()); }
         if self.activity_ema.len() != l { return Err("activity_ema length mismatch".into()); }
         if self.is_excitatory.len() != l { return Err("is_excitatory length mismatch".into()); }
+        if self.adaptation_current.len() != l { return Err("adaptation_current length mismatch".into()); }
         Ok(())
     }
 
@@ -423,6 +426,7 @@ impl NeuronsSoA {
         self.gate_threshold.resize(new_size, 512);
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, true);
+        self.adaptation_current.resize(new_size, 0);
     }
 }
 

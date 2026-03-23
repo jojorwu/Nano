@@ -320,17 +320,18 @@ impl Runtime {
         self.input_bus.clear();
         self.modules.on_tick(&mut self.input_bus, &self.previous_spikes, self.tick_counter);
 
-        // Finalize potentials by zipping module inputs into the model
-        self.model.neurons.proximal_potential.iter_mut()
+        // Parallelized Finalization: O(N/Cores) merge of module inputs
+        use rayon::prelude::*;
+        self.model.neurons.proximal_potential.par_iter_mut()
             .zip(&self.input_bus.proximal)
             .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.distal_potential.iter_mut()
+        self.model.neurons.distal_potential.par_iter_mut()
             .zip(&self.input_bus.distal)
             .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.apical_potential.iter_mut()
+        self.model.neurons.apical_potential.par_iter_mut()
             .zip(&self.input_bus.apical)
             .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.basal_potential.iter_mut()
+        self.model.neurons.basal_potential.par_iter_mut()
             .zip(&self.input_bus.basal)
             .for_each(|(p, b)| *p = p.saturating_add(*b));
 

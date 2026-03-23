@@ -45,8 +45,16 @@ impl SpikingFusionModule {
             // We use a non-linear combination: (V*T + T*A + A*V) for high-order fusion
             let cross_term = ((v_gate * t_gate) + (t_gate * a_gate) + (a_gate * v_gate)) >> 10;
 
-            fused[i] = (v_gate + t_gate + a_gate + cross_term) as i32;
+            // Modality Suppression: dominant signals suppress background noise in other modalities
+            let mut final_sum = v_gate + t_gate + a_gate + cross_term;
+
+            // Heuristic suppression
+            if v_gate > 800 { final_sum -= (t_gate + a_gate) / 4; }
+            if t_gate > 800 { final_sum -= (v_gate + a_gate) / 4; }
+
+            fused[i] = final_sum as i32;
             if fused[i] > SCALE * 2 { fused[i] = SCALE * 2; }
+            if fused[i] < 0 { fused[i] = 0; }
         }
         fused
     }
