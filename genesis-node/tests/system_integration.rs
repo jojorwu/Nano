@@ -41,8 +41,7 @@ fn test_module_persistence_and_restoration() {
         },
         episode_reward_history: Vec::new(),
         network_manager: None,
-        observers: vec![Box::new(Observer::new(10))],
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
     };
 
     // 1. Manually instantiate titan (since it wasn't in module_states initially)
@@ -77,8 +76,7 @@ fn test_module_persistence_and_restoration() {
         settings: SimulationSettings::default(),
         episode_reward_history: Vec::new(),
         network_manager: None,
-        observers: vec![Box::new(Observer::new(10))],
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
     };
 
     // Restoration logic (usually in load_with_settings, testing manually here)
@@ -201,8 +199,7 @@ fn test_evolutionary_structural_growth() {
         },
         episode_reward_history: Vec::new(),
         network_manager: None,
-        observers: vec![Box::new(Observer::new(100))],
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(100)), Box::new(Telemetry::default())],
     };
 
     // Simulate high reward and some activity to trigger growth

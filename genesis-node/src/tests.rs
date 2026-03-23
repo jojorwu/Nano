@@ -34,8 +34,7 @@ mod tests {
             settings,
             episode_reward_history: Vec::new(),
             network_manager: None,
-            observers: vec![Box::new(Observer::new(n_count))],
-            telemetry: Telemetry::default(),
+            observers: vec![Box::new(Observer::new(n_count)), Box::new(Telemetry::default())],
         }
     }
 

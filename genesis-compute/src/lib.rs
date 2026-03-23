@@ -1270,6 +1270,7 @@ impl ComputeBackend for CpuBackend {
 
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
+        model.synapses.shrink_to_fit();
 
         // Structure changed -> Index must be rebuilt next tick
         self.synapse_index.clear();

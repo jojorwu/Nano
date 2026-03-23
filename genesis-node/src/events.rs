@@ -7,6 +7,7 @@ pub enum SimulationEvent {
         tick: u32,
         spike_count: usize,
         data: SpikeData,
+        execution_time: std::time::Duration,
     },
     RewardReceived(i32),
     NightPhaseStarted(u32),

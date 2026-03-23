@@ -268,6 +268,7 @@ impl ModuleRegistry {
 pub struct ModuleManager {
     pub modules: Vec<Box<dyn NanoModule>>,
     pub registry: ModuleRegistry,
+    pub tiered_indices: Vec<Vec<usize>>,
 }
 
 impl Default for ModuleManager {
@@ -277,6 +278,7 @@ impl Default for ModuleManager {
         Self {
             modules: Vec::new(),
             registry,
+            tiered_indices: Vec::new(),
         }
     }
 }
@@ -293,15 +295,30 @@ impl ModuleManager {
 
     pub fn add_module(&mut self, module: Box<dyn NanoModule>) {
         self.modules.push(module);
+        self.rebuild_tiers();
     }
 
     pub fn instantiate(&mut self, name: &str) -> bool {
         if let Some(m) = self.registry.create(name) {
             self.modules.push(m);
+            self.rebuild_tiers();
             true
         } else {
             false
         }
+    }
+
+    pub fn rebuild_tiers(&mut self) {
+        let mut tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
+        tiers.sort_unstable();
+        tiers.dedup();
+
+        self.tiered_indices = tiers.into_iter().map(|t| {
+            self.modules.iter().enumerate()
+                .filter(|(_, m)| m.tier() == t)
+                .map(|(i, _)| i)
+                .collect()
+        }).collect();
     }
 
     pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), ModuleError> {
@@ -318,18 +335,17 @@ impl ModuleManager {
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
 
-        // Group modules by tier
-        let mut tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
-        tiers.sort_unstable();
-        tiers.dedup();
-
-        for tier in tiers {
-            // Execute all modules in the current tier in parallel
-            self.modules.par_iter_mut()
-                .filter(|m| m.tier() == tier)
-                .for_each(|m: &mut Box<dyn NanoModule>| {
+        for tier_indices in &self.tiered_indices {
+            // Parallel execution within the tier
+            tier_indices.par_iter().for_each(|&idx| {
+                // Safety: We use unsafe to get multiple mutable references because we know
+                // the indices are unique within and between tiers.
+                let ptr = self.modules.as_ptr() as *mut Box<dyn NanoModule>;
+                unsafe {
+                    let m = &mut *ptr.add(idx);
                     m.on_tick(bus, previous_spikes, tick);
-                });
+                }
+            });
         }
     }
 
@@ -539,7 +555,7 @@ impl NeuronsSoA {
     }
 
     pub fn grow(&mut self, additional: usize) {
-        let new_size = self.potential.len() + additional;
+        let new_size = self.len() + additional;
         self.layer_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
@@ -562,6 +578,31 @@ impl NeuronsSoA {
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, true);
         self.adaptation_current.resize(new_size, 0);
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.layer_id.shrink_to_fit();
+        self.potential.shrink_to_fit();
+        self.distal_potential.shrink_to_fit();
+        self.proximal_potential.shrink_to_fit();
+        self.apical_potential.shrink_to_fit();
+        self.basal_potential.shrink_to_fit();
+        self.backprop_signal.shrink_to_fit();
+        self.threshold.shrink_to_fit();
+        self.base_threshold.shrink_to_fit();
+        self.decay.shrink_to_fit();
+        self.liquid_current.shrink_to_fit();
+        self.dendritic_gate.shrink_to_fit();
+        self.refractory_timer.shrink_to_fit();
+        self.last_spike_tick.shrink_to_fit();
+        self.update_interval.shrink_to_fit();
+        self.next_update_tick.shrink_to_fit();
+        self.x.shrink_to_fit();
+        self.y.shrink_to_fit();
+        self.gate_threshold.shrink_to_fit();
+        self.activity_ema.shrink_to_fit();
+        self.is_excitatory.shrink_to_fit();
+        self.adaptation_current.shrink_to_fit();
     }
 }
 
@@ -654,6 +695,16 @@ impl SynapsesSoA {
         self.stp_resources.swap_remove(index);
         self.stp_calcium.swap_remove(index);
         self.compartment.swap_remove(index);
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.source_index.shrink_to_fit();
+        self.target_index.shrink_to_fit();
+        self.weight.shrink_to_fit();
+        self.delay.shrink_to_fit();
+        self.stp_resources.shrink_to_fit();
+        self.stp_calcium.shrink_to_fit();
+        self.compartment.shrink_to_fit();
     }
 }
 
@@ -796,6 +847,9 @@ mod tests {
         assert_eq!(neurons.len(), 15);
         assert_eq!(neurons.dendritic_gate[14], SCALE);
         assert_eq!(neurons.potential[14], 0);
+
+        neurons.shrink_to_fit();
+        assert_eq!(neurons.len(), 15);
     }
 }
 

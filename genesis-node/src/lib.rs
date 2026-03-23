@@ -115,7 +115,6 @@ pub struct Runtime {
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observers: Vec<Box<dyn SimulationObserver>>,
-    pub telemetry: Telemetry, // Still here for now, but will be an observer soon
 }
 
 pub struct NetworkManager {
@@ -244,9 +243,10 @@ impl RuntimeBuilder {
         // Instantiate modules based on model state
         for name in model.module_states.keys() {
             if modules.instantiate(name) {
-                let state = model.module_states.get(name).unwrap();
-                if let Some(m) = modules.modules.last_mut() {
-                    m.set_state(state);
+                if let Some(state) = model.module_states.get(name) {
+                    if let Some(m) = modules.modules.last_mut() {
+                        m.set_state(state);
+                    }
                 }
             }
         }
@@ -261,6 +261,11 @@ impl RuntimeBuilder {
         if observers.is_empty() {
             observers.push(Box::new(Observer::new(n_count)));
         }
+        if !observers.iter_mut().any(|o| o.as_any_mut().is::<telemetry::Telemetry>()) {
+            observers.push(Box::new(telemetry::Telemetry::default()));
+        }
+
+        modules.rebuild_tiers();
 
         let mut rt = Runtime {
             engine: SimulationEngine::new(model, modules, backend, &self.settings),
@@ -268,7 +273,6 @@ impl RuntimeBuilder {
             episode_reward_history: Vec::new(),
             network_manager: None,
             observers,
-            telemetry: Telemetry::default(),
         };
         rt.post_init()?;
         Ok(rt)
@@ -299,6 +303,7 @@ impl Runtime {
     }
 
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
+        let start_time = std::time::Instant::now();
         let normalized_reward = self.prepare_reward(reward);
         self.engine.tick_counter = self.engine.tick_counter.wrapping_add(1);
         let n_count = self.engine.model.neurons.len();
@@ -340,7 +345,8 @@ impl Runtime {
         self.emit_event(SimulationEvent::TickComplete {
             tick: self.engine.tick_counter,
             spike_count,
-            data: final_spike_data.clone()
+            data: final_spike_data.clone(),
+            execution_time: start_time.elapsed(),
         });
 
         let surprise = self.engine.calculate_surprise(spike_count);
@@ -354,8 +360,6 @@ impl Runtime {
                 o.process_spikes(&mut self.engine.current_spikes_buffer, &mut self.engine.model);
             }
         }
-
-        self.telemetry.spike_counts.push(spike_count);
 
         self.engine.spikes_history[self.engine.history_ptr] = final_spike_data;
         self.engine.history_ptr = (self.engine.history_ptr + 1) % self.engine.spikes_history.len();
@@ -374,7 +378,6 @@ impl Runtime {
     fn prepare_reward(&mut self, reward: Option<i32>) -> Option<i32> {
         reward.map(|r| {
             self.emit_event(SimulationEvent::RewardReceived(r));
-            self.telemetry.episode_rewards.push(r);
             self.episode_reward_history.push(r);
             if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
             let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
