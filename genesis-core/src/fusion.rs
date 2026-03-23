@@ -54,8 +54,15 @@ impl SpikingFusionModule {
 
 impl NanoModule for SpikingFusionModule {
     fn name(&self) -> &str { "fusion" }
-    fn on_tick(&mut self, _bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
-        // Logic handled in specific integration or here if we had cross-modal buffers
+    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+        let fused = self.fuse_gated(&bus.vision, &bus.text, &bus.audio);
+        for (i, &val) in fused.iter().enumerate() {
+            if i < bus.proximal.len() {
+                // Fused signals are injected into both proximal and distal for coincidence detection
+                bus.proximal[i] = bus.proximal[i].saturating_add(val);
+                bus.distal[i] = bus.distal[i].saturating_add(val / 2);
+            }
+        }
     }
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}

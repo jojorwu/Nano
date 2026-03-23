@@ -61,7 +61,7 @@ pub struct CpuBackend {
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
     pub expert_masks: Vec<bool>, // MoE: which neuron groups are active
-    pub synapse_index: Vec<Vec<(usize, u8)>>, // source_neuron -> list of (synapse_index, delay)
+    pub synapse_index: Vec<[Vec<usize>; 16]>, // source_neuron -> delay (1..16) -> list of synapse_indices
 }
 
 impl Default for CpuBackend {
@@ -416,6 +416,12 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.prev_spikes_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&prev_spikes_u32));
         self.queue.write_buffer(self.input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(external_inputs));
         self.queue.write_buffer(self.tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[current_tick]));
+
+        // Upload module-generated potentials from InputBus
+        self.queue.write_buffer(self.proximal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.proximal_potential));
+        self.queue.write_buffer(self.distal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.distal_potential));
+        self.queue.write_buffer(self.apical_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.apical_potential));
+        self.queue.write_buffer(self.basal_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.basal_potential));
 
         // Upload neuromodulation
         self.queue.write_buffer(self.modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[modulation.dopamine, modulation.noradrenaline, modulation.serotonin]));
@@ -942,12 +948,13 @@ impl CpuBackend {
 
     pub fn rebuild_index(&mut self, model: &BakedModel) {
         let n_count = model.neurons.len();
-        self.synapse_index = vec![Vec::new(); n_count];
+        self.synapse_index = vec![Default::default(); n_count];
 
         for (i, (&src, &delay)) in model.synapses.source_index.iter().zip(&model.synapses.delay).enumerate() {
             let src = src as usize;
+            let d_idx = (delay.clamp(1, 16) - 1) as usize;
             if src < n_count {
-                self.synapse_index[src].push((i, delay));
+                self.synapse_index[src][d_idx].push(i);
             }
         }
     }
@@ -971,35 +978,35 @@ impl CpuBackend {
                 continue;
             };
 
+            let d_idx = (d - 1) as usize;
+
             for (src, &fired) in spikes.iter().enumerate() {
                 if !fired { continue; }
                 if src >= self.synapse_index.len() { continue; }
 
                 // Only check synapses whose delay matches the current temporal offset 'd'
-                for &(syn_idx, delay) in &self.synapse_index[src] {
-                    if delay as usize == d {
-                        let target = model.synapses.target_index[syn_idx] as usize;
-                        let gate = model.neurons.dendritic_gate[target];
-                        if gate < 8 { continue; }
+                for &syn_idx in &self.synapse_index[src][d_idx] {
+                    let target = model.synapses.target_index[syn_idx] as usize;
+                    let gate = model.neurons.dendritic_gate[target];
+                    if gate < 8 { continue; }
 
-                        // Short-Term Plasticity (STP): modulate weight by available resources and calcium
-                        let u_facilitation = model.synapses.stp_calcium[syn_idx];
-                        let r_depression = model.synapses.stp_resources[syn_idx];
+                    // Short-Term Plasticity (STP): modulate weight by available resources and calcium
+                    let u_facilitation = model.synapses.stp_calcium[syn_idx];
+                    let r_depression = model.synapses.stp_resources[syn_idx];
 
-                        let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
-                        let stp_weight = ((stp_weight as i64 * (SCALE + u_facilitation) as i64) >> 10) as i32;
+                    let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
+                    let stp_weight = ((stp_weight as i64 * (SCALE + u_facilitation) as i64) >> 10) as i32;
 
-                        // Consumption: firing uses resources and increases calcium
-                        model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] * 800) >> 10;
-                        model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] + 200).min(SCALE);
+                    // Consumption: firing uses resources and increases calcium
+                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] * 800) >> 10;
+                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] + 200).min(SCALE);
 
-                        let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
-                        match model.synapses.compartment[syn_idx] {
-                            Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
-                            Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
-                            Compartment::Apical => { model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight); }
-                            Compartment::Basal => { model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight); }
-                        }
+                    let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
+                    match model.synapses.compartment[syn_idx] {
+                        Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
+                        Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
+                        Compartment::Apical => { model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight); }
+                        Compartment::Basal => { model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight); }
                     }
                 }
             }

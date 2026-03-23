@@ -493,28 +493,20 @@ impl Runtime {
     }
 
     pub fn inject_text(&mut self, text: &str) {
+        let input = genesis_core::ModuleInput::Text(text.to_string());
         for m in &mut self.modules.modules {
             if m.name() == "text_processor" {
-                if let Ok(mut state) = bincode::deserialize::<genesis_core::text::TextProcessorModule>(&m.get_state()) {
-                    state.tokenize_and_queue(text);
-                    if let Ok(encoded) = bincode::serialize(&state) {
-                        m.set_state(&encoded);
-                    }
-                }
+                m.handle_input(&input);
             }
         }
     }
 
     #[cfg(feature = "vision")]
     pub fn inject_image(&mut self, pixels: &[u8]) {
+        let input = genesis_core::ModuleInput::Image(pixels.to_vec());
         for m in &mut self.modules.modules {
             if m.name() == "vision" {
-                if let Ok(mut state) = bincode::deserialize::<genesis_core::vision::VisionModule>(&m.get_state()) {
-                    state.set_input(pixels);
-                    if let Ok(encoded) = bincode::serialize(&state) {
-                        m.set_state(&encoded);
-                    }
-                }
+                m.handle_input(&input);
             }
         }
     }
@@ -553,18 +545,19 @@ impl Runtime {
             },
             "set_think" => {
                 if parts.len() < 2 { return "Usage: set_think <active|ticks> <val>".to_string(); }
-                // Implementation to find think module and update it
                 let mut found = false;
-                for m in &mut self.modules.modules {
-                    if m.name() == "think" {
-                        let mut state: genesis_core::ThinkModule = bincode::deserialize(&m.get_state()).unwrap();
-                        if parts[1] == "active" && parts.len() > 2 {
-                             state.active = parts[2] == "true" || parts[2] == "1";
-                        } else if parts[1] == "ticks" && parts.len() > 2 {
-                             state.extra_ticks = parts[2].parse().unwrap_or(5);
+                if parts.len() > 2 {
+                    let val = if parts[1] == "active" {
+                        if parts[2] == "true" || parts[2] == "1" { 1 } else { 0 }
+                    } else {
+                        parts[2].parse().unwrap_or(5)
+                    };
+                    let input = genesis_core::ModuleInput::Control(parts[1].to_string(), val);
+                    for m in &mut self.modules.modules {
+                        if m.name() == "think" {
+                            m.handle_input(&input);
+                            found = true;
                         }
-                        m.set_state(&bincode::serialize(&state).unwrap());
-                        found = true;
                     }
                 }
                 if found { "Think settings updated".to_string() } else { "Think module not found".to_string() }

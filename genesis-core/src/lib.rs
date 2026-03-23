@@ -29,6 +29,12 @@ impl ThinkModule {
 
 impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
+    fn handle_input(&mut self, input: &ModuleInput) {
+        if let ModuleInput::Control(name, val) = input {
+            if name == "active" { self.active = *val != 0; }
+            if name == "ticks" { self.extra_ticks = *val as usize; }
+        }
+    }
     fn on_tick(&mut self, _bus: &mut InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core logic: The Runtime will check for 'think' module and perform extra backend calls
         // This module acts as a state carrier for that behavior
@@ -59,6 +65,11 @@ pub struct InputBus {
     pub distal: Vec<IValue>,
     pub apical: Vec<IValue>,
     pub basal: Vec<IValue>,
+
+    // Modality-specific buffers for high-order fusion
+    pub vision: Vec<IValue>,
+    pub text: Vec<IValue>,
+    pub audio: Vec<IValue>,
 }
 
 impl InputBus {
@@ -68,6 +79,9 @@ impl InputBus {
             distal: vec![0; size],
             apical: vec![0; size],
             basal: vec![0; size],
+            vision: vec![0; size],
+            text: vec![0; size],
+            audio: vec![0; size],
         }
     }
 
@@ -76,12 +90,26 @@ impl InputBus {
         self.distal.fill(0);
         self.apical.fill(0);
         self.basal.fill(0);
+        self.vision.fill(0);
+        self.text.fill(0);
+        self.audio.fill(0);
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModuleInput {
+    Text(String),
+    Image(Vec<u8>),
+    Audio(Vec<f32>),
+    Control(String, IValue),
 }
 
 pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;
+
+    /// Handles external input directly without serialization overhead.
+    fn handle_input(&mut self, _input: &ModuleInput) {}
 
     /// Called once when the module is added to the network or during model bootstrap.
     fn on_init(&mut self, _neurons: &mut NeuronsSoA) {}

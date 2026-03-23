@@ -26,6 +26,12 @@ impl VisionModule {
 impl NanoModule for VisionModule {
     fn name(&self) -> &str { "vision" }
 
+    fn handle_input(&mut self, input: &crate::ModuleInput) {
+        if let crate::ModuleInput::Image(pixels) = input {
+            self.set_input(pixels);
+        }
+    }
+
     fn on_init(&mut self, neurons: &mut NeuronsSoA) {
         if self.resolution.0 > 0 {
             for y in 0..self.resolution.1 {
@@ -55,6 +61,7 @@ impl NanoModule for VisionModule {
 
                     if spiked {
                         let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
+                        bus.vision[i] = bus.vision[i].saturating_add(val);
                         bus.proximal[i] = bus.proximal[i].saturating_add(val);
                     }
                 }
