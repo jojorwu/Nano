@@ -97,8 +97,8 @@ impl TitanMemory {
 impl NanoModule for TitanMemory {
     fn name(&self) -> &str { "titan" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], _tick: u32) {
-        let n_len = neurons.len();
+    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+        let n_len = bus.distal.len();
         let in_len = previous_spikes.len().min(self.associative_size);
         let out_len = n_len.min(self.associative_size);
 
@@ -108,7 +108,7 @@ impl NanoModule for TitanMemory {
                 let offset = i * self.associative_size;
                 for j in 0..out_len {
                     let val = self.weights[offset + j].saturating_add(self.permanent_weights[offset + j]);
-                    neurons.distal_potential[j] = neurons.distal_potential[j].saturating_add(val);
+                    bus.distal[j] = bus.distal[j].saturating_add(val);
                 }
             }
         }

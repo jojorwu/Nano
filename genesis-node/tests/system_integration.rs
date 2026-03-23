@@ -48,6 +48,7 @@ fn test_module_persistence_and_restoration() {
         network_manager: None,
         observer: Observer::new(10),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(10),
         telemetry: Telemetry::default(),
     };
 
@@ -90,6 +91,7 @@ fn test_module_persistence_and_restoration() {
         network_manager: None,
         observer: Observer::new(10),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(10),
         telemetry: Telemetry::default(),
     };
 
@@ -139,7 +141,7 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.proximal_potential[2] = 0;
     model.neurons.distal_potential[2] = 0;
     let mut prev_spikes = vec![false, true, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
     // Should NOT spike because distal is attenuated (2000 / 4 = 500 < 1024 threshold)
     assert!(!spikes[2], "Neuron 2 should not spike with only distal input");
 
@@ -150,7 +152,7 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.distal_potential[2] = 0;
     model.neurons.refractory_timer[2] = 0;
     prev_spikes = vec![true, false, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
     // Should spike because proximal is direct (2000 > 1024 threshold)
     assert!(spikes[2], "Neuron 2 should spike with strong proximal input");
 
@@ -162,7 +164,7 @@ fn test_multi_compartment_gating_physics() {
     // We need some proximal potential to reach threshold 512.
     // Let's inject external input to proximal.
     prev_spikes = vec![false, true, false]; // Distal only via synapse
-    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
     // Proximal 600 > 512 threshold -> Distal 2000 fully integrated.
     // 600 + 2000 = 2600 > 1024 threshold.
     assert!(spikes[2], "Neuron 2 should spike with coincident proximal and distal input");
@@ -208,6 +210,7 @@ fn test_evolutionary_structural_growth() {
         network_manager: None,
         observer: Observer::new(100),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(100),
         telemetry: Telemetry::default(),
     };
 

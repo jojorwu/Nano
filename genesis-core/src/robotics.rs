@@ -23,7 +23,7 @@ impl SpikingCerebellumModule {
 impl NanoModule for SpikingCerebellumModule {
     fn name(&self) -> &str { "cerebellum" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // 1. Maintain delay line of mossy fiber activity
         let mut current_mossy = vec![false; self.mossy_fiber_indices.len()];
         for (i, &idx) in self.mossy_fiber_indices.iter().enumerate() {
@@ -43,8 +43,8 @@ impl NanoModule for SpikingCerebellumModule {
                     // Inject into corresponding Purkinje (output) neurons' apical dendrites
                     if i < self.purkinje_indices.len() {
                         let target = self.purkinje_indices[i];
-                        if target < neurons.len() {
-                            neurons.apical_potential[target] = neurons.apical_potential[target].saturating_add(SCALE / 2);
+                        if target < bus.apical.len() {
+                            bus.apical[target] = bus.apical[target].saturating_add(SCALE / 2);
                         }
                     }
                 }
@@ -94,7 +94,7 @@ impl RobotControlModule {
 impl NanoModule for RobotControlModule {
     fn name(&self) -> &str { "robot_control" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Intrinsic Motivation (Surprise-driven exploration):
         // If the network is stagnant (low activity/surprise), inject exploratory noise
         // specifically into motor-assigned neurons to trigger trial-and-error behavior.
@@ -105,10 +105,10 @@ impl NanoModule for RobotControlModule {
         let total_active = previous_spikes.iter().filter(|&&s| s).count();
         if total_active < self.motor_neuron_indices.len() / 2 {
             for &idx in &self.motor_neuron_indices {
-                if idx < neurons.len() {
+                if idx < bus.proximal.len() {
                     // Stochastic boost to proximal potential
                     if rng.gen::<f32>() < 0.1 {
-                        neurons.proximal_potential[idx] = neurons.proximal_potential[idx].saturating_add(500);
+                        bus.proximal[idx] = bus.proximal[idx].saturating_add(500);
                     }
                 }
             }

@@ -17,7 +17,28 @@ pub enum BackendError {
 pub trait ComputeBackend {
     /// Executes the main simulation kernels for a single tick:
     /// spike propagation, multi-compartment potential integration, and spike generation.
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool>;
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool>;
+
+    /// Executes multiple internal "Thinking" cycles (Chain-of-Thought) without external inputs.
+    /// Returns the final spike state after all cycles.
+    fn think_cycles(&mut self, model: &mut BakedModel, initial_spikes: &[bool], cycles: usize, current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
+        let mut current_spikes = initial_spikes.to_vec();
+        let n_count = model.neurons.len();
+        let empty_inputs = vec![0; n_count];
+
+        for _ in 0..cycles {
+            // Reset compartment potentials between sub-ticks
+            model.neurons.proximal_potential.fill(0);
+            model.neurons.distal_potential.fill(0);
+            model.neurons.apical_potential.fill(0);
+            model.neurons.basal_potential.fill(0);
+
+            let next_spikes = self.day_phase(model, &empty_inputs, &current_spikes, &[], current_tick, modulation);
+            if next_spikes == current_spikes { break; }
+            current_spikes = next_spikes;
+        }
+        current_spikes
+    }
 
     /// Standard weight update rule (typically GSOP or STDP).
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
@@ -112,6 +133,7 @@ pub struct WgpuBackend {
     pub delay_buffer: Option<wgpu::Buffer>,
     pub stp_resources_buffer: Option<wgpu::Buffer>,
     pub stp_calcium_buffer: Option<wgpu::Buffer>,
+    pub modulation_buffer: Option<wgpu::Buffer>,
     pub bind_group: Option<wgpu::BindGroup>,
     pub tick_bind_group: Option<wgpu::BindGroup>,
     pub lr_bind_group: Option<wgpu::BindGroup>,
@@ -151,6 +173,7 @@ impl WgpuBackend {
                 Self::storage_entry(15, false), Self::storage_entry(16, true), Self::storage_entry(17, true),
                 Self::storage_entry(18, true), Self::storage_entry(19, true), Self::storage_entry(20, true),
                 Self::storage_entry(21, false), Self::storage_entry(22, true),
+                wgpu::BindGroupLayoutEntry { binding: 23, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -160,6 +183,7 @@ impl WgpuBackend {
                 Self::storage_entry(0, false), Self::storage_entry(1, true), Self::storage_entry(2, true),
                 Self::storage_entry(3, true), Self::storage_entry(4, true), Self::storage_entry(5, true),
                 Self::storage_entry(6, true), Self::storage_entry(7, true), Self::storage_entry(8, true),
+                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -208,7 +232,7 @@ impl WgpuBackend {
             sparse_spike_buffer: None, spike_counter_buffer: None, staging_spikes: None, staging_state: None,
             pre_spike_buffer: None, post_spike_buffer: None, last_spike_tick_buffer: None, is_excitatory_buffer: None,
             spike_history_buffer: None, expert_mask_buffer: None, delay_buffer: None,
-            stp_resources_buffer: None, stp_calcium_buffer: None,
+            stp_resources_buffer: None, stp_calcium_buffer: None, modulation_buffer: None,
             bind_group: None, tick_bind_group: None, lr_bind_group: None,
             cached_neuron_count: 0, cached_synapse_count: 0
         })
@@ -218,7 +242,7 @@ impl WgpuBackend {
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
         let n_count = model.neurons.len();
 
         // 1. Re-initialize buffers if neuron count changed
@@ -263,6 +287,13 @@ impl ComputeBackend for WgpuBackend {
             let excitatory_u32: Vec<u32> = model.neurons.is_excitatory.iter().map(|&b| if b { 1u32 } else { 0u32 }).collect();
             self.ensure_buffer(&mut self.is_excitatory_buffer, "Is Excitatory Flags", &excitatory_u32, storage, n_changed);
 
+            self.modulation_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Neuromodulation Uniform"),
+                size: 12, // 3 * i32
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
             // Re-create Bind Group
             self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 layout: &self.potential_layout,
@@ -290,6 +321,7 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 20, resource: self.expert_mask_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 21, resource: self.last_spike_tick_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 22, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 23, resource: self.modulation_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -384,6 +416,9 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.prev_spikes_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&prev_spikes_u32));
         self.queue.write_buffer(self.input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(external_inputs));
         self.queue.write_buffer(self.tick_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[current_tick]));
+
+        // Upload neuromodulation
+        self.queue.write_buffer(self.modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[modulation.dopamine, modulation.noradrenaline, modulation.serotonin]));
 
         // Lazy upload of configuration (only if changed or first run)
         self.queue.write_buffer(self.config_uniform_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[model.config.ip_increment]));
@@ -613,7 +648,12 @@ impl ComputeBackend for WgpuBackend {
         self.pot_buffer = None;
         log::info!("GPU Structural Plasticity: Weights re-synced and buffers cleared for re-initialization.");
     }
-    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, _modulation: genesis_core::NeuromodulationState, history: &[Vec<bool>]) {
+    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, history: &[Vec<bool>]) {
+        // Upload neuromodulation (including dopamine derived from reward if provided)
+        let mut m = modulation;
+        if let Some(r) = reward { m.dopamine = r; }
+        self.queue.write_buffer(self.modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[m.dopamine, m.noradrenaline, m.serotonin]));
+
         self.update_weights(model, previous_spikes, current_spikes, current_tick, reward, history);
     }
 
@@ -676,6 +716,7 @@ impl ComputeBackend for WgpuBackend {
                 wgpu::BindGroupEntry { binding: 6, resource: self.backprop_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: self.last_spike_tick_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.modulation_buffer.as_ref().unwrap().as_entire_binding() },
             ],
             label: Some("GSOP Bind Group"),
         });
@@ -820,13 +861,13 @@ mod tests {
 
         // 1. Open gate (1.0)
         model.neurons.dendritic_gate[1] = 1024;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 1);
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 1, Default::default());
         assert!(spikes[1]); // Should spike
 
         // 2. Closed gate (0.0)
         model.neurons.potential[1] = 0;
         model.neurons.dendritic_gate[1] = 0;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 2);
+        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 2, Default::default());
         assert!(!spikes[1]); // Should not spike
     }
 }
@@ -845,13 +886,16 @@ pub fn calculate_membrane_potential(
     use rand::Rng;
 
     // Non-linear Dendritic Gating (Approximate NMDA spikes)
+    // Distal is gated by Proximal
     let dist_gain = if proximal >= gate_threshold { 1024 } else if proximal >= gate_threshold / 2 { 512 } else { 256 };
     let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
 
+    // Apical is gated by Distal (hierarchical)
     let apical_gain = if dist_gated >= gate_threshold { 1024 } else if dist_gated >= gate_threshold / 2 { 768 } else { 512 };
     let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
 
-    let mod_factor = if basal < 0 { 800 } else { 1024 };
+    // Basal Modulation (Lateral inhibition/excitation)
+    let mod_factor = if basal < 0 { 800 } else if basal > 512 { 1200 } else { 1024 };
     let noise = if noise_amp > 0 { rand::thread_rng().gen_range(-(noise_amp as i32)..noise_amp as i32) } else { 0 };
 
     let mut pot = base_pot.saturating_add(proximal)
@@ -1067,7 +1111,7 @@ impl CpuBackend {
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, _modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
         let n_count = model.neurons.len();
 
         // Apply external inputs directly to proximal potential

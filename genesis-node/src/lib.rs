@@ -119,6 +119,7 @@ pub struct Runtime {
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observer: Observer,
     pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    pub input_bus: genesis_core::InputBus,
     pub telemetry: Telemetry,
 }
 
@@ -237,7 +238,7 @@ impl Runtime {
             modules.instantiate("titan");
         }
 
-        Ok(Self {
+        let mut rt = Self {
             model,
             modules,
             settings: settings.clone(),
@@ -254,8 +255,15 @@ impl Runtime {
             network_manager: None,
             observer: Observer::new(n_count),
             remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            input_bus: genesis_core::InputBus::new(n_count),
             telemetry: Telemetry::default(),
-        })
+        };
+        rt.post_init();
+        Ok(rt)
+    }
+
+    pub fn post_init(&mut self) {
+        self.modules.on_init(&mut self.model.neurons);
     }
 
     pub fn calculate_surprise(&mut self, current_spike_count: usize) -> i32 {
@@ -309,11 +317,32 @@ impl Runtime {
         self.reset_potential_buffers();
         self.prepare_merged_inputs(external_inputs, n_count);
 
-        self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
+        self.input_bus.clear();
+        self.modules.on_tick(&mut self.input_bus, &self.previous_spikes, self.tick_counter);
+
+        // Finalize potentials by zipping module inputs into the model
+        self.model.neurons.proximal_potential.iter_mut()
+            .zip(&self.input_bus.proximal)
+            .for_each(|(p, b)| *p = p.saturating_add(*b));
+        self.model.neurons.distal_potential.iter_mut()
+            .zip(&self.input_bus.distal)
+            .for_each(|(p, b)| *p = p.saturating_add(*b));
+        self.model.neurons.apical_potential.iter_mut()
+            .zip(&self.input_bus.apical)
+            .for_each(|(p, b)| *p = p.saturating_add(*b));
+        self.model.neurons.basal_potential.iter_mut()
+            .zip(&self.input_bus.basal)
+            .for_each(|(p, b)| *p = p.saturating_add(*b));
 
         let full_history = self.reconstruct_history(16);
-        self.current_spikes_buffer = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter);
-        self.current_spikes_buffer = self.process_thinking_cycles(self.current_spikes_buffer.clone(), n_count);
+        self.current_spikes_buffer = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);
+
+        // Execute thinking cycles if think module is active
+        if let Some(think_config) = self.get_think_config() {
+            if think_config.active {
+                self.current_spikes_buffer = self.backend.think_cycles(&mut self.model, &self.current_spikes_buffer, think_config.extra_ticks, self.tick_counter, self.global_modulators);
+            }
+        }
 
         let spike_count = self.current_spikes_buffer.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
@@ -425,30 +454,10 @@ impl Runtime {
         self.tick_with_reward_targeted(external_inputs, reward, None)
     }
 
-    fn process_thinking_cycles(&mut self, mut current_spikes: Vec<bool>, n_count: usize) -> Vec<bool> {
-        for module in &self.modules.modules {
-            if module.name() == "think" {
-                let state = module.get_state();
-                if let Ok(think) = bincode::deserialize::<genesis_core::ThinkModule>(&state) {
-                    if think.active {
-                        for _ in 0..think.extra_ticks {
-                            for i in 0..n_count {
-                                self.model.neurons.proximal_potential[i] = 0;
-                                self.model.neurons.distal_potential[i] = 0;
-                                self.model.neurons.apical_potential[i] = 0;
-                                self.model.neurons.basal_potential[i] = 0;
-                            }
-                            let next_spikes = self.backend.day_phase(&mut self.model, &vec![0; n_count], &current_spikes, &[], self.tick_counter);
-
-                            // Early Exit: stop thinking if the spike pattern has converged
-                            if next_spikes == current_spikes { break; }
-                            current_spikes = next_spikes;
-                        }
-                    }
-                }
-            }
-        }
-        current_spikes
+    fn get_think_config(&self) -> Option<genesis_core::ThinkModule> {
+        self.modules.modules.iter()
+            .find(|m| m.name() == "think")
+            .and_then(|m| bincode::deserialize(&m.get_state()).ok())
     }
 
     fn broadcast_ghost_spikes(&self, current_spikes: &[bool]) {

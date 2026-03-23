@@ -52,6 +52,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
+            input_bus: genesis_core::InputBus::new(2),
             telemetry: Telemetry::default(),
         };
         runtime.previous_spikes[0] = true;
@@ -105,6 +106,7 @@ mod tests {
             network_manager: None,
             observer: Observer { max_spikes_per_tick: 10, total_energy_consumed: 0, energy_budget_per_tick: 100, current_energy_usage: 0 },
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
+            input_bus: genesis_core::InputBus::new(2),
             telemetry: Telemetry::default(),
         };
 

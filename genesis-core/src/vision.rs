@@ -26,36 +26,36 @@ impl VisionModule {
 impl NanoModule for VisionModule {
     fn name(&self) -> &str { "vision" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
-        if !self.input_buffer.is_empty() {
-            // Apply spatial coordinates on first tick if not set
-            if neurons.x[0] == 0 && neurons.y[0] == 0 && self.resolution.0 > 0 {
-                for y in 0..self.resolution.1 {
-                    for x in 0..self.resolution.0 {
-                        let i = (y * self.resolution.0 + x) as usize;
-                        if i < neurons.len() {
-                            neurons.x[i] = x as i16;
-                            neurons.y[i] = y as i16;
-                        }
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) {
+        if self.resolution.0 > 0 {
+            for y in 0..self.resolution.1 {
+                for x in 0..self.resolution.0 {
+                    let i = (y * self.resolution.0 + x) as usize;
+                    if i < neurons.len() {
+                        neurons.x[i] = x as i16;
+                        neurons.y[i] = y as i16;
                     }
                 }
             }
+        }
+    }
 
+    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+        if !self.input_buffer.is_empty() {
             let mut rng = rand::thread_rng();
             for (i, &p) in self.input_buffer.iter().enumerate() {
-                if i < neurons.len() {
+                if i < bus.proximal.len() {
                     let rate = (p as f32) / 255.0;
 
                     let spiked = if self.poisson_mode {
                         rng.gen::<f32>() < rate
                     } else {
-                        // Classical integration
                         true
                     };
 
                     if spiked {
                         let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
-                        neurons.proximal_potential[i] = neurons.proximal_potential[i].saturating_add(val);
+                        bus.proximal[i] = bus.proximal[i].saturating_add(val);
                     }
                 }
             }
@@ -118,12 +118,12 @@ mod tests {
     fn test_vision_poisson() {
         let mut vision = VisionModule::new(10, 10);
         vision.set_input(&[255; 100]); // Max intensity
-        let mut neurons = NeuronsSoA::new(100);
+        let mut bus = crate::InputBus::new(100);
 
-        vision.on_tick(&mut neurons, &[], 1);
+        vision.on_tick(&mut bus, &[], 1);
 
         // With intensity 255, Poisson should almost always spike (rate=1.0)
-        let total_potential: i32 = neurons.proximal_potential.iter().sum();
+        let total_potential: i32 = bus.proximal.iter().sum();
         assert!(total_potential > 0);
     }
 }

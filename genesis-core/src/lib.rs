@@ -29,7 +29,7 @@ impl ThinkModule {
 
 impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
-    fn on_tick(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, _bus: &mut InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core logic: The Runtime will check for 'think' module and perform extra backend calls
         // This module acts as a state carrier for that behavior
     }
@@ -54,12 +54,40 @@ impl NanoModule for ThinkModule {
 
 /// Represents a modular functional unit within the Spiking Neural Network.
 /// Modules can inject signals, observe activity, and manage their own internal plasticity rules.
+pub struct InputBus {
+    pub proximal: Vec<IValue>,
+    pub distal: Vec<IValue>,
+    pub apical: Vec<IValue>,
+    pub basal: Vec<IValue>,
+}
+
+impl InputBus {
+    pub fn new(size: usize) -> Self {
+        Self {
+            proximal: vec![0; size],
+            distal: vec![0; size],
+            apical: vec![0; size],
+            basal: vec![0; size],
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.proximal.fill(0);
+        self.distal.fill(0);
+        self.apical.fill(0);
+        self.basal.fill(0);
+    }
+}
+
 pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;
 
-    /// Called every simulation tick. Use this to inject external signals or perform per-tick state updates.
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32);
+    /// Called once when the module is added to the network or during model bootstrap.
+    fn on_init(&mut self, _neurons: &mut NeuronsSoA) {}
+
+    /// Called every simulation tick. Use this to inject external signals into the InputBus.
+    fn on_tick(&mut self, bus: &mut InputBus, previous_spikes: &[bool], tick: u32);
 
     /// Called during the learning phase to update module-specific internal weights or states.
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
@@ -132,9 +160,15 @@ impl ModuleManager {
         }
     }
 
-    pub fn on_tick(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], tick: u32) {
+    pub fn on_init(&mut self, neurons: &mut NeuronsSoA) {
         for module in &mut self.modules {
-            module.on_tick(neurons, previous_spikes, tick);
+            module.on_init(neurons);
+        }
+    }
+
+    pub fn on_tick(&mut self, bus: &mut InputBus, previous_spikes: &[bool], tick: u32) {
+        for module in &mut self.modules {
+            module.on_tick(bus, previous_spikes, tick);
         }
     }
 

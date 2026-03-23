@@ -7,6 +7,12 @@
 @group(0) @binding(6) var<storage, read> backprop_signals: array<i32>;
 @group(0) @binding(7) var<storage, read> last_spike_ticks: array<u32>;
 @group(0) @binding(8) var<storage, read> is_excitatory: array<u32>;
+struct Modulation {
+    dopamine: i32,
+    noradrenaline: i32,
+    serotonin: i32,
+}
+@group(0) @binding(9) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> base_learning_rate: i32;
 
 @compute @workgroup_size(64)

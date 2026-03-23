@@ -31,6 +31,12 @@ struct Config {
 @group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
 @group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
 @group(0) @binding(21) var<storage, read_write> last_spike_ticks: array<u32>;
+struct Modulation {
+    dopamine: i32,
+    noradrenaline: i32,
+    serotonin: i32,
+}
+@group(0) @binding(23) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
@@ -64,9 +70,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var apical_gated = apical >> 1;
     if (dist_gated >= gate_threshold) { apical_gated = apical; }
 
-    // Basal Modulation (Lateral inhibition)
+    // Basal Modulation (Lateral inhibition/excitation)
     var mod_factor = 1024;
     if (basal < 0) { mod_factor = 800; }
+    else if (basal > 512) { mod_factor = 1200; }
+
+    // Neuromodulation: Noradrenaline increases gain/arousal
+    mod_factor = (mod_factor * (1024 + modulation.noradrenaline)) >> 10;
 
     let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
     var pot = potentials[i] + gated_input + proximal + dist_gated + apical_gated;

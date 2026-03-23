@@ -63,12 +63,12 @@ impl TextProcessorModule {
 impl NanoModule for TextProcessorModule {
     fn name(&self) -> &str { "text_processor" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         if let Some(token) = self.last_tokens.get(0) {
             let pattern = self.encode_token(*token);
             for (i, &spiked) in pattern.iter().enumerate() {
-                if spiked && i < neurons.len() {
-                    neurons.proximal_potential[i] = neurons.proximal_potential[i].saturating_add(SCALE);
+                if spiked && i < bus.proximal.len() {
+                    bus.proximal[i] = bus.proximal[i].saturating_add(SCALE);
                 }
             }
             // Consume token
