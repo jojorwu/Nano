@@ -15,6 +15,9 @@ pub mod robotics;
 
 pub mod plasticity;
 
+/// Thinking Mode Module: Enables "Chain of Thought" reasoning by performing
+/// extra simulation sub-ticks for each external input tick.
+/// This allows the network to iterate internally without new modality data.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThinkModule {
     pub extra_ticks: usize,
@@ -57,6 +60,7 @@ impl NanoModule for ThinkModule {
     fn set_state(&mut self, state: &[u8]) {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
+    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), String> { Ok(()) }
 }
 
 /// Represents a modular functional unit within the Spiking Neural Network.
@@ -87,13 +91,33 @@ impl InputBus {
     }
 
     pub fn clear(&self) {
-        for v in &self.proximal { v.store(0, Ordering::Relaxed); }
-        for v in &self.distal { v.store(0, Ordering::Relaxed); }
-        for v in &self.apical { v.store(0, Ordering::Relaxed); }
-        for v in &self.basal { v.store(0, Ordering::Relaxed); }
-        for v in &self.vision { v.store(0, Ordering::Relaxed); }
-        for v in &self.text { v.store(0, Ordering::Relaxed); }
-        for v in &self.audio { v.store(0, Ordering::Relaxed); }
+        use rayon::prelude::*;
+        let iterators = [
+            &self.proximal, &self.distal, &self.apical, &self.basal,
+            &self.vision, &self.text, &self.audio
+        ];
+
+        iterators.par_iter().for_each(|&vec| {
+            vec.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
+        });
+    }
+
+    /// Faster clear when unique access is available, using raw memory fill.
+    pub fn clear_mut(&mut self) {
+        fn clear_vec(v: &mut [AtomicI32]) {
+            let ptr = v.as_mut_ptr() as *mut i32;
+            let len = v.len();
+            unsafe {
+                std::ptr::write_bytes(ptr, 0, len);
+            }
+        }
+        clear_vec(&mut self.proximal);
+        clear_vec(&mut self.distal);
+        clear_vec(&mut self.apical);
+        clear_vec(&mut self.basal);
+        clear_vec(&mut self.vision);
+        clear_vec(&mut self.text);
+        clear_vec(&mut self.audio);
     }
 
     pub fn atomic_saturating_add(target: &AtomicI32, val: i32) {
@@ -133,6 +157,7 @@ pub trait NanoModule: Send + Sync {
     fn on_init(&mut self, _neurons: &mut NeuronsSoA) {}
 
     /// Called every simulation tick. Use this to inject external signals into the InputBus.
+    /// The InputBus uses atomic integers to allow thread-safe signal injection from multiple modules.
     fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32);
 
     /// Called during the learning phase to update module-specific internal weights or states.
@@ -144,6 +169,9 @@ pub trait NanoModule: Send + Sync {
     // Serialization for persistence
     fn get_state(&self) -> Vec<u8> { Vec::new() }
     fn set_state(&mut self, _state: &[u8]) {}
+
+    /// Validates the module's internal state against the current network topology.
+    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), String> { Ok(()) }
 
     // Factory registration
     fn box_clone(&self) -> Box<dyn NanoModule>;
@@ -206,12 +234,17 @@ impl ModuleManager {
         }
     }
 
-    pub fn on_init(&mut self, neurons: &mut NeuronsSoA) {
+    pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), String> {
         for module in &mut self.modules {
             module.on_init(neurons);
+            module.validate_state(neurons)?;
         }
+        Ok(())
     }
 
+    /// Executes all modules, respecting their tier-based execution order.
+    /// Modules within the same tier are executed in parallel using Rayon.
+    /// Tier 0 is typically for raw input modules, while higher tiers are for fusion and reasoning.
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
 

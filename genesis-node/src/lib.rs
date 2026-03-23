@@ -13,6 +13,12 @@ pub enum RuntimeError {
     Config(#[from] serde_json::Error),
     #[error("Model load failure: {0}")]
     ModelLoad(String),
+    #[error("Backend creation failed: {0}")]
+    BackendCreationFailed(String),
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Internal state error: {0}")]
+    StateError(String),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -205,7 +211,7 @@ impl Runtime {
                 log::warn!("Backend '{}' not found, falling back to CPU", backend_name);
                 registry.create("cpu")
             })
-            .expect("Failed to create any compute backend");
+            .ok_or_else(|| RuntimeError::BackendCreationFailed("Could not instantiate CPU fallback".into()))?;
 
         let mut modules = ModuleManager::new();
 
@@ -252,12 +258,12 @@ impl Runtime {
             input_bus: genesis_core::InputBus::new(n_count),
             telemetry: Telemetry::default(),
         };
-        rt.post_init();
+        rt.post_init().map_err(RuntimeError::StateError)?;
         Ok(rt)
     }
 
-    pub fn post_init(&mut self) {
-        self.modules.on_init(&mut self.model.neurons);
+    pub fn post_init(&mut self) -> Result<(), String> {
+        self.modules.on_init(&mut self.model.neurons)
     }
 
     pub fn calculate_surprise(&mut self, current_spike_count: usize) -> i32 {
@@ -311,52 +317,15 @@ impl Runtime {
         self.reset_potential_buffers();
         self.prepare_merged_inputs(external_inputs, n_count);
 
-        self.input_bus.clear();
-        self.modules.on_tick(&mut self.input_bus, &self.previous_spikes, self.tick_counter);
+        self.input_bus.clear_mut();
+        self.modules.on_tick(&self.input_bus, &self.previous_spikes, self.tick_counter);
 
-        // Parallelized Finalization: O(N/Cores) merge of module inputs
-        use rayon::prelude::*;
-        use std::sync::atomic::Ordering;
-        self.model.neurons.proximal_potential.par_iter_mut()
-            .zip(&self.input_bus.proximal)
-            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
-        self.model.neurons.distal_potential.par_iter_mut()
-            .zip(&self.input_bus.distal)
-            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
-        self.model.neurons.apical_potential.par_iter_mut()
-            .zip(&self.input_bus.apical)
-            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
-        self.model.neurons.basal_potential.par_iter_mut()
-            .zip(&self.input_bus.basal)
-            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+        self.finalize_potentials_from_bus();
 
         let full_history = self.reconstruct_history(16);
         let spike_data = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);
 
-        // Optimized Thinking Path: Direct access to ThinkModule state
-        let mut think_ticks = 0;
-        for m in &self.modules.modules {
-            if m.name() == "think" {
-                if let Some(tm) = m.as_any().downcast_ref::<genesis_core::ThinkModule>() {
-                    if tm.active { think_ticks = tm.extra_ticks; }
-                } else if let Ok(state) = bincode::deserialize::<genesis_core::ThinkModule>(&m.get_state()) {
-                     if state.active { think_ticks = state.extra_ticks; }
-                }
-                break;
-            }
-        }
-
-        let mut final_spike_data = spike_data;
-        if think_ticks > 0 {
-            // Expand to dense for thinking cycles if needed, or handle sparse thinking
-            let mut current_dense = vec![false; n_count];
-            match &final_spike_data {
-                genesis_core::SpikeData::Sparse(indices) => { for &i in indices { if i < n_count { current_dense[i] = true; } } }
-                genesis_core::SpikeData::Dense(mask) => { for i in 0..n_count { if (mask[i/8] >> (i%8)) & 1 == 1 { current_dense[i] = true; } } }
-                _ => {}
-            }
-            final_spike_data = self.backend.think_cycles(&mut self.model, &current_dense, think_ticks, self.tick_counter, self.global_modulators);
-        }
+        let final_spike_data = self.execute_thinking_cycles(spike_data, n_count);
 
         // Convert final spike data to dense buffer for subsequent logic
         self.current_spikes_buffer.fill(false);
@@ -392,6 +361,49 @@ impl Runtime {
         self.previous_spikes.copy_from_slice(&self.current_spikes_buffer);
         self.broadcast_ghost_spikes(&self.previous_spikes);
         self.previous_spikes.clone()
+    }
+
+    fn finalize_potentials_from_bus(&mut self) {
+        use rayon::prelude::*;
+        use std::sync::atomic::Ordering;
+        self.model.neurons.proximal_potential.par_iter_mut()
+            .zip(&self.input_bus.proximal)
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+        self.model.neurons.distal_potential.par_iter_mut()
+            .zip(&self.input_bus.distal)
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+        self.model.neurons.apical_potential.par_iter_mut()
+            .zip(&self.input_bus.apical)
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+        self.model.neurons.basal_potential.par_iter_mut()
+            .zip(&self.input_bus.basal)
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+    }
+
+    fn execute_thinking_cycles(&mut self, initial_spike_data: genesis_core::SpikeData, n_count: usize) -> genesis_core::SpikeData {
+        let mut think_ticks = 0;
+        for m in &self.modules.modules {
+            if m.name() == "think" {
+                if let Some(tm) = m.as_any().downcast_ref::<genesis_core::ThinkModule>() {
+                    if tm.active { think_ticks = tm.extra_ticks; }
+                } else if let Ok(state) = bincode::deserialize::<genesis_core::ThinkModule>(&m.get_state()) {
+                     if state.active { think_ticks = state.extra_ticks; }
+                }
+                break;
+            }
+        }
+
+        if think_ticks > 0 {
+            let mut current_dense = vec![false; n_count];
+            match &initial_spike_data {
+                genesis_core::SpikeData::Sparse(indices) => { for &i in indices { if i < n_count { current_dense[i] = true; } } }
+                genesis_core::SpikeData::Dense(mask) => { for i in 0..n_count { if (mask[i/8] >> (i%8)) & 1 == 1 { current_dense[i] = true; } } }
+                _ => {}
+            }
+            self.backend.think_cycles(&mut self.model, &current_dense, think_ticks, self.tick_counter, self.global_modulators)
+        } else {
+            initial_spike_data
+        }
     }
 
     fn prepare_reward(&mut self, reward: Option<i32>) -> Option<i32> {
@@ -552,20 +564,24 @@ impl Runtime {
                 } else { "Invalid value".to_string() }
             },
             "set_think" => {
-                if parts.len() < 2 { return "Usage: set_think <active|ticks> <val>".to_string(); }
+                if parts.len() < 3 { return "Usage: set_think <active|ticks> <val>".to_string(); }
                 let mut found = false;
-                if parts.len() > 2 {
-                    let val = if parts[1] == "active" {
-                        if parts[2] == "true" || parts[2] == "1" { 1 } else { 0 }
-                    } else {
-                        parts[2].parse().unwrap_or(5)
-                    };
-                    let input = genesis_core::ModuleInput::Control(parts[1].to_string(), val);
-                    for m in &mut self.modules.modules {
-                        if m.name() == "think" {
-                            m.handle_input(&input);
-                            found = true;
-                        }
+                let val = if parts[1] == "active" {
+                    if parts[2] == "true" || parts[2] == "1" { 1 } else { 0 }
+                } else if parts[1] == "ticks" {
+                    match parts[2].parse::<i32>() {
+                        Ok(v) => v,
+                        Err(_) => return "Invalid numeric value for ticks".to_string(),
+                    }
+                } else {
+                    return "Invalid sub-command. Use 'active' or 'ticks'".to_string();
+                };
+
+                let input = genesis_core::ModuleInput::Control(parts[1].to_string(), val);
+                for m in &mut self.modules.modules {
+                    if m.name() == "think" {
+                        m.handle_input(&input);
+                        found = true;
                     }
                 }
                 if found { "Think settings updated".to_string() } else { "Think module not found".to_string() }

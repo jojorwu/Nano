@@ -19,8 +19,11 @@ impl SpikingFusionModule {
         }
     }
 
-    /// Gated Fusion: modalities weight each other.
-    /// If one modality is strong, it can amplify or suppress others.
+    /// Gated Fusion: multimodal integration with mutual inhibition.
+    /// Each modality input is scaled by its current weight.
+    /// Cross-modal terms (bi-modal interactions) are added for non-linear amplification.
+    /// If a single modality dominates (e.g. vision > 80% threshold), it suppresses the others
+    /// to reduce noise and clarify focus.
     pub fn fuse_scalar(&self, v: IValue, t: IValue, a: IValue) -> IValue {
         let v_gate = (v as i64 * self.vision_weight as i64) >> 10;
         let t_gate = (t as i64 * self.text_weight as i64) >> 10;
@@ -98,5 +101,14 @@ impl NanoModule for SpikingFusionModule {
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
     fn set_state(&mut self, state: &[u8]) {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
+    }
+    fn validate_state(&self, neurons: &NeuronsSoA) -> Result<(), String> {
+        let n_count = neurons.len();
+        for &idx in &self.fusion_neuron_indices {
+            if idx >= n_count {
+                return Err(format!("Fusion neuron index {} out of bounds (n_count: {})", idx, n_count));
+            }
+        }
+        Ok(())
     }
 }
