@@ -36,7 +36,7 @@ impl NanoModule for ThinkModule {
             if name == "ticks" { self.extra_ticks = *val as usize; }
         }
     }
-    fn on_tick(&mut self, _bus: &mut InputBus, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core logic: The Runtime will check for 'think' module and perform extra backend calls
         // This module acts as a state carrier for that behavior
     }
@@ -62,38 +62,49 @@ impl NanoModule for ThinkModule {
 /// Represents a modular functional unit within the Spiking Neural Network.
 /// Modules can inject signals, observe activity, and manage their own internal plasticity rules.
 pub struct InputBus {
-    pub proximal: Vec<IValue>,
-    pub distal: Vec<IValue>,
-    pub apical: Vec<IValue>,
-    pub basal: Vec<IValue>,
+    pub proximal: Vec<AtomicI32>,
+    pub distal: Vec<AtomicI32>,
+    pub apical: Vec<AtomicI32>,
+    pub basal: Vec<AtomicI32>,
 
     // Modality-specific buffers for high-order fusion
-    pub vision: Vec<IValue>,
-    pub text: Vec<IValue>,
-    pub audio: Vec<IValue>,
+    pub vision: Vec<AtomicI32>,
+    pub text: Vec<AtomicI32>,
+    pub audio: Vec<AtomicI32>,
 }
 
 impl InputBus {
     pub fn new(size: usize) -> Self {
         Self {
-            proximal: vec![0; size],
-            distal: vec![0; size],
-            apical: vec![0; size],
-            basal: vec![0; size],
-            vision: vec![0; size],
-            text: vec![0; size],
-            audio: vec![0; size],
+            proximal: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            distal: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            apical: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            basal: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            vision: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            text: (0..size).map(|_| AtomicI32::new(0)).collect(),
+            audio: (0..size).map(|_| AtomicI32::new(0)).collect(),
         }
     }
 
-    pub fn clear(&mut self) {
-        self.proximal.fill(0);
-        self.distal.fill(0);
-        self.apical.fill(0);
-        self.basal.fill(0);
-        self.vision.fill(0);
-        self.text.fill(0);
-        self.audio.fill(0);
+    pub fn clear(&self) {
+        for v in &self.proximal { v.store(0, Ordering::Relaxed); }
+        for v in &self.distal { v.store(0, Ordering::Relaxed); }
+        for v in &self.apical { v.store(0, Ordering::Relaxed); }
+        for v in &self.basal { v.store(0, Ordering::Relaxed); }
+        for v in &self.vision { v.store(0, Ordering::Relaxed); }
+        for v in &self.text { v.store(0, Ordering::Relaxed); }
+        for v in &self.audio { v.store(0, Ordering::Relaxed); }
+    }
+
+    pub fn atomic_saturating_add(target: &AtomicI32, val: i32) {
+        let mut current = target.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(val);
+            match target.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
     }
 }
 
@@ -109,6 +120,9 @@ pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;
 
+    /// Execution priority: lower tiers run first.
+    fn tier(&self) -> u32 { 0 }
+
     /// Optional downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any { &() }
 
@@ -119,7 +133,7 @@ pub trait NanoModule: Send + Sync {
     fn on_init(&mut self, _neurons: &mut NeuronsSoA) {}
 
     /// Called every simulation tick. Use this to inject external signals into the InputBus.
-    fn on_tick(&mut self, bus: &mut InputBus, previous_spikes: &[bool], tick: u32);
+    fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32);
 
     /// Called during the learning phase to update module-specific internal weights or states.
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
@@ -198,9 +212,21 @@ impl ModuleManager {
         }
     }
 
-    pub fn on_tick(&mut self, bus: &mut InputBus, previous_spikes: &[bool], tick: u32) {
-        for module in &mut self.modules {
-            module.on_tick(bus, previous_spikes, tick);
+    pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
+        use rayon::prelude::*;
+
+        // Group modules by tier
+        let mut tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
+        tiers.sort_unstable();
+        tiers.dedup();
+
+        for tier in tiers {
+            // Execute all modules in the current tier in parallel
+            self.modules.par_iter_mut()
+                .filter(|m| m.tier() == tier)
+                .for_each(|m: &mut Box<dyn NanoModule>| {
+                    m.on_tick(bus, previous_spikes, tick);
+                });
         }
     }
 
@@ -221,6 +247,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations

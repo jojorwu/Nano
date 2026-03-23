@@ -340,7 +340,7 @@ impl AdaptiveLearningRateModule {
 impl NanoModule for AdaptiveLearningRateModule {
     fn name(&self) -> &str { "adaptive_lr" }
 
-    fn on_tick(&mut self, _bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {}
+    fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {}
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         if let Some(s) = surprise {

@@ -62,6 +62,7 @@ impl TextProcessorModule {
 
 impl NanoModule for TextProcessorModule {
     fn name(&self) -> &str { "text_processor" }
+    fn tier(&self) -> u32 { 0 }
 
     fn handle_input(&mut self, input: &crate::ModuleInput) {
         if let crate::ModuleInput::Text(text) = input {
@@ -69,14 +70,13 @@ impl NanoModule for TextProcessorModule {
         }
     }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         if let Some(token) = self.last_tokens.get(0) {
             let pattern = self.encode_token(*token);
             for (i, &spiked) in pattern.iter().enumerate() {
                 if spiked && i < bus.text.len() {
-                    bus.text[i] = bus.text[i].saturating_add(SCALE);
-                    // Also contribute to proximal for basic functionality
-                    bus.proximal[i] = bus.proximal[i].saturating_add(SCALE);
+                    crate::InputBus::atomic_saturating_add(&bus.text[i], SCALE);
+                    crate::InputBus::atomic_saturating_add(&bus.proximal[i], SCALE);
                 }
             }
             // Consume token

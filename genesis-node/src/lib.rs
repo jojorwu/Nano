@@ -316,18 +316,19 @@ impl Runtime {
 
         // Parallelized Finalization: O(N/Cores) merge of module inputs
         use rayon::prelude::*;
+        use std::sync::atomic::Ordering;
         self.model.neurons.proximal_potential.par_iter_mut()
             .zip(&self.input_bus.proximal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.distal_potential.par_iter_mut()
             .zip(&self.input_bus.distal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.apical_potential.par_iter_mut()
             .zip(&self.input_bus.apical)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.basal_potential.par_iter_mut()
             .zip(&self.input_bus.basal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
+            .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
 
         let full_history = self.reconstruct_history(16);
         let spike_data = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);

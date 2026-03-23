@@ -24,7 +24,7 @@ impl SpikingCerebellumModule {
 impl NanoModule for SpikingCerebellumModule {
     fn name(&self) -> &str { "cerebellum" }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // 1. Maintain delay line of mossy fiber activity
         let mut current_mossy = vec![false; self.mossy_fiber_indices.len()];
         for (i, &idx) in self.mossy_fiber_indices.iter().enumerate() {
@@ -45,7 +45,7 @@ impl NanoModule for SpikingCerebellumModule {
                     if i < self.purkinje_indices.len() {
                         let target = self.purkinje_indices[i];
                         if target < bus.apical.len() {
-                            bus.apical[target] = bus.apical[target].saturating_add(SCALE / 2);
+                            crate::InputBus::atomic_saturating_add(&bus.apical[target], SCALE / 2);
                         }
                     }
                 }
@@ -95,7 +95,7 @@ impl RobotControlModule {
 impl NanoModule for RobotControlModule {
     fn name(&self) -> &str { "robot_control" }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Intrinsic Motivation (Surprise-driven exploration):
         // If the network is stagnant (low activity/surprise), inject exploratory noise
         // specifically into motor-assigned neurons to trigger trial-and-error behavior.
@@ -109,7 +109,7 @@ impl NanoModule for RobotControlModule {
                 if idx < bus.proximal.len() {
                     // Stochastic boost to proximal potential
                     if rng.gen::<f32>() < 0.1 {
-                        bus.proximal[idx] = bus.proximal[idx].saturating_add(500);
+                        crate::InputBus::atomic_saturating_add(&bus.proximal[idx], 500);
                     }
                 }
             }
