@@ -40,7 +40,7 @@ fn test_module_persistence_and_restoration() {
         current_spikes_buffer: vec![false; 10],
         merged_inputs_buffer: vec![0; 10],
         tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 10],
+        spikes_history: vec![genesis_core::SpikeData::Sparse(Vec::new()); 10],
         history_ptr: 0,
         episode_reward_history: Vec::new(),
         global_modulators: genesis_core::NeuromodulationState::default(),
@@ -83,7 +83,7 @@ fn test_module_persistence_and_restoration() {
         current_spikes_buffer: vec![false; 10],
         merged_inputs_buffer: vec![0; 10],
         tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
+        spikes_history: vec![genesis_core::SpikeData::Sparse(Vec::new()); 100],
         history_ptr: 0,
         episode_reward_history: Vec::new(),
         global_modulators: genesis_core::NeuromodulationState::default(),
@@ -141,8 +141,12 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.proximal_potential[2] = 0;
     model.neurons.distal_potential[2] = 0;
     let mut prev_spikes = vec![false, true, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
-    // Should NOT spike because distal is attenuated (2000 / 4 = 500 < 1024 threshold)
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
+    // Should NOT spike because distal is attenuated (2000 / 16 = 125 < 1024 threshold)
     assert!(!spikes[2], "Neuron 2 should not spike with only distal input");
 
     // Case 2: ONLY Proximal input (Direct)
@@ -152,7 +156,11 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.distal_potential[2] = 0;
     model.neurons.refractory_timer[2] = 0;
     prev_spikes = vec![true, false, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
     // Should spike because proximal is direct (2000 > 1024 threshold)
     assert!(spikes[2], "Neuron 2 should spike with strong proximal input");
 
@@ -164,7 +172,11 @@ fn test_multi_compartment_gating_physics() {
     // We need some proximal potential to reach threshold 512.
     // Let's inject external input to proximal.
     prev_spikes = vec![false, true, false]; // Distal only via synapse
-    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
     // Proximal 600 > 512 threshold -> Distal 2000 fully integrated.
     // 600 + 2000 = 2600 > 1024 threshold.
     assert!(spikes[2], "Neuron 2 should spike with coincident proximal and distal input");
@@ -202,7 +214,7 @@ fn test_evolutionary_structural_growth() {
         current_spikes_buffer: vec![false; 100],
         merged_inputs_buffer: vec![0; 100],
         tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
+        spikes_history: vec![genesis_core::SpikeData::Sparse(Vec::new()); 100],
         history_ptr: 0,
         episode_reward_history: Vec::new(),
         global_modulators: genesis_core::NeuromodulationState::default(),

@@ -33,6 +33,7 @@ struct Config {
 @group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
 @group(0) @binding(21) var<storage, read_write> last_spike_ticks: array<u32>;
 @group(0) @binding(24) var<storage, read_write> adaptation: array<i32>;
+@group(0) @binding(25) var<storage, read_write> activity_ema: array<i32>;
 struct Modulation {
     dopamine: i32,
     noradrenaline: i32,
@@ -140,6 +141,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Intrinsic Plasticity
         thresholds[i] = thresholds[i] + config.ip_increment;
+
     } else {
         potentials[i] = pot;
         spikes[i] = 0;
@@ -150,6 +152,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Decaying backprop signal
         backprop_signals[i] = (backprop_signals[i] * 800) >> 10;
         adaptation[i] = (adaptation[i] * 972) >> 10; // ~95% recovery
+    }
+
+    // Homeostatic Activity Control (Matches CPU logic)
+    var cur_ema = activity_ema[i];
+    if (pot >= effective_threshold) {
+        cur_ema = (cur_ema * 990 + 1000) / 1000;
+    } else {
+        cur_ema = (cur_ema * 990) / 1000;
+    }
+    activity_ema[i] = cur_ema;
+
+    var homeo_rate = 1;
+    if (cur_ema > 200) { homeo_rate = 2; } // Accelerated adjustment
+
+    if (cur_ema > 100) {
+        base_thresholds[i] = base_thresholds[i] + homeo_rate;
+    } else if (cur_ema < 100 && base_thresholds[i] > 512) {
+        base_thresholds[i] = base_thresholds[i] - 1;
     }
 
     next_update[i] = current_tick + intervals[i];

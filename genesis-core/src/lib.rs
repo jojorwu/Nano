@@ -29,6 +29,7 @@ impl ThinkModule {
 
 impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
+    fn as_any(&self) -> &dyn std::any::Any { self }
     fn handle_input(&mut self, input: &ModuleInput) {
         if let ModuleInput::Control(name, val) = input {
             if name == "active" { self.active = *val != 0; }
@@ -107,6 +108,9 @@ pub enum ModuleInput {
 pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;
+
+    /// Optional downcast to concrete type
+    fn as_any(&self) -> &dyn std::any::Any { &() }
 
     /// Handles external input directly without serialization overhead.
     fn handle_input(&mut self, _input: &ModuleInput) {}
@@ -268,6 +272,7 @@ pub struct PlasticityContext<'a> {
     pub pre_last_spike: u32,
     pub post_last_spike: u32,
     pub current_tick: u32,
+    pub post_index: usize,
     pub neurons: &'a NeuronsSoA,
 }
 
@@ -427,6 +432,19 @@ impl NeuronsSoA {
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, true);
         self.adaptation_current.resize(new_size, 0);
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SpikeData {
+    Sparse(Vec<usize>),
+    Dense(Vec<u8>), // Bitmask
+    Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
+}
+
+impl Default for SpikeData {
+    fn default() -> Self {
+        Self::Sparse(Vec::new())
     }
 }
 

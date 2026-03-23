@@ -1,4 +1,4 @@
-use genesis_core::{BakedModel, ModuleManager};
+use genesis_core::{BakedModel, ModuleManager, SpikeData};
 use genesis_compute::ComputeBackend;
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
@@ -63,12 +63,6 @@ impl SpikePacket {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SpikeData {
-    Sparse(Vec<usize>),
-    Dense(Vec<u8>), // Bitmask
-    Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationSettings {
@@ -336,23 +330,59 @@ impl Runtime {
             .for_each(|(p, b)| *p = p.saturating_add(*b));
 
         let full_history = self.reconstruct_history(16);
-        self.current_spikes_buffer = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);
+        let spike_data = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);
 
-        // Execute thinking cycles if think module is active
-        if let Some(think_config) = self.get_think_config() {
-            if think_config.active {
-                self.current_spikes_buffer = self.backend.think_cycles(&mut self.model, &self.current_spikes_buffer, think_config.extra_ticks, self.tick_counter, self.global_modulators);
+        // Optimized Thinking Path: Direct access to ThinkModule state
+        let mut think_ticks = 0;
+        for m in &self.modules.modules {
+            if m.name() == "think" {
+                if let Some(tm) = m.as_any().downcast_ref::<genesis_core::ThinkModule>() {
+                    if tm.active { think_ticks = tm.extra_ticks; }
+                } else if let Ok(state) = bincode::deserialize::<genesis_core::ThinkModule>(&m.get_state()) {
+                     if state.active { think_ticks = state.extra_ticks; }
+                }
+                break;
             }
         }
 
-        let spike_count = self.current_spikes_buffer.iter().filter(|&&s| s).count();
-        let surprise = self.calculate_surprise(spike_count);
+        let mut final_spike_data = spike_data;
+        if think_ticks > 0 {
+            // Expand to dense for thinking cycles if needed, or handle sparse thinking
+            let mut current_dense = vec![false; n_count];
+            match &final_spike_data {
+                genesis_core::SpikeData::Sparse(indices) => { for &i in indices { if i < n_count { current_dense[i] = true; } } }
+                genesis_core::SpikeData::Dense(mask) => { for i in 0..n_count { if (mask[i/8] >> (i%8)) & 1 == 1 { current_dense[i] = true; } } }
+                _ => {}
+            }
+            final_spike_data = self.backend.think_cycles(&mut self.model, &current_dense, think_ticks, self.tick_counter, self.global_modulators);
+        }
 
+        // Convert final spike data to dense buffer for subsequent logic
+        self.current_spikes_buffer.fill(false);
+        let mut spike_count = 0;
+        match &final_spike_data {
+            genesis_core::SpikeData::Sparse(indices) => {
+                spike_count = indices.len();
+                for &idx in indices { if idx < n_count { self.current_spikes_buffer[idx] = true; } }
+            }
+            genesis_core::SpikeData::Dense(mask) => {
+                for i in 0..n_count {
+                    if (mask[i / 8] >> (i % 8)) & 1 == 1 {
+                        self.current_spikes_buffer[i] = true;
+                        spike_count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let surprise = self.calculate_surprise(spike_count);
         self.apply_neuromodulation(surprise, normalized_reward);
         self.observer.process_spikes(&mut self.current_spikes_buffer, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
-        self.manage_spike_history(n_count);
+        self.spikes_history[self.history_ptr] = final_spike_data;
+        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
 
         if self.tick_counter > 0 && self.tick_counter % self.settings.night_phase_interval == 0 {
             self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
@@ -401,22 +431,6 @@ impl Runtime {
         self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
     }
 
-    fn manage_spike_history(&mut self, n_count: usize) {
-        let active_indices: Vec<usize> = self.current_spikes_buffer.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-
-        let data = if active_indices.len() < n_count / 32 {
-            SpikeData::Sparse(active_indices)
-        } else {
-            let mut mask = vec![0u8; (n_count + 7) / 8];
-            for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
-            SpikeData::Dense(mask)
-        };
-
-        self.spikes_history[self.history_ptr] = data;
-        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
-    }
-
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
         let modulators = self.global_modulators;
         let mut prev = self.previous_spikes.clone();
@@ -446,19 +460,11 @@ impl Runtime {
         self.backend.structural_plasticity(&mut self.model, raw_reward, &reconstructed);
         self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, raw_reward);
         self.sync_modules_to_model();
-        // Reset history pointer after consolidation if desired,
-        // though strictly not needed as pointers are tick-based.
-        self.history_ptr = 0;
+        // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         self.tick_with_reward_targeted(external_inputs, reward, None)
-    }
-
-    fn get_think_config(&self) -> Option<genesis_core::ThinkModule> {
-        self.modules.modules.iter()
-            .find(|m| m.name() == "think")
-            .and_then(|m| bincode::deserialize(&m.get_state()).ok())
     }
 
     fn broadcast_ghost_spikes(&self, current_spikes: &[bool]) {

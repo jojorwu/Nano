@@ -44,7 +44,7 @@ impl crate::PlasticityRule for StdpRule {
         // BCM Logic: Use activity_ema to shift the LTP/LTD threshold
         // If the neuron is highly active, it becomes harder to strengthen connections (LTP)
         // and easier to weaken them (LTD), maintaining homeostatic stability.
-        let activity = ctx.neurons.activity_ema[ctx.post_last_spike as usize % ctx.neurons.len()]; // Approximation
+        let activity = ctx.neurons.activity_ema[ctx.post_index];
         let bcm_threshold = 100; // Target activity
 
         if diff > 0 && diff < self.tau as i64 {
@@ -68,8 +68,8 @@ impl crate::PlasticityRule for StdpRule {
         if weight_before < 0 && *weight > 0 { *weight = -1; }
 
         // Clamp weights
-        if *weight > 5000 { *weight = 5000; }
-        if *weight < -5000 { *weight = -5000; }
+        if *weight > crate::WEIGHT_CLAMP_LIMIT { *weight = crate::WEIGHT_CLAMP_LIMIT; }
+        if *weight < -crate::WEIGHT_CLAMP_LIMIT { *weight = -crate::WEIGHT_CLAMP_LIMIT; }
     }
 }
 
@@ -114,7 +114,7 @@ impl EvolutionaryOptimizer {
 
     /// Perform structural mutations based on reward and activity.
     pub fn mutate(&self, synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, reward: IValue) {
-        self.mutate_with_activity(synapses, neurons, reward, &[]);
+        self.mutate_with_activity(synapses, neurons, reward, &[], 1000000);
     }
 
     /// Perform structural mutations with activity correlation and topographic constraints.
@@ -123,7 +123,8 @@ impl EvolutionaryOptimizer {
         synapses: &mut SynapsesSoA,
         neurons: &crate::NeuronsSoA,
         reward: IValue,
-        activity_history: &[Vec<bool>]
+        activity_history: &[Vec<bool>],
+        max_synapses: usize
     ) {
         let neuron_count = neurons.len();
         if reward < -100 {
@@ -155,7 +156,8 @@ impl EvolutionaryOptimizer {
                             for &j in active.iter().take(3) {
                                 if i != j && grown < grow_count {
                                     let comp = if (i + j) % 2 == 0 { Compartment::Proximal } else { Compartment::Distal };
-                                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &StructuralPlasticityConfig::default()) {
+                                    let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
+                                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &config) {
                                         grown += 1;
                                     }
                                 }
@@ -208,7 +210,8 @@ impl EvolutionaryOptimizer {
                         Compartment::Apical
                     };
 
-                    grow_synapse_in_compartment(synapses, src, best_target, 150, comp, &StructuralPlasticityConfig::default());
+                    let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
+                    grow_synapse_in_compartment(synapses, src, best_target, 150, comp, &config);
                 }
             }
         }
@@ -276,6 +279,7 @@ mod tests {
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),
             pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
+            post_index: 0,
             neurons: &neurons,
         };
         stdp.apply(&mut weight, &ctx);
@@ -289,6 +293,7 @@ mod tests {
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),
             pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
+            post_index: 0,
             neurons: &neurons,
         };
         stdp.apply(&mut weight2, &ctx2);

@@ -17,11 +17,11 @@ pub enum BackendError {
 pub trait ComputeBackend {
     /// Executes the main simulation kernels for a single tick:
     /// spike propagation, multi-compartment potential integration, and spike generation.
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool>;
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData;
 
     /// Executes multiple internal "Thinking" cycles (Chain-of-Thought) without external inputs.
     /// Returns the final spike state after all cycles.
-    fn think_cycles(&mut self, model: &mut BakedModel, initial_spikes: &[bool], cycles: usize, current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
+    fn think_cycles(&mut self, model: &mut BakedModel, initial_spikes: &[bool], cycles: usize, current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
         let mut current_spikes = initial_spikes.to_vec();
         let n_count = model.neurons.len();
         let empty_inputs = vec![0; n_count];
@@ -33,11 +33,20 @@ pub trait ComputeBackend {
             model.neurons.apical_potential.fill(0);
             model.neurons.basal_potential.fill(0);
 
-            let next_spikes = self.day_phase(model, &empty_inputs, &current_spikes, &[], current_tick, modulation);
+            let spike_data = self.day_phase(model, &empty_inputs, &current_spikes, &[], current_tick, modulation);
+            let mut next_spikes = vec![false; n_count];
+            match spike_data {
+                genesis_core::SpikeData::Sparse(indices) => { for i in indices { if i < n_count { next_spikes[i] = true; } } }
+                genesis_core::SpikeData::Dense(mask) => { for i in 0..n_count { if (mask[i/8] >> (i%8)) & 1 == 1 { next_spikes[i] = true; } } }
+                _ => {}
+            }
             if next_spikes == current_spikes { break; }
             current_spikes = next_spikes;
         }
-        current_spikes
+
+        let active_indices: Vec<usize> = current_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+        genesis_core::SpikeData::Sparse(active_indices)
     }
 
     /// Standard weight update rule (typically GSOP or STDP).
@@ -98,6 +107,7 @@ pub struct WgpuBackend {
     pub apical_buffer: Option<wgpu::Buffer>,
     pub basal_buffer: Option<wgpu::Buffer>,
     pub adaptation_buffer: Option<wgpu::Buffer>,
+    pub activity_ema_buffer: Option<wgpu::Buffer>,
     pub gate_threshold_buffer: Option<wgpu::Buffer>,
     pub pot_buffer: Option<wgpu::Buffer>,
     pub threshold_buffer: Option<wgpu::Buffer>,
@@ -124,6 +134,7 @@ pub struct WgpuBackend {
     pub sparse_spike_buffer: Option<wgpu::Buffer>,
     pub spike_counter_buffer: Option<wgpu::Buffer>,
     pub staging_spikes: Option<wgpu::Buffer>,
+    pub staging_counter: Option<wgpu::Buffer>,
     pub staging_state: Option<wgpu::Buffer>,
     pub pre_spike_buffer: Option<wgpu::Buffer>,
     pub post_spike_buffer: Option<wgpu::Buffer>,
@@ -174,6 +185,7 @@ impl WgpuBackend {
                 Self::storage_entry(15, false), Self::storage_entry(16, true), Self::storage_entry(17, true),
                 Self::storage_entry(18, true), Self::storage_entry(19, true), Self::storage_entry(20, true),
                 Self::storage_entry(21, false), Self::storage_entry(22, true), Self::storage_entry(24, false),
+                Self::storage_entry(25, false),
                 wgpu::BindGroupLayoutEntry { binding: 23, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
@@ -243,7 +255,7 @@ impl WgpuBackend {
 #[cfg(feature = "wgpu")]
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
         let n_count = model.neurons.len();
 
         // 1. Re-initialize buffers if neuron count changed
@@ -272,6 +284,7 @@ impl ComputeBackend for WgpuBackend {
             self.ensure_buffer(&mut self.layer_id_buffer, "Layer IDs", &model.neurons.layer_id, storage, n_changed);
             self.ensure_buffer(&mut self.backprop_buffer, "Backprop Signals", &model.neurons.backprop_signal, copy_all, n_changed);
             self.ensure_buffer(&mut self.adaptation_buffer, "Adaptation Current", &model.neurons.adaptation_current, copy_all, n_changed);
+            self.ensure_buffer(&mut self.activity_ema_buffer, "Activity EMA", &model.neurons.activity_ema, copy_all, n_changed);
 
             self.tick_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Tick Uniform"), size: 4, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
             self.lr_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Learning Rate Uniform"), size: 4, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
@@ -280,7 +293,8 @@ impl ComputeBackend for WgpuBackend {
             self.sparse_spike_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Sparse Spikes"), size: (n_count * 4) as u64, usage: copy_all, mapped_at_creation: false }));
             self.spike_counter_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Spike Counter"), size: 4, usage: copy_all, mapped_at_creation: false }));
             self.staging_spikes = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging Spikes"), size: (n_count * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
-            self.staging_state = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging State"), size: (n_count * 4 * 6) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.staging_counter = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging Counter"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.staging_state = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging State"), size: (n_count * 4 * 7) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
             self.expert_mask_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Expert Mask"), size: (n_count * 4) as u64, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
             self.spike_history_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Spike History Buffer (GPU)"), size: (n_count * 16 * 4) as u64, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
 
@@ -325,6 +339,7 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 22, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 23, resource: self.modulation_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 24, resource: self.adaptation_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 25, resource: self.activity_ema_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
                 label: None,
             }));
@@ -465,7 +480,9 @@ impl ComputeBackend for WgpuBackend {
             });
 
             // Update history buffer slot for the current tick
-            let history_slot = (current_tick % 16) as u64;
+            // Shader expects history[ (current_tick - delay) % 16 ]
+            // We store the PREVIOUS spikes (t-1) at slot (current_tick - 1) % 16
+            let history_slot = (current_tick.wrapping_sub(1) % 16) as u64;
             self.queue.write_buffer(
                 self.spike_history_buffer.as_ref().unwrap(),
                 history_slot * (n_count * 4) as u64,
@@ -561,34 +578,37 @@ impl ComputeBackend for WgpuBackend {
         self.queue.write_buffer(self.spike_counter_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&[0u32]));
 
         encoder.copy_buffer_to_buffer(self.sparse_spike_buffer.as_ref().unwrap(), 0, self.staging_spikes.as_ref().unwrap(), 0, (n_count * 4) as u64);
-        // Also download counter
-        let counter_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-             label: None, size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(self.spike_counter_buffer.as_ref().unwrap(), 0, &counter_staging, 0, 4);
+        encoder.copy_buffer_to_buffer(self.spike_counter_buffer.as_ref().unwrap(), 0, self.staging_counter.as_ref().unwrap(), 0, 4);
 
         self.queue.submit(Some(encoder.finish()));
 
         // Map and read
         let spikes_slice = self.staging_spikes.as_ref().unwrap().slice(..);
-        counter_staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let counter_slice = self.staging_counter.as_ref().unwrap().slice(..);
+
+        counter_slice.map_async(wgpu::MapMode::Read, |_| {});
         spikes_slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::Maintain::Wait);
 
-        let mut spikes = vec![false; n_count];
+        let mut active_indices = Vec::new();
         {
-            let counter_raw = counter_staging.slice(..).get_mapped_range();
+            let counter_raw = counter_slice.get_mapped_range();
             let counter_data: &[u32] = bytemuck::cast_slice(&counter_raw);
             let count = counter_data[0] as usize;
+            drop(counter_raw);
+
             let spikes_raw = spikes_slice.get_mapped_range();
             let spike_indices: &[u32] = bytemuck::cast_slice(&spikes_raw);
             for i in 0..count.min(n_count) {
                 let idx = spike_indices[i] as usize;
-                if idx < n_count { spikes[idx] = true; }
+                if idx < n_count { active_indices.push(idx); }
             }
+            drop(spikes_raw);
         }
+        self.staging_spikes.as_ref().unwrap().unmap();
+        self.staging_counter.as_ref().unwrap().unmap();
 
-        spikes
+        genesis_core::SpikeData::Sparse(active_indices)
     }
     fn sync_state(&mut self, model: &mut BakedModel) {
         let n_count = model.neurons.len();
@@ -601,6 +621,7 @@ impl ComputeBackend for WgpuBackend {
         encoder.copy_buffer_to_buffer(self.next_update_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 12) as u64, (n_count * 4) as u64);
         encoder.copy_buffer_to_buffer(self.last_spike_tick_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 16) as u64, (n_count * 4) as u64);
         encoder.copy_buffer_to_buffer(self.adaptation_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 20) as u64, (n_count * 4) as u64);
+        encoder.copy_buffer_to_buffer(self.activity_ema_buffer.as_ref().unwrap(), 0, self.staging_state.as_ref().unwrap(), (n_count * 24) as u64, (n_count * 4) as u64);
 
         // Download weights
         let weight_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -629,6 +650,7 @@ impl ComputeBackend for WgpuBackend {
                 model.neurons.next_update_tick[i] = state_data[3 * n_count + i] as u32;
                 model.neurons.last_spike_tick[i] = state_data[4 * n_count + i] as u32;
                 model.neurons.adaptation_current[i] = state_data[5 * n_count + i];
+                model.neurons.activity_ema[i] = state_data[6 * n_count + i];
             }
         }
 
@@ -875,13 +897,21 @@ mod tests {
 
         // 1. Open gate (1.0)
         model.neurons.dendritic_gate[1] = 1024;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 1, Default::default());
+        let spike_data = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 1, Default::default());
+        let mut spikes = vec![false; 2];
+        if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+            for i in indices { if i < 2 { spikes[i] = true; } }
+        }
         assert!(spikes[1]); // Should spike
 
         // 2. Closed gate (0.0)
         model.neurons.potential[1] = 0;
         model.neurons.dendritic_gate[1] = 0;
-        let spikes = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 2, Default::default());
+        let spike_data = backend.day_phase(&mut model, &[0, 0], &prev_spikes, &[], 2, Default::default());
+        let mut spikes = vec![false; 2];
+        if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+            for i in indices { if i < 2 { spikes[i] = true; } }
+        }
         assert!(!spikes[1]); // Should not spike
     }
 }
@@ -1000,11 +1030,11 @@ impl CpuBackend {
         for d in 1..=16 {
             let spikes = if d == 1 {
                 previous_spikes
-            } else if d - 2 < history.len() {
-                // history is reversed: [t-2, t-3, t-4...]
-                // d=2 should access history[0] (t-2)
-                // d=3 should access history[1] (t-3)
-                &history[d - 2]
+            } else if d - 1 < history.len() {
+                // history contains [t-1, t-2, t-3, ...]
+                // d=1 is handled above (t-1)
+                // d=2 should access history[1] (t-2)
+                &history[d - 1]
             } else {
                 continue;
             };
@@ -1081,7 +1111,7 @@ impl CpuBackend {
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
         let noise_amp = model.config.noise_amplitude;
-        let target_activity = 100;
+        let target_activity = 100; // 10% of SCALE=1000 base
         let expert_masks = &self.expert_masks;
 
         let neurons = &mut model.neurons;
@@ -1127,14 +1157,14 @@ impl CpuBackend {
                     *last_spk = current_tick;
                     *bprop = SCALE;
                     *thresh = thresh.saturating_add(ip_inc);
-                    *activity = (*activity * 99 + 100) / 100;
+                    *activity = (*activity * 990 + 1000) / 1000;
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
                 } else {
                     *pot = current_pot;
                     if *refr > 0 { *refr -= 1; }
                     if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
                     *bprop = ((*bprop as i64 * 800) >> 10) as i32;
-                    *activity = (*activity * 99) / 100;
+                    *activity = (*activity * 990) / 1000;
                     *adaptation = (*adaptation * 95) / 100; // Recovery
                 }
 
@@ -1154,12 +1184,16 @@ impl CpuBackend {
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, _modulation: genesis_core::NeuromodulationState) -> Vec<bool> {
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, _modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
         let n_count = model.neurons.len();
 
-        // Apply external inputs directly to proximal potential
+        // Apply external inputs directly to proximal potential with dendritic gating
         for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(val); }
+            if i < n_count {
+                let gate = model.neurons.dendritic_gate[i];
+                let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
+                model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
+            }
         }
 
         self.propagate_sparse_delayed_spikes(model, previous_spikes, history);
@@ -1173,7 +1207,10 @@ impl ComputeBackend for CpuBackend {
 
         let mut new_spikes = vec![false; n_count];
         self.update_neuron_states(model, current_tick, &mut new_spikes);
-        new_spikes
+
+        let active_indices: Vec<usize> = new_spikes.iter().enumerate()
+            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+        genesis_core::SpikeData::Sparse(active_indices)
     }
 
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {
@@ -1195,6 +1232,7 @@ impl ComputeBackend for CpuBackend {
                 pre_last_spike: model.neurons.last_spike_tick[src],
                 post_last_spike: model.neurons.last_spike_tick[target],
                 current_tick,
+                post_index: target,
                 neurons: &model.neurons,
             };
 
@@ -1211,7 +1249,7 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history);
+            self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
                 let grow_size = (model.neurons.len() / 20).max(1);

@@ -1,9 +1,10 @@
 use crate::{IValue, SCALE, NanoModule, NeuronsSoA, SynapsesSoA};
 use serde::{Serialize, Deserialize};
+use std::collections::VecDeque;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SpikingCerebellumModule {
-    pub delay_line: Vec<Vec<bool>>,
+    pub delay_line: VecDeque<Vec<bool>>,
     pub max_delay: usize,
     pub mossy_fiber_indices: Vec<usize>,
     pub purkinje_indices: Vec<usize>,
@@ -12,7 +13,7 @@ pub struct SpikingCerebellumModule {
 impl SpikingCerebellumModule {
     pub fn new(mossy: Vec<usize>, purkinje: Vec<usize>) -> Self {
         Self {
-            delay_line: Vec::new(),
+            delay_line: VecDeque::new(),
             max_delay: 10,
             mossy_fiber_indices: mossy,
             purkinje_indices: purkinje,
@@ -31,8 +32,8 @@ impl NanoModule for SpikingCerebellumModule {
                 current_mossy[i] = previous_spikes[idx];
             }
         }
-        self.delay_line.insert(0, current_mossy);
-        if self.delay_line.len() > self.max_delay { self.delay_line.pop(); }
+        self.delay_line.push_front(current_mossy);
+        if self.delay_line.len() > self.max_delay { self.delay_line.pop_back(); }
 
         // 2. Predictive feedback: delayed activity is injected into Apical compartments
         // simulating the role of the cerebellum in temporal coordination.
