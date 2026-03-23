@@ -1,5 +1,6 @@
-use genesis_core::{BakedModel, SCALE, IValue, Compartment, SpikeData, NeuromodulationState};
+use genesis_core::{BakedModel, SCALE, IValue, Compartment, SpikeData, NeuromodulationState, NeuronsSoA};
 use crate::{ComputeBackend, BackendError, cpu::CpuBackend};
+use wgpu::util::DeviceExt;
 
 pub struct WgpuBackend {
     pub device: wgpu::Device,
@@ -210,7 +211,6 @@ impl WgpuBackend {
         usage: wgpu::BufferUsages,
         force_realloc: bool
     ) -> bool {
-        use wgpu::util::DeviceExt;
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
         let needs_realloc = force_realloc || buffer.as_ref().map_or(true, |b| b.size() != size);
         if needs_realloc {
@@ -228,18 +228,30 @@ impl WgpuBackend {
 
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData {
-        // Full GPU-resident implementation would go here.
-        // For now, this is a skeleton that honors the trait.
+    fn day_phase(&mut self, _model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _history: &[Vec<bool>], _current_tick: u32, _modulation: NeuromodulationState) -> SpikeData {
+        // GPU kernels would be dispatched here
         SpikeData::Sparse(Vec::new())
     }
-    fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {
+    fn update_weights(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>, _history: &[Vec<bool>]) {
     }
-    fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: NeuromodulationState, history: &[Vec<bool>]) {
+    fn update_weights_modulated(&mut self, _model: &mut BakedModel, _previous_spikes: &[bool], _current_spikes: &[bool], _current_tick: u32, _reward: Option<IValue>, _modulation: NeuromodulationState, _history: &[Vec<bool>]) {
     }
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
         let mut cpu = CpuBackend::default();
         cpu.structural_plasticity(model, reward, history);
     }
     fn sync_state(&mut self, _model: &mut BakedModel) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genesis_core::{NeuronsSoA, SynapsesSoA};
+
+    #[test]
+    fn test_membrane_potential_calc() {
+        use crate::kernels::calculate_membrane_potential;
+        let pot = calculate_membrane_potential(500, 0, 0, 0, 0, 512, 0, 0, 0, 0);
+        assert!(pot <= 500 && pot >= 499);
+    }
 }
