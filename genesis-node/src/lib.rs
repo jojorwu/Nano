@@ -191,10 +191,12 @@ impl NetworkManager {
 }
 
 impl Runtime {
+    /// Bootstraps a simulation session from a model file on disk.
     pub fn load(path: &str) -> Result<Self, RuntimeError> {
         Self::load_with_settings(path, SimulationSettings::default())
     }
 
+    /// Loads a model and configures the simulation with specific hardware and timing parameters.
     pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
         let model = BakedModel::load(path).map_err(|e| RuntimeError::ModelLoad(e.to_string()))?;
         let n_count = model.neurons.len();
@@ -300,35 +302,15 @@ impl Runtime {
         }).collect()
     }
 
+    /// Executes a single simulation tick with optional reward modulation and layer targeting.
+    /// This is the primary entry point for model interaction.
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
-        let normalized_reward = if let Some(r) = reward {
-            self.telemetry.episode_rewards.push(r);
-            self.episode_reward_history.push(r);
-            if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
-            let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
-            Some(r - (mean as i32))
-        } else {
-            None
-        };
-
+        let normalized_reward = self.prepare_reward(reward);
         self.tick_counter = self.tick_counter.wrapping_add(1);
         let n_count = self.model.neurons.len();
 
         self.reset_potential_buffers();
-
-        // Use pre-allocated buffer for inputs
-        self.merged_inputs_buffer.fill(0);
-        for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count { self.merged_inputs_buffer[i] = val; }
-        }
-
-        {
-            let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
-            for &idx in remote_spikes.iter() {
-                if idx < n_count { self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(1024); }
-            }
-            remote_spikes.clear();
-        }
+        self.prepare_merged_inputs(external_inputs, n_count);
 
         self.modules.on_tick(&mut self.model.neurons, &self.previous_spikes, self.tick_counter);
 
@@ -339,30 +321,11 @@ impl Runtime {
         let spike_count = self.current_spikes_buffer.iter().filter(|&&s| s).count();
         let surprise = self.calculate_surprise(spike_count);
 
-        // Update Neuromodulation State
-        self.global_modulators.noradrenaline = surprise;
-        if let Some(r) = normalized_reward {
-            self.global_modulators.dopamine = r;
-        } else {
-            self.global_modulators.dopamine = (self.global_modulators.dopamine * 9) / 10;
-        }
-        // Serotonin tracks long-term stability
-        self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
+        self.apply_neuromodulation(surprise, normalized_reward);
         self.observer.process_spikes(&mut self.current_spikes_buffer, &mut self.model);
         self.telemetry.spike_counts.push(spike_count);
 
-        let active_indices: Vec<usize> = self.current_spikes_buffer.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-        let data = if active_indices.len() < self.current_spikes_buffer.len() / 32 {
-            SpikeData::Sparse(active_indices)
-        } else {
-            let mut mask = vec![0u8; (self.current_spikes_buffer.len() + 7) / 8];
-            for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
-            SpikeData::Dense(mask)
-        };
-
-        // Ring-buffer push: zero allocation once stabilized
-        self.spikes_history[self.history_ptr] = data;
-        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
+        self.manage_spike_history(n_count);
 
         if self.tick_counter > 0 && self.tick_counter % self.settings.night_phase_interval == 0 {
             self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
@@ -371,6 +334,56 @@ impl Runtime {
         self.previous_spikes.copy_from_slice(&self.current_spikes_buffer);
         self.broadcast_ghost_spikes(&self.previous_spikes);
         self.previous_spikes.clone()
+    }
+
+    fn prepare_reward(&mut self, reward: Option<i32>) -> Option<i32> {
+        reward.map(|r| {
+            self.telemetry.episode_rewards.push(r);
+            self.episode_reward_history.push(r);
+            if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
+            let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
+            r - (mean as i32)
+        })
+    }
+
+    fn prepare_merged_inputs(&mut self, external_inputs: &[i32], n_count: usize) {
+        self.merged_inputs_buffer.fill(0);
+        for (i, &val) in external_inputs.iter().enumerate() {
+            if i < n_count { self.merged_inputs_buffer[i] = val; }
+        }
+
+        let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
+        for &idx in remote_spikes.iter() {
+            if idx < n_count { self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(1024); }
+        }
+        remote_spikes.clear();
+    }
+
+    fn apply_neuromodulation(&mut self, surprise: i32, normalized_reward: Option<i32>) {
+        self.global_modulators.noradrenaline = surprise;
+        if let Some(r) = normalized_reward {
+            self.global_modulators.dopamine = r;
+        } else {
+            self.global_modulators.dopamine = (self.global_modulators.dopamine * 9) / 10;
+        }
+        // Serotonin tracks long-term stability
+        self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
+    }
+
+    fn manage_spike_history(&mut self, n_count: usize) {
+        let active_indices: Vec<usize> = self.current_spikes_buffer.iter().enumerate()
+            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+
+        let data = if active_indices.len() < n_count / 32 {
+            SpikeData::Sparse(active_indices)
+        } else {
+            let mut mask = vec![0u8; (n_count + 7) / 8];
+            for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
+            SpikeData::Dense(mask)
+        };
+
+        self.spikes_history[self.history_ptr] = data;
+        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
     }
 
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {

@@ -1,14 +1,37 @@
 use genesis_core::{BakedModel, GsopRule, PlasticityRule, SCALE, IValue, Compartment};
 use genesis_core::plasticity::{prune_synapses, StructuralPlasticityConfig};
 use rayon::prelude::*;
+use thiserror::Error;
 
+#[derive(Error, Debug)]
+pub enum BackendError {
+    #[error("WGPU Adapter not found")]
+    AdapterNotFound,
+    #[error("Failed to create WGPU Device: {0}")]
+    DeviceCreationFailed(String),
+}
+
+/// Defines the interface for simulation execution and learning logic.
+/// Backends can be optimized for different hardware (CPU, WGPU, etc.) while
+/// maintaining numerical parity through standardized bit-shift physics.
 pub trait ComputeBackend {
+    /// Executes the main simulation kernels for a single tick:
+    /// spike propagation, multi-compartment potential integration, and spike generation.
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32) -> Vec<bool>;
-    /// Weight updates (fast phase of learning)
+
+    /// Standard weight update rule (typically GSOP or STDP).
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]);
+
+    /// Weight update with neuromodulatory context (Dopamine/Noradrenaline signals).
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, history: &[Vec<bool>]);
+
+    /// Performs large-scale structural changes (pruning, neurogenesis, and SNNaS optimization).
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
-    fn sync_state(&mut self, _model: &mut BakedModel) {} // Optional: download state from device
+
+    /// Synchronizes device-resident state (GPU) back to the CPU model buffers.
+    fn sync_state(&mut self, _model: &mut BakedModel) {}
+
+    /// Returns the display name of the backend.
     fn name(&self) -> &'static str;
 }
 
@@ -98,199 +121,81 @@ pub struct WgpuBackend {
 
 #[cfg(feature = "wgpu")]
 impl WgpuBackend {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, BackendError> {
         let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("Failed to find wgpu adapter");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .ok_or(BackendError::AdapterNotFound)?;
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: None,
+            label: Some("Nano Spiking OS Compute Device"),
             required_features: wgpu::Features::SHADER_INT64,
             required_limits: wgpu::Limits::default(),
-        }, None)).expect("Failed to create wgpu device");
+        }, None)).map_err(|e| BackendError::DeviceCreationFailed(e.to_string()))?;
 
-        let potential_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Potential Update Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/potential_update.wgsl"))),
-        });
+        // 1. Shaders
+        let potential_shader = Self::create_shader(&device, "potential_update", include_str!("shaders/potential_update.wgsl"));
+        let propagation_shader = Self::create_shader(&device, "spike_prop", include_str!("shaders/spike_prop.wgsl"));
+        let gsop_shader = Self::create_shader(&device, "gsop_update", include_str!("shaders/gsop_update.wgsl"));
+        let latent_accum_shader = Self::create_shader(&device, "latent_accum", include_str!("shaders/latent_accum.wgsl"));
+        let latent_distrib_shader = Self::create_shader(&device, "latent_distrib", include_str!("shaders/latent_distrib.wgsl"));
 
-        let propagation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Spike Propagation Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/spike_prop.wgsl"))),
-        });
-
-        let gsop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("GSOP Update Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/gsop_update.wgsl"))),
-        });
-
-        let latent_accum_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Latent Accum Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/latent_accum.wgsl"))),
-        });
-
-        let latent_distrib_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Latent Distrib Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/latent_distrib.wgsl"))),
-        });
-
-        let propagation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Spike Propagation Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/spike_prop.wgsl"))),
-        });
-
+        // 2. Bind Group Layouts
         let potential_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Potential Layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 14, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 15, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 16, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 17, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 18, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 19, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 20, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 21, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 22, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                Self::storage_entry(0, false), Self::storage_entry(1, false), Self::storage_entry(2, false),
+                Self::storage_entry(3, false), Self::storage_entry(4, false), Self::storage_entry(5, true),
+                Self::storage_entry(6, false), Self::storage_entry(7, true), Self::storage_entry(8, true),
+                Self::storage_entry(9, true), Self::storage_entry(10, true), Self::storage_entry(11, true),
+                Self::storage_entry(12, false), Self::storage_entry(13, false), Self::storage_entry(14, true),
+                Self::storage_entry(15, false), Self::storage_entry(16, true), Self::storage_entry(17, true),
+                Self::storage_entry(18, true), Self::storage_entry(19, true), Self::storage_entry(20, true),
+                Self::storage_entry(21, false), Self::storage_entry(22, true),
             ],
         });
 
         let gsop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GSOP Layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                Self::storage_entry(0, false), Self::storage_entry(1, true), Self::storage_entry(2, true),
+                Self::storage_entry(3, true), Self::storage_entry(4, true), Self::storage_entry(5, true),
+                Self::storage_entry(6, true), Self::storage_entry(7, true), Self::storage_entry(8, true),
             ],
         });
 
         let latent_accum_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Latent Accum Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
+            entries: &[Self::storage_entry(0, true), Self::storage_entry(1, true), Self::storage_entry(2, false)],
         });
 
         let latent_distrib_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Latent Distrib Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
+            entries: &[Self::storage_entry(0, true), Self::storage_entry(1, true), Self::storage_entry(2, true), Self::storage_entry(3, false)],
         });
 
         let propagation_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Propagation Layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                Self::storage_entry(0, true), Self::storage_entry(1, true), Self::storage_entry(2, true),
+                Self::storage_entry(3, true), Self::storage_entry(4, true), Self::storage_entry(5, false),
+                Self::storage_entry(6, false), Self::storage_entry(7, false), Self::storage_entry(8, false),
+                Self::storage_entry(9, true), Self::storage_entry(10, true),
             ],
         });
 
         let tick_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Tick Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
+            label: Some("Tick Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
         });
 
-        let potential_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Potential Pipeline Layout"),
-            bind_group_layouts: &[&potential_layout, &tick_layout],
-            push_constant_ranges: &[],
-        });
+        // 3. Pipelines
+        let potential_pipeline = Self::create_pipeline(&device, "Potential", &potential_layout, &tick_layout, &potential_shader);
+        let propagation_pipeline = Self::create_pipeline(&device, "Propagation", &propagation_layout, &tick_layout, &propagation_shader);
+        let gsop_pipeline = Self::create_pipeline(&device, "GSOP", &gsop_layout, &tick_layout, &gsop_shader);
+        let latent_accum_pipeline = Self::create_pipeline(&device, "Latent Accum", &latent_accum_layout, &tick_layout, &latent_accum_shader);
+        let latent_distrib_pipeline = Self::create_pipeline(&device, "Latent Distrib", &latent_distrib_layout, &tick_layout, &latent_distrib_shader);
 
-        let propagation_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Propagation Pipeline Layout"),
-            bind_group_layouts: &[&propagation_layout, &tick_layout],
-            push_constant_ranges: &[],
-        });
-
-        let gsop_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("GSOP Pipeline Layout"),
-            bind_group_layouts: &[&gsop_layout, &tick_layout],
-            push_constant_ranges: &[],
-        });
-
-        let latent_accum_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Latent Accum Pipeline Layout"),
-            bind_group_layouts: &[&latent_accum_layout, &tick_layout],
-            push_constant_ranges: &[],
-        });
-
-        let latent_distrib_p_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Latent Distrib Pipeline Layout"),
-            bind_group_layouts: &[&latent_distrib_layout, &tick_layout],
-            push_constant_ranges: &[],
-        });
-
-        let potential_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Potential Pipeline"),
-            layout: Some(&potential_p_layout),
-            module: &potential_shader,
-            entry_point: "main",
-        });
-
-        let propagation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Propagation Pipeline"),
-            layout: Some(&propagation_p_layout),
-            module: &propagation_shader,
-            entry_point: "main",
-        });
-
-        let gsop_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("GSOP Pipeline"),
-            layout: Some(&gsop_p_layout),
-            module: &gsop_shader,
-            entry_point: "main",
-        });
-
-        let latent_accum_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Latent Accum Pipeline"),
-            layout: Some(&latent_accum_p_layout),
-            module: &latent_accum_shader,
-            entry_point: "main",
-        });
-
-        let latent_distrib_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Latent Distrib Pipeline"),
-            layout: Some(&latent_distrib_p_layout),
-            module: &latent_distrib_shader,
-            entry_point: "main",
-        });
-
-        // Simplified propagation pipeline layout might differ, but for stub it's fine
-        Self {
+        Ok(Self {
             device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
             potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, propagation_layout, tick_layout,
             prev_spikes_buffer: None, distal_buffer: None, proximal_buffer: None, apical_buffer: None, basal_buffer: None, gate_threshold_buffer: None,
@@ -306,7 +211,7 @@ impl WgpuBackend {
             stp_resources_buffer: None, stp_calcium_buffer: None,
             bind_group: None, tick_bind_group: None, lr_bind_group: None,
             cached_neuron_count: 0, cached_synapse_count: 0
-        }
+        })
     }
 }
 
@@ -314,163 +219,49 @@ impl WgpuBackend {
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], _history: &[Vec<bool>], current_tick: u32) -> Vec<bool> {
-        use wgpu::util::DeviceExt;
-
         let n_count = model.neurons.len();
 
         // 1. Re-initialize buffers if neuron count changed
-        if n_count != self.cached_neuron_count || self.pot_buffer.is_none() {
-            self.pot_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Potentials"),
-                contents: bytemuck::cast_slice(&model.neurons.potential),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Thresholds"),
-                contents: bytemuck::cast_slice(&model.neurons.threshold),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.decay_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Decays"),
-                contents: bytemuck::cast_slice(&model.neurons.decay),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
-            self.refractory_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Refractory"),
-                contents: bytemuck::cast_slice(&model.neurons.refractory_timer),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.spikes_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Output Spikes"),
-                size: (n_count * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }));
-            self.input_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Inputs"),
-                size: (n_count * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.next_update_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Next Update"),
-                contents: bytemuck::cast_slice(&model.neurons.next_update_tick),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.interval_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Intervals"),
-                contents: bytemuck::cast_slice(&model.neurons.update_interval),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
-            self.gate_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Dendritic Gate"),
-                contents: bytemuck::cast_slice(&model.neurons.dendritic_gate),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
-            self.distal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Distal Potentials"),
-                contents: bytemuck::cast_slice(&model.neurons.distal_potential),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.proximal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Proximal Potentials"),
-                contents: bytemuck::cast_slice(&model.neurons.proximal_potential),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.apical_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Apical Potentials"),
-                contents: bytemuck::cast_slice(&model.neurons.apical_potential),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.basal_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Basal Potentials"),
-                contents: bytemuck::cast_slice(&model.neurons.basal_potential),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.gate_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Gate Thresholds"),
-                contents: bytemuck::cast_slice(&model.neurons.gate_threshold),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.base_threshold_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Base Thresholds"),
-                contents: bytemuck::cast_slice(&model.neurons.base_threshold),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
-            self.layer_id_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Layer IDs"),
-                contents: bytemuck::cast_slice(&model.neurons.layer_id),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
-            self.backprop_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Backprop Signals"),
-                contents: bytemuck::cast_slice(&model.neurons.backprop_signal),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            }));
-            self.tick_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Tick Uniform"),
-                size: 4,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.lr_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Learning Rate Uniform"),
-                size: 4,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.config_uniform_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Config Buffer"),
-                size: 8, // ip_increment, ip_decay
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.sparse_spike_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sparse Spikes"),
-                size: (n_count * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.spike_counter_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Spike Counter"),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.staging_spikes = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Staging Spikes"),
-                size: (n_count * 4) as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.staging_state = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Staging State"),
-                size: (n_count * 4 * 4) as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.expert_mask_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Expert Mask"),
-                size: (n_count * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.spike_history_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Spike History Buffer (GPU)"),
-                size: (n_count * 16 * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.last_spike_tick_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Last Spike Ticks"),
-                contents: bytemuck::cast_slice(&model.neurons.last_spike_tick),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            }));
-            self.is_excitatory_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Is Excitatory Flags"),
-                contents: bytemuck::cast_slice(&model.neurons.is_excitatory.iter().map(|&b| if b { 1u32 } else { 0u32 }).collect::<Vec<u32>>()),
-                usage: wgpu::BufferUsages::STORAGE,
-            }));
+        let n_changed = n_count != self.cached_neuron_count;
+        if n_changed || self.pot_buffer.is_none() {
+            let storage = wgpu::BufferUsages::STORAGE;
+            let copy_all = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+
+            self.ensure_buffer(&mut self.pot_buffer, "Potentials", &model.neurons.potential, copy_all, n_changed);
+            self.ensure_buffer(&mut self.threshold_buffer, "Thresholds", &model.neurons.threshold, copy_all, n_changed);
+            self.ensure_buffer(&mut self.decay_buffer, "Decays", &model.neurons.decay, storage, n_changed);
+            self.ensure_buffer(&mut self.refractory_buffer, "Refractory", &model.neurons.refractory_timer, copy_all, n_changed);
+
+            self.spikes_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Output Spikes"), size: (n_count * 4) as u64, usage: copy_all, mapped_at_creation: false }));
+            self.input_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Inputs"), size: (n_count * 4) as u64, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+
+            self.ensure_buffer(&mut self.next_update_buffer, "Next Update", &model.neurons.next_update_tick, copy_all, n_changed);
+            self.ensure_buffer(&mut self.interval_buffer, "Intervals", &model.neurons.update_interval, storage, n_changed);
+            self.ensure_buffer(&mut self.gate_buffer, "Dendritic Gate", &model.neurons.dendritic_gate, storage, n_changed);
+            self.ensure_buffer(&mut self.distal_buffer, "Distal Potentials", &model.neurons.distal_potential, storage | wgpu::BufferUsages::COPY_DST, n_changed);
+            self.ensure_buffer(&mut self.proximal_buffer, "Proximal Potentials", &model.neurons.proximal_potential, storage | wgpu::BufferUsages::COPY_DST, n_changed);
+            self.ensure_buffer(&mut self.apical_buffer, "Apical Potentials", &model.neurons.apical_potential, storage | wgpu::BufferUsages::COPY_DST, n_changed);
+            self.ensure_buffer(&mut self.basal_buffer, "Basal Potentials", &model.neurons.basal_potential, storage | wgpu::BufferUsages::COPY_DST, n_changed);
+            self.ensure_buffer(&mut self.gate_threshold_buffer, "Gate Thresholds", &model.neurons.gate_threshold, storage | wgpu::BufferUsages::COPY_DST, n_changed);
+            self.ensure_buffer(&mut self.base_threshold_buffer, "Base Thresholds", &model.neurons.base_threshold, storage, n_changed);
+            self.ensure_buffer(&mut self.layer_id_buffer, "Layer IDs", &model.neurons.layer_id, storage, n_changed);
+            self.ensure_buffer(&mut self.backprop_buffer, "Backprop Signals", &model.neurons.backprop_signal, copy_all, n_changed);
+
+            self.tick_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Tick Uniform"), size: 4, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.lr_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Learning Rate Uniform"), size: 4, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.config_uniform_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Config Buffer"), size: 8, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+
+            self.sparse_spike_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Sparse Spikes"), size: (n_count * 4) as u64, usage: copy_all, mapped_at_creation: false }));
+            self.spike_counter_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Spike Counter"), size: 4, usage: copy_all, mapped_at_creation: false }));
+            self.staging_spikes = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging Spikes"), size: (n_count * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.staging_state = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Staging State"), size: (n_count * 4 * 5) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.expert_mask_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Expert Mask"), size: (n_count * 4) as u64, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.spike_history_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("Spike History Buffer (GPU)"), size: (n_count * 16 * 4) as u64, usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+
+            self.ensure_buffer(&mut self.last_spike_tick_buffer, "Last Spike Ticks", &model.neurons.last_spike_tick, copy_all, n_changed);
+
+            let excitatory_u32: Vec<u32> = model.neurons.is_excitatory.iter().map(|&b| if b { 1u32 } else { 0u32 }).collect();
+            self.ensure_buffer(&mut self.is_excitatory_buffer, "Is Excitatory Flags", &excitatory_u32, storage, n_changed);
 
             // Re-create Bind Group
             self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -907,8 +698,73 @@ impl ComputeBackend for WgpuBackend {
         // Sync back to CPU only happens in sync_state() or perform_night_phase().
     }
 
-    pub fn compute_synaptic_metaplasticity(&mut self, model: &mut BakedModel) {
+    pub fn compute_synaptic_metaplasticity(&mut self, _model: &mut BakedModel) {
         // Future implementation: GPU-side metaplasticity kernel
+    }
+
+    fn create_shader(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
+        })
+    }
+
+    fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
+    fn create_pipeline(
+        device: &wgpu::Device,
+        label: &str,
+        layout: &wgpu::BindGroupLayout,
+        tick_layout: &wgpu::BindGroupLayout,
+        shader: &wgpu::ShaderModule
+    ) -> wgpu::ComputePipeline {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&format!("{} Pipeline Layout", label)),
+            bind_group_layouts: &[layout, tick_layout],
+            push_constant_ranges: &[],
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&format!("{} Pipeline", label)),
+            layout: Some(&pipeline_layout),
+            module: shader,
+            entry_point: "main",
+        })
+    }
+
+    fn ensure_buffer<T: bytemuck::Pod>(
+        &self,
+        buffer: &mut Option<wgpu::Buffer>,
+        label: &str,
+        data: &[T],
+        usage: wgpu::BufferUsages,
+        force_realloc: bool
+    ) -> bool {
+        use wgpu::util::DeviceExt;
+        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+
+        let needs_realloc = force_realloc || buffer.as_ref().map_or(true, |b| b.size() != size);
+
+        if needs_realloc {
+            *buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(data),
+                usage,
+            }));
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -958,28 +814,66 @@ mod tests {
     }
 }
 
+pub fn calculate_membrane_potential(
+    base_pot: IValue,
+    proximal: IValue,
+    distal: IValue,
+    apical: IValue,
+    basal: IValue,
+    gate_threshold: IValue,
+    liquid: IValue,
+    decay: IValue,
+    noise_amp: IValue
+) -> IValue {
+    use rand::Rng;
+
+    // Non-linear Dendritic Gating (Approximate NMDA spikes)
+    let dist_gain = if proximal >= gate_threshold { 1024 } else if proximal >= gate_threshold / 2 { 512 } else { 256 };
+    let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
+
+    let apical_gain = if dist_gated >= gate_threshold { 1024 } else if dist_gated >= gate_threshold / 2 { 768 } else { 512 };
+    let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
+
+    let mod_factor = if basal < 0 { 800 } else { 1024 };
+    let noise = if noise_amp > 0 { rand::thread_rng().gen_range(-(noise_amp as i32)..noise_amp as i32) } else { 0 };
+
+    let mut pot = base_pot.saturating_add(proximal)
+        .saturating_add(dist_gated)
+        .saturating_add(apical_gated)
+        .saturating_add(liquid)
+        .saturating_add(noise);
+
+    pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
+
+    // LLIF: Dynamic Decay
+    let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
+    let final_decay = (decay - liquid_mod).max(1);
+
+    ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32
+}
+
 pub struct BackendRegistry {
-    pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Box<dyn ComputeBackend + Send + Sync>>>,
+    pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Option<Box<dyn ComputeBackend + Send + Sync>>>>,
 }
 
 impl BackendRegistry {
     pub fn new() -> Self {
         let mut registry = Self { backends: std::collections::HashMap::new() };
-        registry.register("cpu", || Box::new(CpuBackend::default()));
+        registry.register("cpu", || Some(Box::new(CpuBackend::default())));
         #[cfg(feature = "wgpu")]
-        registry.register("wgpu", || Box::new(WgpuBackend::new()));
+        registry.register("wgpu", || WgpuBackend::new().ok().map(|b| Box::new(b) as Box<dyn ComputeBackend + Send + Sync>));
         registry
     }
 
     pub fn register<F>(&mut self, name: &str, factory: F)
     where
-        F: Fn() -> Box<dyn ComputeBackend + Send + Sync> + 'static,
+        F: Fn() -> Option<Box<dyn ComputeBackend + Send + Sync>> + 'static,
     {
         self.backends.insert(name.to_string(), Box::new(factory));
     }
 
     pub fn create(&self, name: &str) -> Option<Box<dyn ComputeBackend + Send + Sync>> {
-        self.backends.get(name).map(|f| f())
+        self.backends.get(name).and_then(|f| f())
     }
 }
 
@@ -1084,19 +978,15 @@ impl CpuBackend {
     }
 
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
-        use rand::Rng;
-
         let n_count = model.neurons.len();
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
         let noise_amp = model.config.noise_amplitude;
-        let target_activity = 100; // Aim for 10% activity
+        let target_activity = 100;
         let expert_masks = &self.expert_masks;
 
-        // Use Rayon to zip all SoA slices for parallel processing without unsafe raw pointers
         let neurons = &mut model.neurons;
 
-        // Split NeuronsSoA into component mutable and immutable slices
         let (pot, next_upd, refr, last_spk, bprop, thresh, activity, b_thresh) = (
             &mut neurons.potential, &mut neurons.next_update_tick, &mut neurons.refractory_timer,
             &mut neurons.last_spike_tick, &mut neurons.backprop_signal, &mut neurons.threshold,
@@ -1111,46 +1001,23 @@ impl CpuBackend {
             .zip(thresh.par_iter_mut())
             .zip(activity.par_iter_mut())
             .zip(b_thresh.par_iter_mut())
+            .zip(&neurons.proximal_potential)
+            .zip(&neurons.distal_potential)
+            .zip(&neurons.apical_potential)
+            .zip(&neurons.basal_potential)
+            .zip(&neurons.gate_threshold)
+            .zip(&neurons.liquid_current)
+            .zip(&neurons.decay)
+            .zip(&neurons.update_interval)
             .zip(0..n_count)
-            .map(|((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), i)| {
+            .map(|((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), prox), dist), apical), basal), g_thresh), liquid), decay), upd_int), i)| {
                 if current_tick < *next_upd { return false; }
                 if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
-                let mut rng = rand::thread_rng();
-                let mut fired = false;
+                let current_pot = calculate_membrane_potential(*pot, *prox, *dist, *apical, *basal, *g_thresh, *liquid, *decay, noise_amp);
 
-                let refr_multiplier = if *refr > 0 { 4 } else { 1 };
-                let proximal = neurons.proximal_potential[i];
-                let distal = neurons.distal_potential[i];
-                let apical = neurons.apical_potential[i];
-                let basal = neurons.basal_potential[i];
-                let gate_threshold = neurons.gate_threshold[i];
-
-                // Non-linear Dendritic Gating (Approximate NMDA spikes)
-                let dist_gain = if proximal >= gate_threshold { 1024 } else if proximal >= gate_threshold / 2 { 512 } else { 256 };
-                let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
-
-                let apical_gain = if dist_gated >= gate_threshold { 1024 } else if dist_gated >= gate_threshold / 2 { 768 } else { 512 };
-                let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
-
-                let mod_factor = if basal < 0 { 800 } else { 1024 };
-                let noise = if noise_amp > 0 { rng.gen_range(-(noise_amp as i32)..noise_amp as i32) } else { 0 };
-
-                let mut current_pot = pot.saturating_add(proximal)
-                    .saturating_add(dist_gated)
-                    .saturating_add(apical_gated)
-                    .saturating_add(neurons.liquid_current[i])
-                    .saturating_add(noise);
-
-                current_pot = ((current_pot as i64 * mod_factor as i64) >> 10) as i32;
-
-                // LLIF: Dynamic Decay
-                let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
-                let final_decay = (neurons.decay[i] - liquid_mod).max(1);
-                current_pot = ((current_pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32;
-
-                let effective_threshold = *thresh * refr_multiplier;
-                if current_pot >= effective_threshold { fired = true; }
+                let effective_threshold = *thresh * (if *refr > 0 { 4 } else { 1 });
+                let fired = current_pot >= effective_threshold;
 
                 if fired {
                     *pot = 0;
@@ -1173,7 +1040,7 @@ impl CpuBackend {
                 } else if *activity < target_activity && *b_thresh > 512 {
                     *b_thresh = b_thresh.saturating_sub(1);
                 }
-                *next_upd = current_tick + neurons.update_interval[i];
+                *next_upd = current_tick + *upd_int;
                 fired
             }).collect();
 
