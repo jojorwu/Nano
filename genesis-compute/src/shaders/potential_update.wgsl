@@ -8,6 +8,8 @@ struct Neuron {
 @group(0) @binding(0) var<storage, read_write> potentials: array<i32>;
 @group(0) @binding(9) var<storage, read> distal_potentials: array<i32>;
 @group(0) @binding(10) var<storage, read> proximal_potentials: array<i32>;
+@group(0) @binding(17) var<storage, read> apical_potentials: array<i32>;
+@group(0) @binding(18) var<storage, read> basal_potentials: array<i32>;
 @group(0) @binding(1) var<storage, read_write> thresholds: array<i32>;
 @group(0) @binding(11) var<storage, read> base_thresholds: array<i32>;
 @group(0) @binding(14) var<storage, read> layer_ids: array<u32>;
@@ -26,12 +28,24 @@ struct Config {
 @group(0) @binding(6) var<storage, read_write> next_update: array<u32>;
 @group(0) @binding(7) var<storage, read> intervals: array<u32>;
 @group(0) @binding(8) var<storage, read> dendritic_gate: array<i32>;
+@group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
+@group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
+@group(0) @binding(21) var<storage, read_write> last_spike_ticks: array<u32>;
+struct Modulation {
+    dopamine: i32,
+    noradrenaline: i32,
+    serotonin: i32,
+}
+@group(0) @binding(23) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&potentials)) { return; }
+
+    // Mixture-of-Experts: Skip updates if neuron is masked out
+    if (expert_mask[i] == 0u) { return; }
 
     if (current_tick < next_update[i]) { return; }
 
@@ -45,24 +59,40 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let proximal = proximal_potentials[i];
     let distal = distal_potentials[i];
+    let apical = apical_potentials[i];
+    let basal = basal_potentials[i];
 
-    var dend_factor = distal / 4;
-    if (proximal > 500) { dend_factor = distal; }
+    // Hierarchical Gating (Per-neuron gate threshold)
+    let gate_threshold = gate_thresholds[i];
+    var dist_gated = distal >> 2;
+    if (proximal >= gate_threshold) { dist_gated = distal; }
 
-    let gated_input = (inputs[i] * dendritic_gate[i]) / 1024;
-    var pot = potentials[i] + gated_input + proximal + dend_factor;
+    var apical_gated = apical >> 1;
+    if (dist_gated >= gate_threshold) { apical_gated = apical; }
 
-    // LLIF: Liquid Decay
-    let base_decay = decays[i];
-    let liquid_mod = (abs(inputs[i]) * 10) / 1024;
-    let final_decay = max(1, base_decay - liquid_mod);
+    // Basal Modulation (Lateral inhibition/excitation)
+    var mod_factor = 1024;
+    if (basal < 0) { mod_factor = 800; }
+    else if (basal > 512) { mod_factor = 1200; }
 
-    pot = (pot * (1024 - final_decay)) / 1024;
+    // Neuromodulation: Noradrenaline increases gain/arousal
+    mod_factor = (mod_factor * (1024 + modulation.noradrenaline)) >> 10;
+
+    let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
+    var pot = potentials[i] + gated_input + proximal + dist_gated + apical_gated;
+    pot = (pot * mod_factor) >> 10;
+
+    // LLIF: Dynamic Decay
+    let liquid_mod = ((abs(proximal) + abs(distal)) * 10) >> 10;
+    let final_decay = max(1, decays[i] - liquid_mod);
+
+    pot = (pot * (1024 - final_decay)) >> 10;
 
     if (pot >= thresholds[i]) {
         potentials[i] = 0;
-        refractory[i] = 2;
+        refractory[i] = 4;
         spikes[i] = 1;
+        last_spike_ticks[i] = current_tick;
 
         // SMBP: Active backpropagation signal
         backprop_signals[i] = 1024;
@@ -83,7 +113,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             thresholds[i] = thresholds[i] - config.ip_decay;
         }
         // Decaying backprop signal
-        backprop_signals[i] = (backprop_signals[i] * 800) / 1024;
+        backprop_signals[i] = (backprop_signals[i] * 800) >> 10;
     }
 
     next_update[i] = current_tick + intervals[i];

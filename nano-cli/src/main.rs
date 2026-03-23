@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use serde::{Serialize, Deserialize};
 use std::fs;
 use genesis_baker::ModelBlueprint;
-use genesis_node::Runtime;
+use genesis_node::{Runtime, SimulationSettings};
 
 #[derive(Parser)]
 struct Cli {
@@ -12,7 +12,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Init,
-    Bake { #[arg(short, long)] blueprint: String, #[arg(short, long, default_value = "model.state")] output: String },
+    Bake {
+        #[arg(short, long)] blueprint: String,
+        #[arg(short, long, default_value = "model.state")] output: String,
+        #[arg(long)] backend: Option<String>,
+    },
     Run {
         #[arg(short, long)] model: String,
         #[arg(short, long)] input: Option<String>,
@@ -21,14 +25,19 @@ enum Commands {
         #[arg(short, long, default_value_t = false)] byte_level: bool,
         #[arg(short, long, default_value_t = 0)] reasoning: usize,
         #[arg(short, long)] learning_rate: Option<i32>,
+        #[arg(long)] backend: Option<String>,
     },
     Gym {
         #[arg(short, long)] model: String,
         #[arg(short, long, default_value = "cartpole")] env: String,
         #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
+        #[arg(long)] backend: Option<String>,
     },
     Export { #[arg(short, long)] model: String, #[arg(short, long)] name: String },
-    Shell { #[arg(short, long)] model: String },
+    Shell {
+        #[arg(short, long)] model: String,
+        #[arg(long)] backend: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,13 +51,17 @@ struct SimulationSession {
 }
 
 impl SimulationSession {
-    fn new(model_path: &str, lr_override: Option<i32>) -> Self {
-        let settings = if let Ok(content) = fs::read_to_string("nano.toml") {
+    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Self {
+        let mut settings = if let Ok(content) = fs::read_to_string("nano.toml") {
             let global: GlobalConfig = toml::from_str(&content).unwrap_or_else(|_| GlobalConfig { simulation: None, network: None });
             global.simulation.unwrap_or_default()
         } else {
             genesis_node::SimulationSettings::default()
         };
+
+        if backend_override.is_some() {
+            settings.preferred_backend = backend_override;
+        }
 
         let mut runtime = Runtime::load_with_settings(model_path, settings).expect("Failed to load model");
 
@@ -66,63 +79,36 @@ impl SimulationSession {
         Self { runtime }
     }
 
-    fn run_text(&mut self, text: &str, byte_level: bool, _reasoning: usize) {
-        println!("📝 Text Input: '{}' (Mode: {})", text, if byte_level { "Byte-Level" } else { "Modular" });
-
-        let mut found = false;
-        for m in &mut self.runtime.modules.modules {
-            if m.name() == "text_processor" {
-                let mut state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.tokenize_and_queue(text);
-                m.set_state(&bincode::serialize(&state).unwrap());
-                found = true;
-            }
+    fn run_multimodal(&mut self, text: Option<&str>, img_path: Option<&str>, byte_level: bool) {
+        if let Some(t) = text {
+            println!("📝 Injecting Text: '{}' (Mode: {})", t, if byte_level { "Byte-Level" } else { "Modular" });
+            self.runtime.inject_text(t);
         }
 
-        if found {
-            // Run ticks until queue is empty
-            loop {
-                let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-                let count = spikes.iter().filter(|&&s| s).count();
-
-                // Check if module still has tokens
-                let mut has_more = false;
-                for m in &self.runtime.modules.modules {
-                    if m.name() == "text_processor" {
-                        let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
-                        has_more = !state.last_tokens.is_empty();
-                    }
-                }
-
-                println!("   Tick: Generated {} spikes", count);
-                if !has_more { break; }
-            }
-        } else {
-             println!("⚠️ Text Processor module not found in model state.");
-        }
-    }
-
-    #[cfg(feature = "vision")]
-    fn run_image(&mut self, img_path: &str) {
-        println!("🖼️ Image Input: '{}'", img_path);
-        let img = image::open(img_path).expect("Failed to open image");
-        let gray = img.to_luma8();
-
-        let mut found = false;
-        for m in &mut self.runtime.modules.modules {
-            if m.name() == "vision" {
-                let mut state: genesis_core::vision::VisionModule = bincode::deserialize(&m.get_state()).unwrap();
-                state.set_input(gray.as_raw());
-                m.set_state(&bincode::serialize(&state).unwrap());
-                found = true;
-            }
+        #[cfg(feature = "vision")]
+        if let Some(path) = img_path {
+            println!("🖼️ Injecting Image: '{}'", path);
+            let img = image::open(path).expect("Failed to open image");
+            let gray = img.to_luma8();
+            self.runtime.inject_image(gray.as_raw());
         }
 
-        if found {
+        // Execution loop: run until all transient inputs are processed
+        loop {
             let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
-            println!("   Generated {} spikes from image", spikes.iter().filter(|&&s| s).count());
-        } else {
-            println!("⚠️ Vision module not found in model state.");
+            let count = spikes.iter().filter(|&&s| s).count();
+
+            let mut transient_active = false;
+            for m in &self.runtime.modules.modules {
+                if m.name() == "text_processor" {
+                    let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                    if !state.last_tokens.is_empty() { transient_active = true; }
+                }
+                // Vision is currently one-shot injection
+            }
+
+            println!("   Tick: {} spikes", count);
+            if !transient_active { break; }
         }
     }
 
@@ -163,29 +149,28 @@ vocab_size = 1000
             fs::write("blueprint.toml", blueprint).expect("Failed to write blueprint.toml");
             println!("✨ Nano environment initialized. Edit nano.toml and blueprint.toml, then run 'bake'.");
         }
-        Commands::Bake { blueprint, output } => {
+        Commands::Bake { blueprint, output, backend } => {
             let content = fs::read_to_string(blueprint).expect("Failed to read");
-            let bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            let mut bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            if let Some(b) = backend {
+                if bp.config.is_none() { bp.config = Some(Default::default()); }
+                if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
+            }
             let baked = bp.bake();
             baked.save(output).expect("Failed to save");
-            println!("✅ Model '{}' baked to {}.", bp.name, output);
+            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
         }
-        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning, learning_rate } => {
-            let mut session = SimulationSession::new(model, *learning_rate);
-
-            if let Some(text) = input {
-                session.run_text(text, *byte_level, *reasoning);
-            }
-
-            #[cfg(feature = "vision")]
-            if let Some(img_path) = image {
-                session.run_image(img_path);
-            }
-
+        Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
+            let mut session = SimulationSession::new(model, *learning_rate, backend.clone());
+            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level);
             session.finish(model);
         }
-        Commands::Gym { model, env: env_name, episodes } => {
-            let mut runtime = Runtime::load(model).expect("Failed to load");
+        Commands::Gym { model, env: env_name, episodes, backend } => {
+            let settings = SimulationSettings {
+                preferred_backend: backend.clone(),
+                ..Default::default()
+            };
+            let mut runtime = Runtime::load_with_settings(model, settings).expect("Failed to load");
             #[cfg(feature = "rl")]
             {
                 run_gym_commands(&mut runtime, env_name, *episodes);
@@ -214,9 +199,9 @@ vocab_size = 1000
 
             println!("🚀 Model '{}' exported to {}. Use ./run.sh to start the interactive console.", name, dir);
         }
-        Commands::Shell { model } => {
-            let mut session = SimulationSession::new(model, None);
-            println!("🐚 Nano Interactive Shell");
+        Commands::Shell { model, backend } => {
+            let mut session = SimulationSession::new(model, None, backend.clone());
+            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.backend.name());
             println!("Type 'help' for a list of commands.");
 
             use std::io::{Write, BufRead};
@@ -232,7 +217,7 @@ vocab_size = 1000
                 if cmd == "save" { session.finish(model); }
                 else if cmd.starts_with("run ") {
                     let input = &cmd[4..];
-                    session.run_text(input, false, 0);
+                    session.run_multimodal(Some(input), None, false);
                 }
                 else {
                     let resp = session.runtime.handle_command(cmd);

@@ -39,6 +39,12 @@ pub enum ModuleConfig {
 impl ModelBlueprint {
     pub fn bake(&self) -> BakedModel {
         let mut neurons = NeuronsSoA::new(self.architecture.neuron_count);
+
+        // Balanced E-I: 80% Excitatory, 20% Inhibitory by default
+        for i in 0..neurons.len() {
+            neurons.is_excitatory[i] = (i % 5) != 0;
+        }
+
         if let Some(ref layers) = self.architecture.layers {
             for layer in layers {
                 for i in layer.range.0..layer.range.1 {
@@ -48,12 +54,23 @@ impl ModelBlueprint {
         }
         let mut synapses = SynapsesSoA::with_capacity(self.architecture.synapse_count);
 
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         for i in 0..self.architecture.synapse_count {
-            synapses.push(
-                (i % self.architecture.neuron_count) as u32,
-                ((i + 1) % self.architecture.neuron_count) as u32,
-                500,
-            );
+            let src = rng.gen_range(0..self.architecture.neuron_count) as u32;
+            let tgt = rng.gen_range(0..self.architecture.neuron_count) as u32;
+            if src == tgt { continue; }
+
+            let delay = rng.gen_range(1..9);
+
+            // Inhibitory neurons target Basal (lateral inhibition) or Proximal
+            let comp = if !neurons.is_excitatory[src as usize] {
+                if rng.gen_bool(0.7) { genesis_core::Compartment::Basal } else { genesis_core::Compartment::Proximal }
+            } else {
+                if rng.gen_bool(0.8) { genesis_core::Compartment::Proximal } else { genesis_core::Compartment::Distal }
+            };
+
+            synapses.push_polarized(src, tgt, 500, delay, comp, &neurons);
         }
 
         #[cfg(feature = "titan")]
@@ -88,7 +105,13 @@ impl ModelBlueprint {
                     module_states.insert("vision".to_string(), bincode::serialize(&m).unwrap());
                 },
                 ModuleConfig::AudioProcessor { .. } => has_audio = true,
-                ModuleConfig::RobotControl { .. } => has_robotics = true,
+                ModuleConfig::RobotControl { num_motors } => {
+                    has_robotics = true;
+                    // Map motor neurons to the end of the population
+                    let start = self.architecture.neuron_count.saturating_sub(*num_motors);
+                    let m = genesis_core::robotics::RobotControlModule::new((start..self.architecture.neuron_count).collect());
+                    module_states.insert("robot_control".to_string(), bincode::serialize(&m).unwrap());
+                }
             }
         }
 

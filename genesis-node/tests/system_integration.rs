@@ -37,11 +37,18 @@ fn test_module_persistence_and_restoration() {
         },
         backend: Box::new(CpuBackend::default()),
         previous_spikes: vec![false; 10],
+        current_spikes_buffer: vec![false; 10],
+        merged_inputs_buffer: vec![0; 10],
         tick_counter: 0,
-        spikes_history: Vec::new(),
+        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 10],
+        history_ptr: 0,
+        episode_reward_history: Vec::new(),
+        global_modulators: genesis_core::NeuromodulationState::default(),
+        rolling_spike_count: 0.0,
         network_manager: None,
         observer: Observer::new(10),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(10),
         telemetry: Telemetry::default(),
     };
 
@@ -73,11 +80,18 @@ fn test_module_persistence_and_restoration() {
         settings: SimulationSettings::default(),
         backend: Box::new(CpuBackend::default()),
         previous_spikes: vec![false; 10],
+        current_spikes_buffer: vec![false; 10],
+        merged_inputs_buffer: vec![0; 10],
         tick_counter: 0,
-        spikes_history: Vec::new(),
+        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
+        history_ptr: 0,
+        episode_reward_history: Vec::new(),
+        global_modulators: genesis_core::NeuromodulationState::default(),
+        rolling_spike_count: 0.0,
         network_manager: None,
         observer: Observer::new(10),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(10),
         telemetry: Telemetry::default(),
     };
 
@@ -105,8 +119,8 @@ fn test_multi_compartment_gating_physics() {
         neurons: NeuronsSoA::new(3),
         synapses: {
             let mut s = SynapsesSoA::with_capacity(2);
-            s.push_to_compartment(0, 2, 2000, Compartment::Proximal);
-            s.push_to_compartment(1, 2, 2000, Compartment::Distal);
+            s.push_to_compartment(0, 2, 2000, 1, Compartment::Proximal);
+            s.push_to_compartment(1, 2, 2000, 1, Compartment::Distal);
             s
         },
         module_states: HashMap::new(),
@@ -127,7 +141,7 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.proximal_potential[2] = 0;
     model.neurons.distal_potential[2] = 0;
     let mut prev_spikes = vec![false, true, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, 1);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
     // Should NOT spike because distal is attenuated (2000 / 4 = 500 < 1024 threshold)
     assert!(!spikes[2], "Neuron 2 should not spike with only distal input");
 
@@ -138,7 +152,7 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.distal_potential[2] = 0;
     model.neurons.refractory_timer[2] = 0;
     prev_spikes = vec![true, false, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, 2);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
     // Should spike because proximal is direct (2000 > 1024 threshold)
     assert!(spikes[2], "Neuron 2 should spike with strong proximal input");
 
@@ -150,7 +164,7 @@ fn test_multi_compartment_gating_physics() {
     // We need some proximal potential to reach threshold 512.
     // Let's inject external input to proximal.
     prev_spikes = vec![false, true, false]; // Distal only via synapse
-    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, 3);
+    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
     // Proximal 600 > 512 threshold -> Distal 2000 fully integrated.
     // 600 + 2000 = 2600 > 1024 threshold.
     assert!(spikes[2], "Neuron 2 should spike with coincident proximal and distal input");
@@ -185,11 +199,18 @@ fn test_evolutionary_structural_growth() {
         },
         backend: Box::new(CpuBackend::default()),
         previous_spikes: vec![false; 100],
+        current_spikes_buffer: vec![false; 100],
+        merged_inputs_buffer: vec![0; 100],
         tick_counter: 0,
-        spikes_history: Vec::new(),
+        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
+        history_ptr: 0,
+        episode_reward_history: Vec::new(),
+        global_modulators: genesis_core::NeuromodulationState::default(),
+        rolling_spike_count: 0.0,
         network_manager: None,
         observer: Observer::new(100),
         remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        input_bus: genesis_core::InputBus::new(100),
         telemetry: Telemetry::default(),
     };
 
@@ -198,7 +219,8 @@ fn test_evolutionary_structural_growth() {
         let mut inputs = vec![0; 100];
         inputs[0] = 5000;
         inputs[1] = 5000;
-        runtime.tick_with_reward(&inputs, Some(500));
+        // Targeted reward to ensure growth logic triggers correctly
+        runtime.tick_with_reward_targeted(&inputs, Some(500), None);
     }
 
     // After 10 ticks (interval=10), structural plasticity should have run

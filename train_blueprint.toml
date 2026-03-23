@@ -1,0 +1,13 @@
+name = "TextLearningNano"
+[architecture]
+neuron_count = 2000
+synapse_count = 20000
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 1000
+
+[[modules]]
+type = "TitanMemory"
+learning_rate = 500
+size = 128

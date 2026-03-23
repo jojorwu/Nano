@@ -1,10 +1,12 @@
 use crate::{IValue, SCALE, NanoModule, NeuronsSoA, SynapsesSoA};
 use serde::{Serialize, Deserialize};
+use rand::Rng;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VisionModule {
     pub resolution: (u32, u32),
     pub input_buffer: Vec<u8>,
+    pub poisson_mode: bool,
 }
 
 impl VisionModule {
@@ -12,6 +14,7 @@ impl VisionModule {
         Self {
             resolution: (width, height),
             input_buffer: Vec::new(),
+            poisson_mode: true,
         }
     }
 
@@ -23,22 +26,49 @@ impl VisionModule {
 impl NanoModule for VisionModule {
     fn name(&self) -> &str { "vision" }
 
-    fn on_tick(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _tick: u32) {
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) {
+        if self.resolution.0 > 0 {
+            for y in 0..self.resolution.1 {
+                for x in 0..self.resolution.0 {
+                    let i = (y * self.resolution.0 + x) as usize;
+                    if i < neurons.len() {
+                        neurons.x[i] = x as i16;
+                        neurons.y[i] = y as i16;
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         if !self.input_buffer.is_empty() {
-            // Convert pixel values (0-255) to spike potentials.
+            let mut rng = rand::thread_rng();
             for (i, &p) in self.input_buffer.iter().enumerate() {
-                if i < neurons.len() {
-                    let val = (p as IValue * SCALE) / 255;
-                    neurons.proximal_potential[i] = neurons.proximal_potential[i].saturating_add(val);
+                if i < bus.proximal.len() {
+                    let rate = (p as f32) / 255.0;
+
+                    let spiked = if self.poisson_mode {
+                        rng.gen::<f32>() < rate
+                    } else {
+                        true
+                    };
+
+                    if spiked {
+                        let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
+                        bus.proximal[i] = bus.proximal[i].saturating_add(val);
+                    }
                 }
             }
             // Image input is usually transient or managed by higher level loop
-            self.input_buffer.clear();
+            // In poisson mode, we might want to keep the buffer for multiple ticks
+            if !self.poisson_mode {
+                self.input_buffer.clear();
+            }
         }
     }
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
-    fn on_night_phase(&mut self, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
 
     fn box_clone(&self) -> Box<dyn NanoModule> {
         Box::new(self.clone())
@@ -66,20 +96,34 @@ impl SpikingVisionModule {
         }
     }
 
-    /// Convert pixel values (0-255) to spike potentials.
-    /// Higher intensity results in higher initial potential.
     pub fn rate_encode(&self, pixels: &[u8]) -> Vec<IValue> {
         let mut potentials = Vec::with_capacity(pixels.len());
         for &p in pixels {
-            // Map 0..255 to 0..SCALE (1.0)
             let val = (p as IValue * SCALE) / 255;
             potentials.push(val);
         }
         potentials
     }
 
-    /// Map 2D pixel index (x, y) to a 1D neuron index.
     pub fn get_neuron_index(&self, x: u32, y: u32, offset: usize) -> usize {
         offset + (y * self.resolution.0 + x) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vision_poisson() {
+        let mut vision = VisionModule::new(10, 10);
+        vision.set_input(&[255; 100]); // Max intensity
+        let mut bus = crate::InputBus::new(100);
+
+        vision.on_tick(&mut bus, &[], 1);
+
+        // With intensity 255, Poisson should almost always spike (rate=1.0)
+        let total_potential: i32 = bus.proximal.iter().sum();
+        assert!(total_potential > 0);
     }
 }
