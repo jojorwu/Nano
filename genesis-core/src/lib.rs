@@ -15,6 +15,20 @@ pub mod robotics;
 
 pub mod plasticity;
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ModuleError {
+    #[error("Initialization failed: {0}")]
+    InitFailed(String),
+    #[error("Validation failed: {0}")]
+    ValidationFailed(String),
+    #[error("State serialization error: {0}")]
+    SerializationError(#[from] bincode::Error),
+    #[error("Input handling error: {0}")]
+    InputError(String),
+}
+
 /// Thinking Mode Module: Enables "Chain of Thought" reasoning by performing
 /// extra simulation sub-ticks for each external input tick.
 /// This allows the network to iterate internally without new modality data.
@@ -60,7 +74,7 @@ impl NanoModule for ThinkModule {
     fn set_state(&mut self, state: &[u8]) {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
-    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), String> { Ok(()) }
+    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
 }
 
 /// Represents a modular functional unit within the Spiking Neural Network.
@@ -72,25 +86,29 @@ pub struct InputBus {
     pub basal: Vec<AtomicI32>,
 
     // Modality-specific buffers for high-order fusion
-    pub modalities: HashMap<String, Vec<AtomicI32>>,
+    pub modalities: [Vec<AtomicI32>; 4],
 }
 
 impl InputBus {
+    /// Creates a new InputBus with the specified number of neurons.
+    /// All buffers (somatic, dendritic, and modality-specific) are initialized to zero.
     pub fn new(size: usize) -> Self {
-        let mut modalities = HashMap::new();
-        modalities.insert("vision".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
-        modalities.insert("text".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
-        modalities.insert("audio".to_string(), (0..size).map(|_| AtomicI32::new(0)).collect());
-
+        let make_vec = || (0..size).map(|_| AtomicI32::new(0)).collect::<Vec<_>>();
         Self {
-            proximal: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            distal: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            apical: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            basal: (0..size).map(|_| AtomicI32::new(0)).collect(),
-            modalities,
+            proximal: make_vec(),
+            distal: make_vec(),
+            apical: make_vec(),
+            basal: make_vec(),
+            modalities: [
+                make_vec(), // Vision
+                make_vec(), // Text
+                make_vec(), // Audio
+                make_vec(), // Other
+            ],
         }
     }
 
+    /// Thread-safe parallel clear of all InputBus buffers.
     pub fn clear(&self) {
         use rayon::prelude::*;
 
@@ -99,9 +117,9 @@ impl InputBus {
         self.apical.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
         self.basal.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
 
-        self.modalities.par_iter().for_each(|(_, vec)| {
+        for vec in &self.modalities {
             vec.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
-        });
+        }
     }
 
     /// Faster clear when unique access is available, using raw memory fill.
@@ -118,24 +136,22 @@ impl InputBus {
         clear_vec(&mut self.apical);
         clear_vec(&mut self.basal);
 
-        for vec in self.modalities.values_mut() {
+        for vec in &mut self.modalities {
             clear_vec(vec);
         }
     }
 
-    pub fn set_modality(&self, name: &str, index: usize, val: i32) {
-        if let Some(vec) = self.modalities.get(name) {
-            if index < vec.len() {
-                Self::atomic_saturating_add(&vec[index], val);
-            }
+    pub fn set_modality(&self, modality: Modality, index: usize, val: i32) {
+        let vec = &self.modalities[modality as usize];
+        if index < vec.len() {
+            Self::atomic_saturating_add(&vec[index], val);
         }
     }
 
-    pub fn get_modality(&self, name: &str, index: usize) -> i32 {
-        if let Some(vec) = self.modalities.get(name) {
-            if index < vec.len() {
-                return vec[index].load(Ordering::Relaxed);
-            }
+    pub fn get_modality(&self, modality: Modality, index: usize) -> i32 {
+        let vec = &self.modalities[modality as usize];
+        if index < vec.len() {
+            return vec[index].load(Ordering::Relaxed);
         }
         0
     }
@@ -150,6 +166,15 @@ impl InputBus {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Modality {
+    Vision = 0,
+    Text = 1,
+    Audio = 2,
+    Other = 3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +199,7 @@ pub trait NanoModule: Send + Sync {
     fn handle_input(&mut self, _input: &ModuleInput) {}
 
     /// Called once when the module is added to the network or during model bootstrap.
-    fn on_init(&mut self, _neurons: &mut NeuronsSoA) {}
+    fn on_init(&mut self, _neurons: &mut NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
 
     /// Called every simulation tick. Use this to inject external signals into the InputBus.
     /// The InputBus uses atomic integers to allow thread-safe signal injection from multiple modules.
@@ -191,7 +216,8 @@ pub trait NanoModule: Send + Sync {
     fn set_state(&mut self, _state: &[u8]) {}
 
     /// Validates the module's internal state against the current network topology.
-    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), String> { Ok(()) }
+    /// This is called during initialization to ensure all neuron indices and configurations are valid.
+    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
 
     // Factory registration
     fn box_clone(&self) -> Box<dyn NanoModule>;
@@ -278,9 +304,9 @@ impl ModuleManager {
         }
     }
 
-    pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), String> {
+    pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), ModuleError> {
         for module in &mut self.modules {
-            module.on_init(neurons);
+            module.on_init(neurons)?;
             module.validate_state(neurons)?;
         }
         Ok(())

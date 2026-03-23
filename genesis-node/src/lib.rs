@@ -1,4 +1,4 @@
-use genesis_core::{ModuleManager, SpikeData};
+use genesis_core::{ModuleManager, SpikeData, ModuleError};
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
@@ -18,6 +18,8 @@ pub enum RuntimeError {
     NetworkError(String),
     #[error("Internal state error: {0}")]
     StateError(String),
+    #[error("Module error: {0}")]
+    Module(#[from] ModuleError),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -184,18 +186,42 @@ impl NetworkManager {
     }
 }
 
-impl Runtime {
-    /// Bootstraps a simulation session from a model file on disk.
-    pub fn load(path: &str) -> Result<Self, RuntimeError> {
-        Self::load_with_settings(path, SimulationSettings::default())
+pub struct RuntimeBuilder {
+    model_path: Option<String>,
+    settings: SimulationSettings,
+    observers: Vec<Box<dyn SimulationObserver>>,
+}
+
+impl RuntimeBuilder {
+    pub fn new() -> Self {
+        Self {
+            model_path: None,
+            settings: SimulationSettings::default(),
+            observers: Vec::new(),
+        }
     }
 
-    /// Loads a model and configures the simulation with specific hardware and timing parameters.
-    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
-        let model = persistence::PersistenceManager::load(path)?;
+    pub fn from_model(mut self, path: &str) -> Self {
+        self.model_path = Some(path.to_string());
+        self
+    }
+
+    pub fn with_settings(mut self, settings: SimulationSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    pub fn add_observer(mut self, observer: Box<dyn SimulationObserver>) -> Self {
+        self.observers.push(observer);
+        self
+    }
+
+    pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let path = self.model_path.ok_or_else(|| RuntimeError::ModelLoad("Model path not provided".into()))?;
+        let model = persistence::PersistenceManager::load(&path)?;
         let n_count = model.neurons.len();
 
-        let backend_name = settings.preferred_backend.as_deref()
+        let backend_name = self.settings.preferred_backend.as_deref()
             .unwrap_or(&model.config.preferred_backend);
 
         let registry = genesis_compute::BackendRegistry::new();
@@ -231,19 +257,36 @@ impl Runtime {
             modules.instantiate("titan");
         }
 
-        let mut rt = Self {
-            engine: SimulationEngine::new(model, modules, backend, &settings),
-            settings: settings.clone(),
+        let mut observers = self.observers;
+        if observers.is_empty() {
+            observers.push(Box::new(Observer::new(n_count)));
+        }
+
+        let mut rt = Runtime {
+            engine: SimulationEngine::new(model, modules, backend, &self.settings),
+            settings: self.settings,
             episode_reward_history: Vec::new(),
             network_manager: None,
-            observers: vec![Box::new(Observer::new(n_count))],
+            observers,
             telemetry: Telemetry::default(),
         };
-        rt.post_init().map_err(RuntimeError::StateError)?;
+        rt.post_init()?;
         Ok(rt)
     }
+}
 
-    pub fn post_init(&mut self) -> Result<(), String> {
+impl Runtime {
+    /// Bootstraps a simulation session from a model file on disk.
+    pub fn load(path: &str) -> Result<Self, RuntimeError> {
+        RuntimeBuilder::new().from_model(path).build()
+    }
+
+    /// Loads a model and configures the simulation with specific hardware and timing parameters.
+    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
+        RuntimeBuilder::new().from_model(path).with_settings(settings).build()
+    }
+
+    pub fn post_init(&mut self) -> Result<(), genesis_core::ModuleError> {
         self.engine.modules.on_init(&mut self.engine.model.neurons)
     }
 

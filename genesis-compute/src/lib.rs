@@ -995,12 +995,14 @@ pub fn calculate_membrane_potential(
         .saturating_add(noise)
         .saturating_sub(adaptation);
 
+    // Apply neuromodulatory/basal scaling
     pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
 
-    // LLIF: Dynamic Decay
+    // LLIF: Leaky Integrate-and-Fire Dynamics
     let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
     let final_decay = (decay - liquid_mod).max(1);
 
+    // Pot = Pot * (1 - decay/SCALE)
     ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32
 }
 

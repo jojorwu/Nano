@@ -33,7 +33,7 @@ impl NanoModule for VisionModule {
         }
     }
 
-    fn on_init(&mut self, neurons: &mut NeuronsSoA) {
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::ModuleError> {
         if self.resolution.0 > 0 {
             for y in 0..self.resolution.1 {
                 for x in 0..self.resolution.0 {
@@ -45,6 +45,7 @@ impl NanoModule for VisionModule {
                 }
             }
         }
+        Ok(())
     }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
@@ -62,7 +63,7 @@ impl NanoModule for VisionModule {
 
                     if spiked {
                         let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
-                        bus.set_modality("vision", i, val);
+                        bus.set_modality(crate::Modality::Vision, i, val);
                         crate::InputBus::atomic_saturating_add(&bus.proximal[i], val);
                     }
                 }

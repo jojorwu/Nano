@@ -62,8 +62,6 @@ impl NanoModule for SpikingFusionModule {
     fn tier(&self) -> u32 { 1 }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
-        use std::sync::atomic::Ordering;
-
         let range = if self.fusion_neuron_indices.is_empty() {
              0..bus.proximal.len()
         } else {
@@ -72,9 +70,9 @@ impl NanoModule for SpikingFusionModule {
 
         if range.end > 0 {
             for i in range {
-                let v = bus.get_modality("vision", i);
-                let t = bus.get_modality("text", i);
-                let a = bus.get_modality("audio", i);
+                let v = bus.get_modality(crate::Modality::Vision, i);
+                let t = bus.get_modality(crate::Modality::Text, i);
+                let a = bus.get_modality(crate::Modality::Audio, i);
 
                 let fused_val = self.fuse_scalar(v, t, a);
                 if fused_val > 0 {
@@ -85,9 +83,9 @@ impl NanoModule for SpikingFusionModule {
         } else {
             for &i in &self.fusion_neuron_indices {
                 if i < bus.proximal.len() {
-                    let v = bus.get_modality("vision", i);
-                    let t = bus.get_modality("text", i);
-                    let a = bus.get_modality("audio", i);
+                    let v = bus.get_modality(crate::Modality::Vision, i);
+                    let t = bus.get_modality(crate::Modality::Text, i);
+                    let a = bus.get_modality(crate::Modality::Audio, i);
                     let fused_val = self.fuse_scalar(v, t, a);
                     crate::InputBus::atomic_saturating_add(&bus.proximal[i], fused_val);
                     crate::InputBus::atomic_saturating_add(&bus.distal[i], fused_val / 2);
@@ -102,11 +100,11 @@ impl NanoModule for SpikingFusionModule {
     fn set_state(&mut self, state: &[u8]) {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
-    fn validate_state(&self, neurons: &NeuronsSoA) -> Result<(), String> {
+    fn validate_state(&self, neurons: &NeuronsSoA) -> Result<(), crate::ModuleError> {
         let n_count = neurons.len();
         for &idx in &self.fusion_neuron_indices {
             if idx >= n_count {
-                return Err(format!("Fusion neuron index {} out of bounds (n_count: {})", idx, n_count));
+                return Err(crate::ModuleError::ValidationFailed(format!("Fusion neuron index {} out of bounds (n_count: {})", idx, n_count)));
             }
         }
         Ok(())
@@ -144,8 +142,8 @@ mod tests {
         let mut module = SpikingFusionModule::new(vec![0]);
         let bus = InputBus::new(1);
 
-        bus.set_modality("vision", 0, 1000);
-        bus.set_modality("text", 0, 1000);
+        bus.set_modality(crate::Modality::Vision, 0, 1000);
+        bus.set_modality(crate::Modality::Text, 0, 1000);
 
         module.on_tick(&bus, &[false], 1);
 
