@@ -1,0 +1,317 @@
+use crate::{IValue, SCALE};
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SpikeData {
+    Sparse(Vec<usize>),
+    Dense(Vec<u8>), // Bitmask
+    Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
+}
+
+impl Default for SpikeData {
+    fn default() -> Self {
+        Self::Sparse(Vec::new())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+pub enum Compartment {
+    Proximal = 0,
+    Distal = 1,
+    Apical = 2,
+    Basal = 3,
+}
+
+impl Default for Compartment {
+    fn default() -> Self {
+        Compartment::Proximal
+    }
+}
+
+/// Structure of Arrays (SoA) layout for neural state data.
+/// Optimized for SIMD access and GPU memory alignment.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct NeuronsSoA {
+    /// Optional identifier for neural functional columns/layers.
+    pub layer_id: Vec<u16>,
+    pub potential: Vec<IValue>,
+    pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
+    pub proximal_potential: Vec<IValue>, // For somatic inputs
+    pub apical_potential: Vec<IValue>,  // For hierarchical feedback
+    pub basal_potential: Vec<IValue>,   // For lateral signals
+    pub backprop_signal: Vec<IValue>, // Signal from soma to dendrites (SMBP)
+    pub threshold: Vec<IValue>,
+    pub base_threshold: Vec<IValue>, // Intrinsic Plasticity
+    pub decay: Vec<IValue>,
+    pub liquid_current: Vec<IValue>, // For LLIF (Liquid Neurons)
+    pub dendritic_gate: Vec<IValue>, // SCALE = 1.0 (open), 0 = closed
+    pub refractory_timer: Vec<i32>,
+    pub last_spike_tick: Vec<u32>,
+    pub update_interval: Vec<u32>, // Sub-tick precision: 1 = every tick, 10 = every 10 ticks
+    pub next_update_tick: Vec<u32>,
+    pub x: Vec<i16>,
+    pub y: Vec<i16>,
+    pub gate_threshold: Vec<IValue>,
+    pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
+    pub is_excitatory: Vec<bool>,
+    pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
+}
+
+impl NeuronsSoA {
+    pub fn new(size: usize) -> Self {
+        Self::with_capacity(size, size)
+    }
+
+    pub fn with_capacity(size: usize, capacity: usize) -> Self {
+        let mut neurons = Self {
+            layer_id: Vec::with_capacity(capacity),
+            potential: Vec::with_capacity(capacity),
+            distal_potential: Vec::with_capacity(capacity),
+            proximal_potential: Vec::with_capacity(capacity),
+            apical_potential: Vec::with_capacity(capacity),
+            basal_potential: Vec::with_capacity(capacity),
+            backprop_signal: Vec::with_capacity(capacity),
+            threshold: Vec::with_capacity(capacity),
+            base_threshold: Vec::with_capacity(capacity),
+            decay: Vec::with_capacity(capacity),
+            liquid_current: Vec::with_capacity(capacity),
+            dendritic_gate: Vec::with_capacity(capacity),
+            refractory_timer: Vec::with_capacity(capacity),
+            last_spike_tick: Vec::with_capacity(capacity),
+            update_interval: Vec::with_capacity(capacity),
+            next_update_tick: Vec::with_capacity(capacity),
+            x: Vec::with_capacity(capacity),
+            y: Vec::with_capacity(capacity),
+            gate_threshold: Vec::with_capacity(capacity),
+            activity_ema: Vec::with_capacity(capacity),
+            is_excitatory: Vec::with_capacity(capacity),
+            adaptation_current: Vec::with_capacity(capacity),
+        };
+        neurons.grow(size);
+        neurons
+    }
+    pub fn len(&self) -> usize {
+        self.potential.len()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let l = self.len();
+        if self.layer_id.len() != l { return Err("layer_id length mismatch".into()); }
+        if self.threshold.len() != l { return Err("threshold length mismatch".into()); }
+        if self.base_threshold.len() != l { return Err("base_threshold length mismatch".into()); }
+        if self.decay.len() != l { return Err("decay length mismatch".into()); }
+        if self.refractory_timer.len() != l { return Err("refractory_timer length mismatch".into()); }
+        if self.last_spike_tick.len() != l { return Err("last_spike_tick length mismatch".into()); }
+        if self.update_interval.len() != l { return Err("update_interval length mismatch".into()); }
+        if self.next_update_tick.len() != l { return Err("next_update_tick length mismatch".into()); }
+        if self.activity_ema.len() != l { return Err("activity_ema length mismatch".into()); }
+        if self.is_excitatory.len() != l { return Err("is_excitatory length mismatch".into()); }
+        if self.adaptation_current.len() != l { return Err("adaptation_current length mismatch".into()); }
+        Ok(())
+    }
+
+    pub fn grow(&mut self, additional: usize) {
+        let new_size = self.len() + additional;
+        self.layer_id.resize(new_size, 0);
+        self.potential.resize(new_size, 0);
+        self.distal_potential.resize(new_size, 0);
+        self.proximal_potential.resize(new_size, 0);
+        self.apical_potential.resize(new_size, 0);
+        self.basal_potential.resize(new_size, 0);
+        self.backprop_signal.resize(new_size, 0);
+        self.threshold.resize(new_size, SCALE);
+        self.base_threshold.resize(new_size, SCALE);
+        self.decay.resize(new_size, 50);
+        self.liquid_current.resize(new_size, 0);
+        self.dendritic_gate.resize(new_size, SCALE);
+        self.refractory_timer.resize(new_size, 0);
+        self.last_spike_tick.resize(new_size, 0);
+        self.update_interval.resize(new_size, 1);
+        self.next_update_tick.resize(new_size, 0);
+        self.x.resize(new_size, 0);
+        self.y.resize(new_size, 0);
+        self.gate_threshold.resize(new_size, 512);
+        self.activity_ema.resize(new_size, 0);
+        self.is_excitatory.resize(new_size, true);
+        self.adaptation_current.resize(new_size, 0);
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.layer_id.shrink_to_fit();
+        self.potential.shrink_to_fit();
+        self.distal_potential.shrink_to_fit();
+        self.proximal_potential.shrink_to_fit();
+        self.apical_potential.shrink_to_fit();
+        self.basal_potential.shrink_to_fit();
+        self.backprop_signal.shrink_to_fit();
+        self.threshold.shrink_to_fit();
+        self.base_threshold.shrink_to_fit();
+        self.decay.shrink_to_fit();
+        self.liquid_current.shrink_to_fit();
+        self.dendritic_gate.shrink_to_fit();
+        self.refractory_timer.shrink_to_fit();
+        self.last_spike_tick.shrink_to_fit();
+        self.update_interval.shrink_to_fit();
+        self.next_update_tick.shrink_to_fit();
+        self.x.shrink_to_fit();
+        self.y.shrink_to_fit();
+        self.gate_threshold.shrink_to_fit();
+        self.activity_ema.shrink_to_fit();
+        self.is_excitatory.shrink_to_fit();
+        self.adaptation_current.shrink_to_fit();
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct SynapsesSoA {
+    pub source_index: Vec<u32>,
+    pub target_index: Vec<u32>,
+    pub weight: Vec<IValue>,
+    pub delay: Vec<u8>, // Axonal delays (1-16 ticks)
+    pub stp_resources: Vec<IValue>, // Short-Term Depression (SCALE = 1.0)
+    pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
+    pub compartment: Vec<Compartment>,
+    pub latent_matrix: Option<LatentSynapseMatrix>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LatentSynapseMatrix {
+    pub u: Vec<IValue>, // Low-rank U matrix
+    pub v: Vec<IValue>, // Low-rank V matrix
+    pub rank: usize,
+}
+
+impl SynapsesSoA {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            source_index: Vec::with_capacity(capacity),
+            target_index: Vec::with_capacity(capacity),
+            weight: Vec::with_capacity(capacity),
+            delay: Vec::with_capacity(capacity),
+            stp_resources: Vec::with_capacity(capacity),
+            stp_calcium: Vec::with_capacity(capacity),
+            compartment: Vec::with_capacity(capacity),
+            latent_matrix: None,
+        }
+    }
+
+    pub fn push(&mut self, source: u32, target: u32, weight: IValue) {
+        self.push_to_compartment(source, target, weight, 1, Compartment::Proximal);
+    }
+
+    pub fn push_delayed(&mut self, source: u32, target: u32, weight: IValue, delay: u8) {
+        self.push_to_compartment(source, target, weight, delay, Compartment::Proximal);
+    }
+
+    pub fn push_to_compartment(&mut self, source: u32, target: u32, weight: IValue, delay: u8, compartment: Compartment) {
+        self.source_index.push(source);
+        self.target_index.push(target);
+        self.weight.push(weight);
+        self.delay.push(delay.max(1));
+        self.stp_resources.push(SCALE); // Start fully charged
+        self.stp_calcium.push(0);       // Start at baseline
+        self.compartment.push(compartment);
+    }
+
+    pub fn push_polarized(&mut self, source: u32, target: u32, weight: IValue, delay: u8, compartment: Compartment, neurons: &NeuronsSoA) {
+        let polarized_weight = if neurons.is_excitatory[source as usize] {
+            weight.abs()
+        } else {
+            -weight.abs()
+        };
+        self.push_to_compartment(source, target, polarized_weight, delay, compartment);
+    }
+
+    pub fn set_latent(&mut self, u: Vec<IValue>, v: Vec<IValue>, rank: usize) {
+        self.latent_matrix = Some(LatentSynapseMatrix { u, v, rank });
+    }
+
+    pub fn len(&self) -> usize {
+        self.source_index.len()
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.source_index.swap_remove(index);
+        self.target_index.swap_remove(index);
+        self.weight.swap_remove(index);
+        self.delay.swap_remove(index);
+        self.stp_resources.swap_remove(index);
+        self.stp_calcium.swap_remove(index);
+        self.compartment.swap_remove(index);
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.source_index.shrink_to_fit();
+        self.target_index.shrink_to_fit();
+        self.weight.shrink_to_fit();
+        self.delay.shrink_to_fit();
+        self.stp_resources.shrink_to_fit();
+        self.stp_calcium.shrink_to_fit();
+        self.compartment.shrink_to_fit();
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BakedModel {
+    pub version: String,
+    pub config: crate::config::NetworkConfig,
+    pub node_id: u32,
+    pub local_range: (usize, usize), // (start, end) indices of local neurons
+    pub neurons: NeuronsSoA,
+    pub synapses: SynapsesSoA,
+
+    // Dynamic Module State Storage
+    pub module_states: HashMap<String, Vec<u8>>,
+
+    #[cfg(feature = "titan")]
+    pub titan_memory: Option<crate::titan::TitanMemory>,
+    #[cfg(feature = "text")]
+    pub has_text: bool,
+    #[cfg(feature = "vision")]
+    pub has_vision: bool,
+    #[cfg(feature = "audio")]
+    pub has_audio: bool,
+    #[cfg(feature = "robotics")]
+    pub has_robotics: bool,
+    #[cfg(feature = "fusion")]
+    pub has_fusion: bool,
+    #[cfg(feature = "text")]
+    pub vocabulary: HashMap<String, usize>,
+}
+
+impl BakedModel {
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, self).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    pub fn load(path: &str) -> std::io::Result<Self> {
+        let file = File::open(path).map_err(|e| {
+            log::error!("Failed to open model file at '{}': {}", path, e);
+            e
+        })?;
+        let reader = BufReader::new(file);
+        let model: BakedModel = bincode::deserialize_from(reader).map_err(|e| {
+            log::error!("Error deserializing model from '{}': {:?}", path, e);
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
+
+        if model.version != "4.2" {
+             log::warn!("Loading model version {} into v4.2 engine. Physics scaling (1024) may differ from older versions.", model.version);
+        }
+
+        model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let n_count = model.neurons.len();
+        if model.local_range.1 > n_count {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Local range out of bounds"));
+        }
+
+        Ok(model)
+    }
+}

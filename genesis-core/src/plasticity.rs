@@ -1,4 +1,11 @@
-use crate::{SynapsesSoA, IValue};
+use crate::{SynapsesSoA, IValue, WEIGHT_CLAMP_LIMIT};
+
+pub fn clamp_and_preserve_sign(weight: &mut IValue, old_weight: IValue) {
+    if old_weight > 0 && *weight < 0 { *weight = 1; }
+    if old_weight < 0 && *weight > 0 { *weight = -1; }
+    if *weight > WEIGHT_CLAMP_LIMIT { *weight = WEIGHT_CLAMP_LIMIT; }
+    if *weight < -WEIGHT_CLAMP_LIMIT { *weight = -WEIGHT_CLAMP_LIMIT; }
+}
 
 pub struct StdpRule {
     pub tau: u64,
@@ -38,7 +45,10 @@ impl crate::PlasticityRule for StdpRule {
         }
 
         // 2. Temporal update (Metaplastic STDP / BCM-lite)
-        if ctx.pre_last_spike == 0 || ctx.post_last_spike == 0 { return; }
+        if ctx.pre_last_spike == 0 || ctx.post_last_spike == 0 {
+            clamp_and_preserve_sign(weight, weight_before);
+            return;
+        }
         let diff = (ctx.post_last_spike as i64) - (ctx.pre_last_spike as i64);
 
         // BCM Logic: Use activity_ema to shift the LTP/LTD threshold
@@ -63,13 +73,7 @@ impl crate::PlasticityRule for StdpRule {
             *weight = weight.saturating_sub(delta);
         }
 
-        // Sign Preservation (Dale's Law)
-        if weight_before > 0 && *weight < 0 { *weight = 1; }
-        if weight_before < 0 && *weight > 0 { *weight = -1; }
-
-        // Clamp weights
-        if *weight > crate::WEIGHT_CLAMP_LIMIT { *weight = crate::WEIGHT_CLAMP_LIMIT; }
-        if *weight < -crate::WEIGHT_CLAMP_LIMIT { *weight = -crate::WEIGHT_CLAMP_LIMIT; }
+        clamp_and_preserve_sign(weight, weight_before);
     }
 }
 
