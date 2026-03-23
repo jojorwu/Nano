@@ -174,16 +174,15 @@ impl ModuleManager {
         use rayon::prelude::*;
 
         for tier_indices in &self.tiered_indices {
-            // Parallel execution within the tier
-            tier_indices.par_iter().for_each(|&idx| {
-                // Safety: We use unsafe to get multiple mutable references because we know
-                // the indices are unique within and between tiers.
-                let ptr = self.modules.as_ptr() as *mut Box<dyn NanoModule>;
-                unsafe {
-                    let m = &mut *ptr.add(idx);
+            // Parallel execution within the tier.
+            // We use par_iter() on indices and then access modules.
+            // Since tiered_indices ensures each module belongs to exactly one tier
+            // and we execute tiers sequentially, this is safe.
+            self.modules.par_iter_mut().enumerate()
+                .filter(|(idx, _)| tier_indices.contains(idx))
+                .for_each(|(_, m)| {
                     m.on_tick(bus, previous_spikes, tick);
-                }
-            });
+                });
         }
     }
 

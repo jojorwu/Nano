@@ -57,19 +57,33 @@ impl crate::PlasticityRule for StdpRule {
         let activity = ctx.neurons.activity_ema[ctx.post_index];
         let bcm_threshold = 100; // Target activity
 
-        if diff > 0 && diff < self.tau as i64 {
-            let mut ltp_scale = 1024;
+        // Exponential integer approximation for temporal decay
+        // exp(-x/tau) approx (tau - x) / tau (linear) -> we want something better
+        // LUT-like approach or bit-shift approximation
+        let temporal_factor = |d: i64, tau: i64| -> i64 {
+            let ratio = (d.abs() * 1024) / tau;
+            if ratio > 2048 { return 0; } // ~2*tau
+            // Piecewise linear approximation of exp(-x)
+            if ratio < 512 { 1024 - ratio } // 0 to 0.5
+            else if ratio < 1024 { 512 - (ratio - 512) / 2 } // 0.5 to 1.0
+            else { 256 - (ratio - 1024) / 4 } // 1.0 to 2.0
+        };
+
+        if diff > 0 {
+            let factor = temporal_factor(diff, self.tau as i64);
+            let mut ltp_scale = 1024i64;
             if activity > bcm_threshold {
-                ltp_scale = (1024 * bcm_threshold) / activity.max(1);
+                ltp_scale = (1024 * bcm_threshold as i64) / activity.max(1) as i64;
             }
-            let delta = (self.a_plus as i64 * (self.tau as i64 - diff) * ltp_scale as i64 / (self.tau as i64 * 1024)) as i32;
+            let delta = (self.a_plus as i64 * factor * ltp_scale >> 20) as i32;
             *weight = weight.saturating_add(delta);
-        } else if diff < 0 && diff > -(self.tau as i64) {
-            let mut ltd_scale = 1024;
+        } else if diff < 0 {
+            let factor = temporal_factor(diff, self.tau as i64);
+            let mut ltd_scale = 1024i64;
             if activity > bcm_threshold {
-                ltd_scale = (1024 * activity) / bcm_threshold;
+                ltd_scale = (1024 * activity as i64) / bcm_threshold as i64;
             }
-            let delta = (self.a_minus as i64 * (self.tau as i64 - diff.abs()) * ltd_scale as i64 / (self.tau as i64 * 1024)) as i32;
+            let delta = (self.a_minus as i64 * factor * ltd_scale >> 20) as i32;
             *weight = weight.saturating_sub(delta);
         }
 
@@ -159,7 +173,19 @@ impl EvolutionaryOptimizer {
                         for &i in active.iter().take(3) {
                             for &j in active.iter().take(3) {
                                 if i != j && grown < grow_count {
-                                    let comp = if (i + j) % 2 == 0 { Compartment::Proximal } else { Compartment::Distal };
+                                    // Distance-aware compartment targeting
+                                    let dx = (neurons.x[i] - neurons.x[j]) as i32;
+                                    let dy = (neurons.y[i] - neurons.y[j]) as i32;
+                                    let dist_sq = dx*dx + dy*dy;
+
+                                    let comp = if dist_sq < 100 {
+                                        Compartment::Proximal
+                                    } else if dist_sq < 400 {
+                                        Compartment::Distal
+                                    } else {
+                                        Compartment::Apical
+                                    };
+
                                     let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
                                     if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &config) {
                                         grown += 1;
@@ -176,26 +202,28 @@ impl EvolutionaryOptimizer {
                 let mut rng = rand::thread_rng();
                 for _ in 0..grow_count {
                     let src = rng.gen_range(0..neuron_count) as u32;
-
-                    // Gaussian-like distance selection for target
-                    let range = 30; // Modular columnar radius
                     let sx = neurons.x[src as usize];
                     let sy = neurons.y[src as usize];
 
-                    // Search for a target that balances spatial proximity with functional diversity
+                    // Spatial Optimization: Search in a local neighborhood first
                     let mut best_target = (src + 1) % neuron_count as u32;
                     let mut min_score = 1000000i32;
 
+                    // Instead of global sampling, we sample indices near the source index
+                    // assuming similar indices are spatially closer (standard for SoA layouts)
+                    let search_radius = (neuron_count / 20).max(50);
+
                     for _ in 0..15 {
-                        let cand = rng.gen_range(0..neuron_count) as u32;
+                        let offset = rng.gen_range(0..search_radius * 2) as i32 - search_radius as i32;
+                        let cand = ((src as i32 + offset).rem_euclid(neuron_count as i32)) as u32;
                         if cand == src { continue; }
 
                         let dx = (neurons.x[cand as usize] - sx) as i32;
                         let dy = (neurons.y[cand as usize] - sy) as i32;
-                        let dist_sq = dx*dx + dy*dy; // L2 Norm squared for sharper locality
+                        let dist_sq = dx*dx + dy*dy;
 
-                        // Score: prefer nearby neurons, but add noise for exploratory distal connections
-                        let score = dist_sq + rng.gen_range(0..range*range);
+                        // Score: prefer nearby neurons
+                        let score = dist_sq;
 
                         if score < min_score {
                             min_score = score;
