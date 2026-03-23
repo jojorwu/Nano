@@ -26,7 +26,7 @@ impl SpikingGraphModule {
 impl NanoModule for SpikingGraphModule {
     fn name(&self) -> &str { "graph_engine" }
 
-    fn on_tick(&mut self, _bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Dynamic graph rewiring logic could be implemented here
     }
 
@@ -34,6 +34,7 @@ impl NanoModule for SpikingGraphModule {
 
     fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, synapses: &mut SynapsesSoA, _reward: Option<IValue>) {
         // Perform structural graph maintenance
+        // Note: Backend must clear synapse_index if structural changes occur.
         use rand::Rng;
         let mut rng = rand::thread_rng();
 

@@ -1,5 +1,5 @@
 use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, NetworkConfig, Compartment};
-use genesis_node::{Runtime, SimulationSettings, Observer, Telemetry};
+use genesis_node::{Runtime, SimulationSettings, Observer, Telemetry, SimulationEngine};
 use genesis_compute::{CpuBackend, ComputeBackend};
 use std::collections::HashMap;
 
@@ -24,85 +24,69 @@ fn test_module_persistence_and_restoration() {
     };
 
     let mut runtime = Runtime {
-        model,
-        modules: {
-            let mut mm = genesis_core::ModuleManager::new();
-            #[cfg(feature = "titan")]
-            mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
-            mm
-        },
+        engine: SimulationEngine::new(
+            model,
+            {
+                let mut mm = genesis_core::ModuleManager::new();
+                #[cfg(feature = "titan")]
+                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
+                mm
+            },
+            Box::new(CpuBackend::default()),
+            &SimulationSettings::default()
+        ),
         settings: SimulationSettings {
             night_phase_interval: 1, // Learning every tick for test
             ..SimulationSettings::default()
         },
-        backend: Box::new(CpuBackend::default()),
-        previous_spikes: vec![false; 10],
-        current_spikes_buffer: vec![false; 10],
-        merged_inputs_buffer: vec![0; 10],
-        tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 10],
-        history_ptr: 0,
         episode_reward_history: Vec::new(),
-        global_modulators: genesis_core::NeuromodulationState::default(),
-        rolling_spike_count: 0.0,
         network_manager: None,
-        observer: Observer::new(10),
-        remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        input_bus: genesis_core::InputBus::new(10),
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
     };
 
     // 1. Manually instantiate titan (since it wasn't in module_states initially)
-    runtime.modules.instantiate("titan");
+    runtime.engine.modules.instantiate("titan");
 
     // 2. Perform some learning (Day/Night cycle)
     let input = [1024; 10];
     runtime.tick_with_reward(&input, Some(1000)); // High positive reward
 
     // 3. Force state synchronization
-    for module in &runtime.modules.modules {
-        runtime.model.module_states.insert(module.name().to_string(), module.get_state());
+    for module in &runtime.engine.modules.modules {
+        runtime.engine.model.module_states.insert(module.name().to_string(), module.get_state());
     }
 
-    let saved_state = runtime.model.module_states.get("titan").expect("Titan state should be saved");
+    let saved_state = runtime.engine.model.module_states.get("titan").expect("Titan state should be saved");
     let saved_data = saved_state.clone();
 
     // 4. Create new runtime and restore
-    let model2 = runtime.model.clone();
+    let model2 = runtime.engine.model.clone();
     let mut runtime2 = Runtime {
-        model: model2,
-        modules: {
-            let mut mm = genesis_core::ModuleManager::new();
-            #[cfg(feature = "titan")]
-            mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
-            mm
-        },
+        engine: SimulationEngine::new(
+            model2,
+            {
+                let mut mm = genesis_core::ModuleManager::new();
+                #[cfg(feature = "titan")]
+                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
+                mm
+            },
+            Box::new(CpuBackend::default()),
+            &SimulationSettings::default()
+        ),
         settings: SimulationSettings::default(),
-        backend: Box::new(CpuBackend::default()),
-        previous_spikes: vec![false; 10],
-        current_spikes_buffer: vec![false; 10],
-        merged_inputs_buffer: vec![0; 10],
-        tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
-        history_ptr: 0,
         episode_reward_history: Vec::new(),
-        global_modulators: genesis_core::NeuromodulationState::default(),
-        rolling_spike_count: 0.0,
         network_manager: None,
-        observer: Observer::new(10),
-        remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        input_bus: genesis_core::InputBus::new(10),
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
     };
 
     // Restoration logic (usually in load_with_settings, testing manually here)
-    for (name, state) in &runtime2.model.module_states {
-        if runtime2.modules.instantiate(name) {
-            runtime2.modules.modules.last_mut().unwrap().set_state(state);
+    for (name, state) in &runtime2.engine.model.module_states {
+        if runtime2.engine.modules.instantiate(name) {
+            runtime2.engine.modules.modules.last_mut().unwrap().set_state(state);
         }
     }
 
-    let restored_state = runtime2.modules.modules[0].get_state();
+    let restored_state = runtime2.engine.modules.modules[0].get_state();
     assert_eq!(saved_data, restored_state);
 }
 
@@ -141,8 +125,12 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.proximal_potential[2] = 0;
     model.neurons.distal_potential[2] = 0;
     let mut prev_spikes = vec![false, true, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
-    // Should NOT spike because distal is attenuated (2000 / 4 = 500 < 1024 threshold)
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 1, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
+    // Should NOT spike because distal is attenuated (2000 / 16 = 125 < 1024 threshold)
     assert!(!spikes[2], "Neuron 2 should not spike with only distal input");
 
     // Case 2: ONLY Proximal input (Direct)
@@ -152,7 +140,11 @@ fn test_multi_compartment_gating_physics() {
     model.neurons.distal_potential[2] = 0;
     model.neurons.refractory_timer[2] = 0;
     prev_spikes = vec![true, false, false];
-    let spikes = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 0], &prev_spikes, &[], 2, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
     // Should spike because proximal is direct (2000 > 1024 threshold)
     assert!(spikes[2], "Neuron 2 should spike with strong proximal input");
 
@@ -164,7 +156,11 @@ fn test_multi_compartment_gating_physics() {
     // We need some proximal potential to reach threshold 512.
     // Let's inject external input to proximal.
     prev_spikes = vec![false, true, false]; // Distal only via synapse
-    let spikes = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
+    let spike_data = backend.day_phase(&mut model, &[0, 0, 600], &prev_spikes, &[], 3, Default::default());
+    let mut spikes = vec![false; 3];
+    if let genesis_core::SpikeData::Sparse(indices) = spike_data {
+        for i in indices { if i < 3 { spikes[i] = true; } }
+    }
     // Proximal 600 > 512 threshold -> Distal 2000 fully integrated.
     // 600 + 2000 = 2600 > 1024 threshold.
     assert!(spikes[2], "Neuron 2 should spike with coincident proximal and distal input");
@@ -191,27 +187,19 @@ fn test_evolutionary_structural_growth() {
     };
 
     let mut runtime = Runtime {
-        model,
-        modules: genesis_core::ModuleManager::new(),
+        engine: SimulationEngine::new(
+            model,
+            genesis_core::ModuleManager::new(),
+            Box::new(CpuBackend::default()),
+            &SimulationSettings::default()
+        ),
         settings: SimulationSettings {
             night_phase_interval: 10,
             ..SimulationSettings::default()
         },
-        backend: Box::new(CpuBackend::default()),
-        previous_spikes: vec![false; 100],
-        current_spikes_buffer: vec![false; 100],
-        merged_inputs_buffer: vec![0; 100],
-        tick_counter: 0,
-        spikes_history: vec![genesis_node::SpikeData::Sparse(Vec::new()); 100],
-        history_ptr: 0,
         episode_reward_history: Vec::new(),
-        global_modulators: genesis_core::NeuromodulationState::default(),
-        rolling_spike_count: 0.0,
         network_manager: None,
-        observer: Observer::new(100),
-        remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        input_bus: genesis_core::InputBus::new(100),
-        telemetry: Telemetry::default(),
+        observers: vec![Box::new(Observer::new(100)), Box::new(Telemetry::default())],
     };
 
     // Simulate high reward and some activity to trigger growth
@@ -224,5 +212,5 @@ fn test_evolutionary_structural_growth() {
     }
 
     // After 10 ticks (interval=10), structural plasticity should have run
-    assert!(runtime.model.synapses.len() > 0, "Structural plasticity should have grown new synapses");
+    assert!(runtime.engine.model.synapses.len() > 0, "Structural plasticity should have grown new synapses");
 }

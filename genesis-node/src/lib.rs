@@ -1,5 +1,4 @@
-use genesis_core::{BakedModel, ModuleManager};
-use genesis_compute::ComputeBackend;
+use genesis_core::{ModuleManager, SpikeData, ModuleError};
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
@@ -13,6 +12,14 @@ pub enum RuntimeError {
     Config(#[from] serde_json::Error),
     #[error("Model load failure: {0}")]
     ModelLoad(String),
+    #[error("Backend creation failed: {0}")]
+    BackendCreationFailed(String),
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Internal state error: {0}")]
+    StateError(String),
+    #[error("Module error: {0}")]
+    Module(#[from] ModuleError),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,12 +70,6 @@ impl SpikePacket {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SpikeData {
-    Sparse(Vec<usize>),
-    Dense(Vec<u8>), // Bitmask
-    Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationSettings {
@@ -98,29 +99,22 @@ impl Default for SimulationSettings {
 pub mod examples_rl;
 pub mod observer;
 pub mod telemetry;
+pub mod engine;
+pub mod commands;
+pub mod persistence;
+pub mod events;
 
 pub use observer::Observer;
 pub use telemetry::Telemetry;
+pub use engine::SimulationEngine;
+pub use events::{SimulationEvent, SimulationObserver};
 
 pub struct Runtime {
-    pub model: BakedModel,
-    pub modules: ModuleManager,
+    pub engine: SimulationEngine,
     pub settings: SimulationSettings,
-    pub backend: Box<dyn ComputeBackend + Send + Sync>,
-    pub previous_spikes: Vec<bool>,
-    pub current_spikes_buffer: Vec<bool>,
-    pub merged_inputs_buffer: Vec<i32>,
-    pub tick_counter: u32,
-    pub spikes_history: Vec<SpikeData>, // Optimized history storage
-    pub history_ptr: usize,             // Ring-buffer pointer
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
-    pub global_modulators: genesis_core::NeuromodulationState,
-    pub rolling_spike_count: f32, // For surprise calculation
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
-    pub observer: Observer,
-    pub remote_spike_queue: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
-    pub input_bus: genesis_core::InputBus,
-    pub telemetry: Telemetry,
+    pub observers: Vec<Box<dyn SimulationObserver>>,
 }
 
 pub struct NetworkManager {
@@ -191,18 +185,42 @@ impl NetworkManager {
     }
 }
 
-impl Runtime {
-    /// Bootstraps a simulation session from a model file on disk.
-    pub fn load(path: &str) -> Result<Self, RuntimeError> {
-        Self::load_with_settings(path, SimulationSettings::default())
+pub struct RuntimeBuilder {
+    model_path: Option<String>,
+    settings: SimulationSettings,
+    observers: Vec<Box<dyn SimulationObserver>>,
+}
+
+impl RuntimeBuilder {
+    pub fn new() -> Self {
+        Self {
+            model_path: None,
+            settings: SimulationSettings::default(),
+            observers: Vec::new(),
+        }
     }
 
-    /// Loads a model and configures the simulation with specific hardware and timing parameters.
-    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
-        let model = BakedModel::load(path).map_err(|e| RuntimeError::ModelLoad(e.to_string()))?;
+    pub fn from_model(mut self, path: &str) -> Self {
+        self.model_path = Some(path.to_string());
+        self
+    }
+
+    pub fn with_settings(mut self, settings: SimulationSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    pub fn add_observer(mut self, observer: Box<dyn SimulationObserver>) -> Self {
+        self.observers.push(observer);
+        self
+    }
+
+    pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let path = self.model_path.ok_or_else(|| RuntimeError::ModelLoad("Model path not provided".into()))?;
+        let model = persistence::PersistenceManager::load(&path)?;
         let n_count = model.neurons.len();
 
-        let backend_name = settings.preferred_backend.as_deref()
+        let backend_name = self.settings.preferred_backend.as_deref()
             .unwrap_or(&model.config.preferred_backend);
 
         let registry = genesis_compute::BackendRegistry::new();
@@ -211,7 +229,7 @@ impl Runtime {
                 log::warn!("Backend '{}' not found, falling back to CPU", backend_name);
                 registry.create("cpu")
             })
-            .expect("Failed to create any compute backend");
+            .ok_or_else(|| RuntimeError::BackendCreationFailed("Could not instantiate CPU fallback".into()))?;
 
         let mut modules = ModuleManager::new();
 
@@ -225,9 +243,10 @@ impl Runtime {
         // Instantiate modules based on model state
         for name in model.module_states.keys() {
             if modules.instantiate(name) {
-                let state = model.module_states.get(name).unwrap();
-                if let Some(m) = modules.modules.last_mut() {
-                    m.set_state(state);
+                if let Some(state) = model.module_states.get(name) {
+                    if let Some(m) = modules.modules.last_mut() {
+                        m.set_state(state);
+                    }
                 }
             }
         }
@@ -238,133 +257,127 @@ impl Runtime {
             modules.instantiate("titan");
         }
 
-        let mut rt = Self {
-            model,
-            modules,
-            settings: settings.clone(),
-            backend,
-            previous_spikes: vec![false; n_count],
-            current_spikes_buffer: vec![false; n_count],
-            merged_inputs_buffer: vec![0; n_count],
-            tick_counter: 0,
-            spikes_history: vec![SpikeData::Sparse(Vec::new()); settings.night_phase_interval.max(16) as usize],
-            history_ptr: 0,
+        let mut observers = self.observers;
+        if observers.is_empty() {
+            observers.push(Box::new(Observer::new(n_count)));
+        }
+        if !observers.iter_mut().any(|o| o.as_any_mut().is::<telemetry::Telemetry>()) {
+            observers.push(Box::new(telemetry::Telemetry::default()));
+        }
+
+        modules.rebuild_tiers();
+
+        let mut rt = Runtime {
+            engine: SimulationEngine::new(model, modules, backend, &self.settings),
+            settings: self.settings,
             episode_reward_history: Vec::new(),
-            global_modulators: genesis_core::NeuromodulationState::default(),
-            rolling_spike_count: 0.0,
             network_manager: None,
-            observer: Observer::new(n_count),
-            remote_spike_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            input_bus: genesis_core::InputBus::new(n_count),
-            telemetry: Telemetry::default(),
+            observers,
         };
-        rt.post_init();
+        rt.post_init()?;
         Ok(rt)
     }
+}
 
-    pub fn post_init(&mut self) {
-        self.modules.on_init(&mut self.model.neurons);
+impl Runtime {
+    /// Bootstraps a simulation session from a model file on disk.
+    pub fn load(path: &str) -> Result<Self, RuntimeError> {
+        RuntimeBuilder::new().from_model(path).build()
     }
 
-    pub fn calculate_surprise(&mut self, current_spike_count: usize) -> i32 {
-        let current = current_spike_count as f32;
-        let surprise = (current - self.rolling_spike_count).abs();
-
-        // Update rolling average (EMA)
-        self.rolling_spike_count = self.rolling_spike_count * 0.9 + current * 0.1;
-
-        // Scale to IValue (SCALE=1024)
-        // If current count is double the average, surprise is high.
-        let scaled_surprise = (surprise * 1024.0 / (self.rolling_spike_count + 1.0)) as i32;
-        scaled_surprise.min(2048) // Clamp
+    /// Loads a model and configures the simulation with specific hardware and timing parameters.
+    pub fn load_with_settings(path: &str, settings: SimulationSettings) -> Result<Self, RuntimeError> {
+        RuntimeBuilder::new().from_model(path).with_settings(settings).build()
     }
 
-    fn reset_potential_buffers(&mut self) {
-        self.model.neurons.proximal_potential.fill(0);
-        self.model.neurons.distal_potential.fill(0);
-        self.model.neurons.apical_potential.fill(0);
-        self.model.neurons.basal_potential.fill(0);
-    }
-
-    fn reconstruct_history(&self, window: usize) -> Vec<Vec<bool>> {
-        let n_count = self.model.neurons.len();
-        let hist_len = self.spikes_history.len();
-
-        (0..window.min(hist_len)).map(|i| {
-            // Circular access: start from (history_ptr - 1 - i) % hist_len
-            let idx = (self.history_ptr + hist_len - 1 - i) % hist_len;
-            let data = &self.spikes_history[idx];
-
-            let mut vec = vec![false; n_count];
-            match data {
-                SpikeData::Sparse(indices) => { for &idx in indices { if idx < n_count { vec[idx] = true; } } }
-                SpikeData::Dense(mask) => {
-                    for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
-                }
-                _ => {}
-            }
-            vec
-        }).collect()
+    pub fn post_init(&mut self) -> Result<(), genesis_core::ModuleError> {
+        self.engine.modules.on_init(&mut self.engine.model.neurons)
     }
 
     /// Executes a single simulation tick with optional reward modulation and layer targeting.
     /// This is the primary entry point for model interaction.
+    pub fn emit_event(&mut self, event: SimulationEvent) {
+        for obs in &mut self.observers {
+            obs.on_event(&event, &mut self.engine);
+        }
+    }
+
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
+        let start_time = std::time::Instant::now();
         let normalized_reward = self.prepare_reward(reward);
-        self.tick_counter = self.tick_counter.wrapping_add(1);
-        let n_count = self.model.neurons.len();
+        self.engine.tick_counter = self.engine.tick_counter.wrapping_add(1);
+        let n_count = self.engine.model.neurons.len();
 
-        self.reset_potential_buffers();
-        self.prepare_merged_inputs(external_inputs, n_count);
+        self.emit_event(SimulationEvent::TickStarted(self.engine.tick_counter));
 
-        self.input_bus.clear();
-        self.modules.on_tick(&mut self.input_bus, &self.previous_spikes, self.tick_counter);
+        self.engine.reset_potential_buffers();
+        self.engine.prepare_merged_inputs(external_inputs);
 
-        // Finalize potentials by zipping module inputs into the model
-        self.model.neurons.proximal_potential.iter_mut()
-            .zip(&self.input_bus.proximal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.distal_potential.iter_mut()
-            .zip(&self.input_bus.distal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.apical_potential.iter_mut()
-            .zip(&self.input_bus.apical)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
-        self.model.neurons.basal_potential.iter_mut()
-            .zip(&self.input_bus.basal)
-            .for_each(|(p, b)| *p = p.saturating_add(*b));
+        self.engine.input_bus.clear_mut();
+        self.engine.modules.on_tick(&self.engine.input_bus, &self.engine.previous_spikes, self.engine.tick_counter);
 
-        let full_history = self.reconstruct_history(16);
-        self.current_spikes_buffer = self.backend.day_phase(&mut self.model, &self.merged_inputs_buffer, &self.previous_spikes, &full_history, self.tick_counter, self.global_modulators);
+        self.engine.finalize_potentials_from_bus();
 
-        // Execute thinking cycles if think module is active
-        if let Some(think_config) = self.get_think_config() {
-            if think_config.active {
-                self.current_spikes_buffer = self.backend.think_cycles(&mut self.model, &self.current_spikes_buffer, think_config.extra_ticks, self.tick_counter, self.global_modulators);
+        let full_history = self.engine.reconstruct_history(16);
+        let spike_data = self.engine.backend.day_phase(&mut self.engine.model, &self.engine.merged_inputs_buffer, &self.engine.previous_spikes, &full_history, self.engine.tick_counter, self.engine.global_modulators);
+
+        let final_spike_data = self.engine.execute_thinking_cycles(spike_data);
+
+        // Convert final spike data to dense buffer for subsequent logic
+        self.engine.current_spikes_buffer.fill(false);
+        let mut spike_count = 0;
+        match &final_spike_data {
+            genesis_core::SpikeData::Sparse(indices) => {
+                spike_count = indices.len();
+                for &idx in indices { if idx < n_count { self.engine.current_spikes_buffer[idx] = true; } }
+            }
+            genesis_core::SpikeData::Dense(mask) => {
+                for i in 0..n_count {
+                    if (mask[i / 8] >> (i % 8)) & 1 == 1 {
+                        self.engine.current_spikes_buffer[i] = true;
+                        spike_count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        self.emit_event(SimulationEvent::TickComplete {
+            tick: self.engine.tick_counter,
+            spike_count,
+            data: final_spike_data.clone(),
+            execution_time: start_time.elapsed(),
+        });
+
+        let surprise = self.engine.calculate_surprise(spike_count);
+        self.emit_event(SimulationEvent::SurpriseDetected(surprise));
+
+        self.apply_neuromodulation(surprise, normalized_reward);
+
+        // Critical sync path for safety
+        for obs in &mut self.observers {
+            if let Some(o) = obs.as_any_mut().downcast_mut::<Observer>() {
+                o.process_spikes(&mut self.engine.current_spikes_buffer, &mut self.engine.model);
             }
         }
 
-        let spike_count = self.current_spikes_buffer.iter().filter(|&&s| s).count();
-        let surprise = self.calculate_surprise(spike_count);
+        self.engine.spikes_history[self.engine.history_ptr] = final_spike_data;
+        self.engine.history_ptr = (self.engine.history_ptr + 1) % self.engine.spikes_history.len();
 
-        self.apply_neuromodulation(surprise, normalized_reward);
-        self.observer.process_spikes(&mut self.current_spikes_buffer, &mut self.model);
-        self.telemetry.spike_counts.push(spike_count);
-
-        self.manage_spike_history(n_count);
-
-        if self.tick_counter > 0 && self.tick_counter % self.settings.night_phase_interval == 0 {
+        if self.engine.tick_counter > 0 && self.engine.tick_counter % self.settings.night_phase_interval == 0 {
+            self.emit_event(SimulationEvent::NightPhaseStarted(self.engine.tick_counter));
             self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
+            self.emit_event(SimulationEvent::NightPhaseComplete(self.engine.tick_counter));
         }
 
-        self.previous_spikes.copy_from_slice(&self.current_spikes_buffer);
-        self.broadcast_ghost_spikes(&self.previous_spikes);
-        self.previous_spikes.clone()
+        self.engine.previous_spikes.copy_from_slice(&self.engine.current_spikes_buffer);
+        self.broadcast_ghost_spikes(&self.engine.previous_spikes);
+        self.engine.previous_spikes.clone()
     }
 
     fn prepare_reward(&mut self, reward: Option<i32>) -> Option<i32> {
         reward.map(|r| {
-            self.telemetry.episode_rewards.push(r);
+            self.emit_event(SimulationEvent::RewardReceived(r));
             self.episode_reward_history.push(r);
             if self.episode_reward_history.len() > 100 { self.episode_reward_history.remove(0); }
             let mean = (self.episode_reward_history.iter().sum::<i32>() as f32) / (self.episode_reward_history.len() as f32);
@@ -372,92 +385,51 @@ impl Runtime {
         })
     }
 
-    fn prepare_merged_inputs(&mut self, external_inputs: &[i32], n_count: usize) {
-        self.merged_inputs_buffer.fill(0);
-
-        // Merge external inputs
-        let merge_len = external_inputs.len().min(n_count);
-        self.merged_inputs_buffer[..merge_len].copy_from_slice(&external_inputs[..merge_len]);
-
-        // Merge remote spikes
-        let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
-        for &idx in remote_spikes.iter() {
-            if idx < n_count {
-                self.merged_inputs_buffer[idx] = self.merged_inputs_buffer[idx].saturating_add(genesis_core::SCALE);
-            }
-        }
-        remote_spikes.clear();
-    }
-
     fn apply_neuromodulation(&mut self, surprise: i32, normalized_reward: Option<i32>) {
-        self.global_modulators.noradrenaline = surprise;
+        self.engine.global_modulators.noradrenaline = surprise;
         if let Some(r) = normalized_reward {
-            self.global_modulators.dopamine = r;
+            self.engine.global_modulators.dopamine = r;
         } else {
-            self.global_modulators.dopamine = (self.global_modulators.dopamine * 9) / 10;
+            self.engine.global_modulators.dopamine = (self.engine.global_modulators.dopamine * 9) / 10;
         }
         // Serotonin tracks long-term stability
-        self.global_modulators.serotonin = (self.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
-    }
-
-    fn manage_spike_history(&mut self, n_count: usize) {
-        let active_indices: Vec<usize> = self.current_spikes_buffer.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-
-        let data = if active_indices.len() < n_count / 32 {
-            SpikeData::Sparse(active_indices)
-        } else {
-            let mut mask = vec![0u8; (n_count + 7) / 8];
-            for &idx in &active_indices { mask[idx / 8] |= 1 << (idx % 8); }
-            SpikeData::Dense(mask)
-        };
-
-        self.spikes_history[self.history_ptr] = data;
-        self.history_ptr = (self.history_ptr + 1) % self.spikes_history.len();
+        self.engine.global_modulators.serotonin = (self.engine.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
     }
 
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
-        let modulators = self.global_modulators;
-        let mut prev = self.previous_spikes.clone();
-        let reconstructed = self.reconstruct_history(self.settings.night_phase_interval as usize);
+        let modulators = self.engine.global_modulators;
+        let mut prev = self.engine.previous_spikes.clone();
+        let reconstructed = self.engine.reconstruct_history(self.settings.night_phase_interval as usize);
 
         for (i, current) in reconstructed.iter().rev().enumerate() {
             let hist_len = reconstructed.len() as u32;
-            let tick = self.tick_counter.saturating_sub(hist_len).saturating_add(i as u32).saturating_add(1);
+            let tick = self.engine.tick_counter.saturating_sub(hist_len).saturating_add(i as u32).saturating_add(1);
             for (n_idx, &spiked) in current.iter().enumerate() {
-                if spiked { self.model.neurons.last_spike_tick[n_idx] = tick; }
+                if spiked { self.engine.model.neurons.last_spike_tick[n_idx] = tick; }
             }
 
             let effective_reward = if let Some(m) = layer_mask {
-                let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.model.neurons.layer_id[idx] == m);
+                let in_mask = current.iter().enumerate().any(|(idx, &s)| s && self.engine.model.neurons.layer_id[idx] == m);
                 if in_mask { normalized_reward } else { None }
             } else {
                 normalized_reward
             };
 
             // Pass global chemical state to backend for modulated plasticity
-            self.backend.update_weights_modulated(&mut self.model, &prev, current, tick, effective_reward, modulators, &reconstructed);
-            self.modules.on_update_weights(&mut self.model.neurons, &prev, current, tick, Some(surprise));
+            self.engine.backend.update_weights_modulated(&mut self.engine.model, &prev, current, tick, effective_reward, modulators, &reconstructed);
+            self.engine.modules.on_update_weights(&mut self.engine.model.neurons, &prev, current, tick, Some(surprise));
             prev = current.clone();
         }
 
         // Structural plasticity and Global Module updates use raw reward
-        self.backend.structural_plasticity(&mut self.model, raw_reward, &reconstructed);
-        self.modules.on_night_phase(&mut self.model.neurons, &mut self.model.synapses, raw_reward);
+        self.engine.backend.structural_plasticity(&mut self.engine.model, raw_reward, &reconstructed);
+        self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
         self.sync_modules_to_model();
-        // Reset history pointer after consolidation if desired,
-        // though strictly not needed as pointers are tick-based.
-        self.history_ptr = 0;
+        // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
         self.tick_with_reward_targeted(external_inputs, reward, None)
-    }
-
-    fn get_think_config(&self) -> Option<genesis_core::ThinkModule> {
-        self.modules.modules.iter()
-            .find(|m| m.name() == "think")
-            .and_then(|m| bincode::deserialize(&m.get_state()).ok())
     }
 
     fn broadcast_ghost_spikes(&self, current_spikes: &[bool]) {
@@ -479,7 +451,7 @@ impl Runtime {
                     }
                     SpikeData::Dense(mask)
                 };
-                let packet = SpikePacket { tick: self.tick_counter as u64, data };
+                let packet = SpikePacket { tick: self.engine.tick_counter as u64, data };
                 let nm_clone = nm.clone();
                 tokio::spawn(async move {
                     nm_clone.broadcast_spikes(packet).await;
@@ -493,40 +465,32 @@ impl Runtime {
     }
 
     pub fn inject_text(&mut self, text: &str) {
-        for m in &mut self.modules.modules {
+        let input = genesis_core::ModuleInput::Text(text.to_string());
+        for m in &mut self.engine.modules.modules {
             if m.name() == "text_processor" {
-                if let Ok(mut state) = bincode::deserialize::<genesis_core::text::TextProcessorModule>(&m.get_state()) {
-                    state.tokenize_and_queue(text);
-                    if let Ok(encoded) = bincode::serialize(&state) {
-                        m.set_state(&encoded);
-                    }
-                }
+                m.handle_input(&input);
             }
         }
     }
 
     #[cfg(feature = "vision")]
     pub fn inject_image(&mut self, pixels: &[u8]) {
-        for m in &mut self.modules.modules {
+        let input = genesis_core::ModuleInput::Image(pixels.to_vec());
+        for m in &mut self.engine.modules.modules {
             if m.name() == "vision" {
-                if let Ok(mut state) = bincode::deserialize::<genesis_core::vision::VisionModule>(&m.get_state()) {
-                    state.set_input(pixels);
-                    if let Ok(encoded) = bincode::serialize(&state) {
-                        m.set_state(&encoded);
-                    }
-                }
+                m.handle_input(&input);
             }
         }
     }
 
     pub fn sync_state(&mut self) {
-        self.backend.sync_state(&mut self.model);
+        self.engine.backend.sync_state(&mut self.engine.model);
         self.sync_modules_to_model();
     }
 
     pub fn sync_modules_to_model(&mut self) {
-        for module in &self.modules.modules {
-            self.model.module_states.insert(module.name().to_string(), module.get_state());
+        for module in &self.engine.modules.modules {
+            self.engine.model.module_states.insert(module.name().to_string(), module.get_state());
         }
     }
 
@@ -539,41 +503,7 @@ impl Runtime {
     }
 
     pub fn handle_command(&mut self, cmd: &str) -> String {
-        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
-        if parts.is_empty() { return "No command provided".to_string(); }
-
-        match parts[0] {
-            "help" => "Commands: set_lr <val>, set_think <active|ticks>, status, save, exit".to_string(),
-            "set_lr" => {
-                if parts.len() < 2 { return "Usage: set_lr <val>".to_string(); }
-                if let Ok(lr) = parts[1].parse::<i32>() {
-                    self.model.config.learning_rate = lr;
-                    format!("Learning rate set to {}", lr)
-                } else { "Invalid value".to_string() }
-            },
-            "set_think" => {
-                if parts.len() < 2 { return "Usage: set_think <active|ticks> <val>".to_string(); }
-                // Implementation to find think module and update it
-                let mut found = false;
-                for m in &mut self.modules.modules {
-                    if m.name() == "think" {
-                        let mut state: genesis_core::ThinkModule = bincode::deserialize(&m.get_state()).unwrap();
-                        if parts[1] == "active" && parts.len() > 2 {
-                             state.active = parts[2] == "true" || parts[2] == "1";
-                        } else if parts[1] == "ticks" && parts.len() > 2 {
-                             state.extra_ticks = parts[2].parse().unwrap_or(5);
-                        }
-                        m.set_state(&bincode::serialize(&state).unwrap());
-                        found = true;
-                    }
-                }
-                if found { "Think settings updated".to_string() } else { "Think module not found".to_string() }
-            },
-            "status" => {
-                format!("Tick: {}, Synapses: {}, Neurons: {}", self.tick_counter, self.model.synapses.len(), self.model.neurons.len())
-            },
-            _ => format!("Unknown command: {}", parts[0]),
-        }
+        commands::CommandProcessor::handle(&mut self.engine, cmd)
     }
 }
 

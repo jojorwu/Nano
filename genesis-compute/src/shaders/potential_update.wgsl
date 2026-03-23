@@ -17,6 +17,7 @@ struct Neuron {
 struct Config {
     ip_increment: i32,
     ip_decay: i32,
+    noise_amplitude: i32,
 }
 @group(0) @binding(16) var<storage, read> config: Config;
 @group(0) @binding(2) var<storage, read_write> decays: array<i32>;
@@ -31,6 +32,8 @@ struct Config {
 @group(0) @binding(19) var<storage, read> gate_thresholds: array<i32>;
 @group(0) @binding(20) var<storage, read> expert_mask: array<u32>;
 @group(0) @binding(21) var<storage, read_write> last_spike_ticks: array<u32>;
+@group(0) @binding(24) var<storage, read_write> adaptation: array<i32>;
+@group(0) @binding(25) var<storage, read_write> activity_ema: array<i32>;
 struct Modulation {
     dopamine: i32,
     noradrenaline: i32,
@@ -38,6 +41,14 @@ struct Modulation {
 }
 @group(0) @binding(23) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> current_tick: u32;
+
+fn xorshift(seed: u32) -> u32 {
+    var x = seed;
+    x ^= x << 13u;
+    x ^= x >> 17u;
+    x ^= x << 5u;
+    return x;
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -62,13 +73,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let apical = apical_potentials[i];
     let basal = basal_potentials[i];
 
-    // Hierarchical Gating (Per-neuron gate threshold)
+    // Hierarchical Sigmoidal Gating (Smooth NMDA-like response)
     let gate_threshold = gate_thresholds[i];
-    var dist_gated = distal >> 2;
-    if (proximal >= gate_threshold) { dist_gated = distal; }
 
-    var apical_gated = apical >> 1;
-    if (dist_gated >= gate_threshold) { apical_gated = apical; }
+    // Distal gated by Proximal
+    let dist_diff = proximal - gate_threshold;
+    var dist_gain = 64; // Minimal leakage
+    if (dist_diff > 512) { dist_gain = 1024; }
+    else if (dist_diff > -512) { dist_gain = dist_diff + 512; }
+    let dist_gated = (distal * dist_gain) >> 10;
+
+    // Apical gated by Distal
+    let apical_diff = dist_gated - gate_threshold;
+    var apical_gain = 64;
+    if (apical_diff > 512) { apical_gain = 1024; }
+    else if (apical_diff > -512) { apical_gain = apical_diff + 512; }
+    let apical_gated = (apical * apical_gain) >> 10;
 
     // Basal Modulation (Lateral inhibition/excitation)
     var mod_factor = 1024;
@@ -79,7 +99,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     mod_factor = (mod_factor * (1024 + modulation.noradrenaline)) >> 10;
 
     let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
-    var pot = potentials[i] + gated_input + proximal + dist_gated + apical_gated;
+
+    // Add Stochastic Noise (PRNG)
+    var noise = 0;
+    if (config.noise_amplitude > 0) {
+         let seed = i ^ current_tick;
+         let amplitude = u32(config.noise_amplitude);
+         let rng = i32(xorshift(seed) % (amplitude * 2u)) - i32(amplitude);
+         noise = rng;
+    }
+
+    var pot = potentials[i] + gated_input + proximal + dist_gated + apical_gated + noise - adaptation[i];
     pot = (pot * mod_factor) >> 10;
 
     // LLIF: Dynamic Decay
@@ -88,11 +118,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     pot = (pot * (1024 - final_decay)) >> 10;
 
-    if (pot >= thresholds[i]) {
+    // Relative Refractory: Exponentially decaying threshold multiplier
+    var refr_mult = 1;
+    if (refractory[i] > 0) { refr_mult = 1 + (1 << u32(refractory[i])); }
+    let effective_threshold = thresholds[i] * refr_mult;
+
+    if (pot >= effective_threshold) {
         potentials[i] = 0;
         refractory[i] = 4;
         spikes[i] = 1;
         last_spike_ticks[i] = current_tick;
+        adaptation[i] = adaptation[i] + 100;
 
         // SMBP: Active backpropagation signal
         backprop_signals[i] = 1024;
@@ -105,6 +141,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Intrinsic Plasticity
         thresholds[i] = thresholds[i] + config.ip_increment;
+
     } else {
         potentials[i] = pot;
         spikes[i] = 0;
@@ -114,6 +151,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         // Decaying backprop signal
         backprop_signals[i] = (backprop_signals[i] * 800) >> 10;
+        adaptation[i] = (adaptation[i] * 972) >> 10; // ~95% recovery
+    }
+
+    // Homeostatic Activity Control (Matches CPU logic)
+    var cur_ema = activity_ema[i];
+    if (pot >= effective_threshold) {
+        cur_ema = (cur_ema * 990 + 1000) / 1000;
+    } else {
+        cur_ema = (cur_ema * 990) / 1000;
+    }
+    activity_ema[i] = cur_ema;
+
+    var homeo_rate = 1;
+    if (cur_ema > 200) { homeo_rate = 2; } // Accelerated adjustment
+
+    if (cur_ema > 100) {
+        base_thresholds[i] = base_thresholds[i] + homeo_rate;
+    } else if (cur_ema < 100 && base_thresholds[i] > 512) {
+        base_thresholds[i] = base_thresholds[i] - 1;
     }
 
     next_update[i] = current_tick + intervals[i];

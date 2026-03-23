@@ -25,8 +25,15 @@ impl VisionModule {
 
 impl NanoModule for VisionModule {
     fn name(&self) -> &str { "vision" }
+    fn tier(&self) -> u32 { 0 }
 
-    fn on_init(&mut self, neurons: &mut NeuronsSoA) {
+    fn handle_input(&mut self, input: &crate::ModuleInput) {
+        if let crate::ModuleInput::Image(pixels) = input {
+            self.set_input(pixels);
+        }
+    }
+
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::ModuleError> {
         if self.resolution.0 > 0 {
             for y in 0..self.resolution.1 {
                 for x in 0..self.resolution.0 {
@@ -38,9 +45,10 @@ impl NanoModule for VisionModule {
                 }
             }
         }
+        Ok(())
     }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         if !self.input_buffer.is_empty() {
             let mut rng = rand::thread_rng();
             for (i, &p) in self.input_buffer.iter().enumerate() {
@@ -55,7 +63,8 @@ impl NanoModule for VisionModule {
 
                     if spiked {
                         let val = if self.poisson_mode { SCALE } else { (p as IValue * SCALE) / 255 };
-                        bus.proximal[i] = bus.proximal[i].saturating_add(val);
+                        bus.set_modality(crate::Modality::Vision, i, val);
+                        crate::InputBus::atomic_saturating_add(&bus.proximal[i], val);
                     }
                 }
             }
@@ -123,7 +132,8 @@ mod tests {
         vision.on_tick(&mut bus, &[], 1);
 
         // With intensity 255, Poisson should almost always spike (rate=1.0)
-        let total_potential: i32 = bus.proximal.iter().sum();
+        use std::sync::atomic::Ordering;
+        let total_potential: i32 = bus.proximal.iter().map(|v| v.load(Ordering::Relaxed)).sum();
         assert!(total_potential > 0);
     }
 }

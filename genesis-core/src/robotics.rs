@@ -1,9 +1,10 @@
 use crate::{IValue, SCALE, NanoModule, NeuronsSoA, SynapsesSoA};
 use serde::{Serialize, Deserialize};
+use std::collections::VecDeque;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SpikingCerebellumModule {
-    pub delay_line: Vec<Vec<bool>>,
+    pub delay_line: VecDeque<Vec<bool>>,
     pub max_delay: usize,
     pub mossy_fiber_indices: Vec<usize>,
     pub purkinje_indices: Vec<usize>,
@@ -12,7 +13,7 @@ pub struct SpikingCerebellumModule {
 impl SpikingCerebellumModule {
     pub fn new(mossy: Vec<usize>, purkinje: Vec<usize>) -> Self {
         Self {
-            delay_line: Vec::new(),
+            delay_line: VecDeque::new(),
             max_delay: 10,
             mossy_fiber_indices: mossy,
             purkinje_indices: purkinje,
@@ -23,7 +24,7 @@ impl SpikingCerebellumModule {
 impl NanoModule for SpikingCerebellumModule {
     fn name(&self) -> &str { "cerebellum" }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // 1. Maintain delay line of mossy fiber activity
         let mut current_mossy = vec![false; self.mossy_fiber_indices.len()];
         for (i, &idx) in self.mossy_fiber_indices.iter().enumerate() {
@@ -31,8 +32,8 @@ impl NanoModule for SpikingCerebellumModule {
                 current_mossy[i] = previous_spikes[idx];
             }
         }
-        self.delay_line.insert(0, current_mossy);
-        if self.delay_line.len() > self.max_delay { self.delay_line.pop(); }
+        self.delay_line.push_front(current_mossy);
+        if self.delay_line.len() > self.max_delay { self.delay_line.pop_back(); }
 
         // 2. Predictive feedback: delayed activity is injected into Apical compartments
         // simulating the role of the cerebellum in temporal coordination.
@@ -44,7 +45,7 @@ impl NanoModule for SpikingCerebellumModule {
                     if i < self.purkinje_indices.len() {
                         let target = self.purkinje_indices[i];
                         if target < bus.apical.len() {
-                            bus.apical[target] = bus.apical[target].saturating_add(SCALE / 2);
+                            crate::InputBus::atomic_saturating_add(&bus.apical[target], SCALE / 2);
                         }
                     }
                 }
@@ -94,7 +95,7 @@ impl RobotControlModule {
 impl NanoModule for RobotControlModule {
     fn name(&self) -> &str { "robot_control" }
 
-    fn on_tick(&mut self, bus: &mut crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Intrinsic Motivation (Surprise-driven exploration):
         // If the network is stagnant (low activity/surprise), inject exploratory noise
         // specifically into motor-assigned neurons to trigger trial-and-error behavior.
@@ -108,7 +109,7 @@ impl NanoModule for RobotControlModule {
                 if idx < bus.proximal.len() {
                     // Stochastic boost to proximal potential
                     if rng.gen::<f32>() < 0.1 {
-                        bus.proximal[idx] = bus.proximal[idx].saturating_add(500);
+                        crate::InputBus::atomic_saturating_add(&bus.proximal[idx], 500);
                     }
                 }
             }
