@@ -14,9 +14,9 @@ impl PersistenceManager {
     }
 
     pub fn load(path: &str) -> Result<BakedModel, RuntimeError> {
-        let file = File::open(path).map_err(|e| RuntimeError::Io(e))?;
+        let file = File::open(path).map_err(|e| RuntimeError::IoWithPath(path.to_string(), e))?;
         let reader = BufReader::new(file);
-        let model: BakedModel = bincode::deserialize_from(reader).map_err(|e| RuntimeError::Serialization(e))?;
+        let model: BakedModel = bincode::deserialize_from(reader).map_err(|e| RuntimeError::SerializationContext(format!("deserializing model from {}", path), e))?;
         Ok(model)
     }
 }

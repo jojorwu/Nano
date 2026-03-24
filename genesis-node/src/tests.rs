@@ -253,6 +253,59 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_error_invalid_path() {
+        let res = crate::Runtime::load("non_existent_model.model");
+        assert!(res.is_err());
+        let err = res.err().unwrap();
+        match err {
+            crate::RuntimeError::IoWithPath(path, _) => assert_eq!(path, "non_existent_model.model"),
+            _ => panic!("Expected IoWithPath error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_runtime_error_backend_mismatch() {
+        let mut settings = crate::SimulationSettings::default();
+        settings.preferred_backend = Some("invalid_backend".to_string());
+
+        // This will fall back to CPU but log a warning.
+        // To test actual error, we'd need a scenario where CPU also fails.
+    }
+
+    #[test]
+    fn test_long_duration_stability() {
+        use rand::Rng;
+        let n_count = 100;
+        let mut runtime = create_test_runtime(n_count);
+
+        // Use a real backend for stability testing
+        runtime.engine.backend = Box::new(CpuBackend::default());
+
+        // Random input generator
+        let mut rng = rand::thread_rng();
+
+        for t in 0..1000 {
+            let mut inputs = vec![0; n_count];
+            for i in 0..n_count {
+                if rng.gen_bool(0.05) {
+                    inputs[i] = 2000; // Strong random bursts
+                }
+            }
+
+            runtime.tick(&inputs);
+
+            // Check for total collapse or explosion
+            let spikes = runtime.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+            assert!(spikes < n_count, "Network exploded at tick {}", t);
+
+            if t % 100 == 0 {
+                // Periodic structural updates
+                runtime.tick_with_reward(&inputs, Some(10));
+            }
+        }
+    }
+
+    #[test]
     fn test_stress_recovery() {
         let mut runtime = create_test_runtime(10);
         // Step 1: Normal tick

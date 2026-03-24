@@ -164,3 +164,29 @@ impl InputBus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_bus_atomic_saturating_add(initial in -100000i32..100000, add in -100000i32..100000) {
+            let atomic = AtomicI32::new(initial);
+            InputBus::atomic_saturating_add(&atomic, add);
+            let expected = initial.saturating_add(add);
+            assert_eq!(atomic.load(Ordering::Relaxed), expected);
+        }
+
+        #[test]
+        fn test_bus_bounds_safety(idx in 0usize..200, val in -1000i32..1000) {
+            let bus = InputBus::new(100);
+            // This should not panic even if idx >= 100
+            bus.set_modality(Modality::Vision, idx, val);
+            if idx < 100 {
+                assert_eq!(bus.get_modality(Modality::Vision, idx), val);
+            }
+        }
+    }
+}
