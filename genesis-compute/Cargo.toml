@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["titan"]
+default = ["titan", "cpp"]
 titan = ["genesis-core/titan"]
 wgpu = ["dep:wgpu"]
+cpp = []
+cuda = []
+
+[build-dependencies]
+cc = "1.0"
 
 [dependencies]
 log = { workspace = true }

@@ -33,7 +33,7 @@ impl Default for CpuBackend {
 }
 
 impl CpuBackend {
-    pub fn rebuild_index(&mut self, model: &BakedModel) {
+    pub fn rebuild_index_internal(&mut self, model: &BakedModel) {
         let n_count = model.neurons.len();
         let s_count = model.synapses.len();
 
@@ -90,7 +90,7 @@ impl CpuBackend {
 
     fn propagate_sparse_delayed_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool], history: &[Vec<bool>]) {
         if self.synapse_offsets.is_empty() {
-            self.rebuild_index(model);
+            self.rebuild_index_internal(model);
         }
 
         let n_count = model.neurons.len();
@@ -254,6 +254,10 @@ impl CpuBackend {
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
 
+    fn rebuild_index(&mut self, model: &BakedModel) {
+        self.rebuild_index_internal(model);
+    }
+
     fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<genesis_core::SpikeData> {
         let n_count = model.neurons.len();
         match kernel {
@@ -310,7 +314,7 @@ impl ComputeBackend for CpuBackend {
 
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, _history: &[Vec<bool>]) {
         if self.synapse_offsets.is_empty() {
-            self.rebuild_index(model);
+            self.rebuild_index_internal(model);
         }
 
         let n_count = model.neurons.len();

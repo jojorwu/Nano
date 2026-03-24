@@ -1,0 +1,6 @@
+name = "TestModel"
+modules = []
+
+[architecture]
+neuron_count = 10
+synapse_count = 20

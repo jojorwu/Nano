@@ -12,6 +12,8 @@ audio = ["genesis-core/audio"]
 rl = ["genesis-core/rl"]
 robotics = ["genesis-core/robotics"]
 fusion = ["genesis-core/fusion"]
+cpp = ["genesis-compute/cpp"]
+cuda = ["genesis-compute/cuda"]
 
 [dependencies]
 log = { workspace = true }
@@ -25,3 +27,6 @@ toml = { workspace = true }
 bincode = { workspace = true }
 rayon = "1.7"
 rand = { workspace = true }
+pollster = "0.3"
+tokio-tungstenite = "0.20"
+futures-util = "0.3"

@@ -42,7 +42,7 @@ impl ModelBlueprint {
 
         // Balanced E-I: 80% Excitatory, 20% Inhibitory by default
         for i in 0..neurons.len() {
-            neurons.is_excitatory[i] = (i % 5) != 0;
+            neurons.is_excitatory[i] = if (i % 5) != 0 { 1 } else { 0 };
         }
 
         if let Some(ref layers) = self.architecture.layers {
@@ -64,7 +64,7 @@ impl ModelBlueprint {
             let delay = rng.gen_range(1..9);
 
             // Inhibitory neurons target Basal (lateral inhibition) or Proximal
-            let comp = if !neurons.is_excitatory[src as usize] {
+            let comp = if neurons.is_excitatory[src as usize] == 0 {
                 if rng.gen_bool(0.7) { genesis_core::Compartment::Basal } else { genesis_core::Compartment::Proximal }
             } else {
                 if rng.gen_bool(0.8) { genesis_core::Compartment::Proximal } else { genesis_core::Compartment::Distal }

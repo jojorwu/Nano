@@ -57,8 +57,56 @@ pub struct NeuronsSoA {
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
-    pub is_excitatory: Vec<bool>,
+    pub is_excitatory: Vec<u8>,    // 1 = true, 0 = false (FFI compatible)
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
+}
+
+/// FFI-safe view of the NeuronsSoA for Zero-Copy access from C++ and Python.
+#[repr(C)]
+pub struct NeuronsFFI {
+    pub potential: *mut IValue,
+    pub proximal_potential: *mut IValue,
+    pub distal_potential: *mut IValue,
+    pub apical_potential: *mut IValue,
+    pub basal_potential: *mut IValue,
+    pub threshold: *mut IValue,
+    pub decay: *mut IValue,
+    pub dendritic_gate: *mut IValue,
+    pub gate_threshold: *mut IValue,
+    pub adaptation_current: *mut IValue,
+    pub refractory_timer: *mut i32,
+    pub last_spike_tick: *mut u32,
+    pub backprop_signal: *mut IValue,
+    pub activity_ema: *mut IValue,
+    pub base_threshold: *mut IValue,
+    pub liquid_current: *mut IValue,
+    pub is_excitatory: *mut u8,
+    pub len: u32,
+}
+
+impl NeuronsSoA {
+    pub fn as_ffi(&mut self) -> NeuronsFFI {
+        NeuronsFFI {
+            potential: self.potential.as_mut_ptr(),
+            proximal_potential: self.proximal_potential.as_mut_ptr(),
+            distal_potential: self.distal_potential.as_mut_ptr(),
+            apical_potential: self.apical_potential.as_mut_ptr(),
+            basal_potential: self.basal_potential.as_mut_ptr(),
+            threshold: self.threshold.as_mut_ptr(),
+            decay: self.decay.as_mut_ptr(),
+            dendritic_gate: self.dendritic_gate.as_mut_ptr(),
+            gate_threshold: self.gate_threshold.as_mut_ptr(),
+            adaptation_current: self.adaptation_current.as_mut_ptr(),
+            refractory_timer: self.refractory_timer.as_mut_ptr(),
+            last_spike_tick: self.last_spike_tick.as_mut_ptr(),
+            backprop_signal: self.backprop_signal.as_mut_ptr(),
+            activity_ema: self.activity_ema.as_mut_ptr(),
+            base_threshold: self.base_threshold.as_mut_ptr(),
+            liquid_current: self.liquid_current.as_mut_ptr(),
+            is_excitatory: self.is_excitatory.as_mut_ptr(),
+            len: self.len() as u32,
+        }
+    }
 }
 
 impl NeuronsSoA {
@@ -136,7 +184,7 @@ impl NeuronsSoA {
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
         self.activity_ema.resize(new_size, 0);
-        self.is_excitatory.resize(new_size, true);
+        self.is_excitatory.resize(new_size, 1);
         self.adaptation_current.resize(new_size, 0);
     }
 
@@ -176,6 +224,40 @@ pub struct SynapsesSoA {
     pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SynapsesFFI {
+    pub source_index: *const u32,
+    pub target_index: *const u32,
+    pub weight: *mut IValue,
+    pub delay: *const u8,
+    pub stp_resources: *mut IValue,
+    pub stp_calcium: *mut IValue,
+    pub compartment: *const u8,
+    pub len: u32,
+
+    // CSR Index support
+    pub offsets: *const u32,       // size: (n_count * 16) + 1
+    pub indices_flat: *const usize, // size: len
+}
+
+impl SynapsesSoA {
+    pub fn as_ffi(&mut self, offsets: *const u32, indices: *const usize) -> SynapsesFFI {
+        SynapsesFFI {
+            source_index: self.source_index.as_ptr(),
+            target_index: self.target_index.as_ptr(),
+            weight: self.weight.as_mut_ptr(),
+            delay: self.delay.as_ptr(),
+            stp_resources: self.stp_resources.as_mut_ptr(),
+            stp_calcium: self.stp_calcium.as_mut_ptr(),
+            compartment: self.compartment.as_ptr() as *const u8,
+            len: self.len() as u32,
+            offsets,
+            indices_flat: indices,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -218,7 +300,7 @@ impl SynapsesSoA {
     }
 
     pub fn push_polarized(&mut self, source: u32, target: u32, weight: IValue, delay: u8, compartment: Compartment, neurons: &NeuronsSoA) {
-        let polarized_weight = if neurons.is_excitatory[source as usize] {
+        let polarized_weight = if neurons.is_excitatory[source as usize] != 0 {
             weight.abs()
         } else {
             -weight.abs()

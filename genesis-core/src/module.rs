@@ -43,6 +43,10 @@ pub trait NanoModule: Send + Sync {
     /// Optional downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any { &() }
 
+    /// Declares global signal modulations this module wants to apply.
+    /// Returns a list of (signal_id, delta_value).
+    fn get_global_modulations(&self) -> Vec<(usize, i32)> { Vec::new() }
+
     /// Handles external input directly without serialization overhead.
     fn handle_input(&mut self, _input: &ModuleInput) {}
 
@@ -69,6 +73,70 @@ pub trait NanoModule: Send + Sync {
 
     // Factory registration
     fn box_clone(&self) -> Box<dyn NanoModule>;
+}
+
+/// FFI callback type for external modules (C/C++/Python bridge).
+pub type ForeignTickFn = unsafe extern "C" fn(bus_ptr: *mut i32, bus_size: usize, tick: u32);
+
+/// A module that executes logic in a foreign language (C++, CUDA, or Python callback).
+#[derive(Clone)]
+pub struct ForeignModule {
+    pub name: String,
+    pub tick_fn: Option<ForeignTickFn>,
+}
+
+impl NanoModule for ForeignModule {
+    fn name(&self) -> &str { &self.name }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
+        if let Some(f) = self.tick_fn {
+            // Simplified bus pointer pass for Zero-Copy FFI.
+            let bus_ptr = bus.proximal().as_ptr() as *mut i32;
+            unsafe { f(bus_ptr, bus.size, tick); }
+        }
+    }
+    fn on_update_weights(&mut self, _: &mut NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<IValue>) {}
+    fn on_night_phase(&mut self, _: &mut NeuronsSoA, _: &mut SynapsesSoA, _: Option<IValue>) {}
+    fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
+}
+
+/// Dynamic Plugin System for loading external shared libraries (.so, .dll)
+pub struct DynamicPluginModule {
+    pub name: String,
+    _lib: std::sync::Arc<libloading::Library>,
+    tick_fn: ForeignTickFn,
+}
+
+impl DynamicPluginModule {
+    pub fn load(path: &str, symbol: &str) -> Result<Self, String> {
+        unsafe {
+            let lib = libloading::Library::new(path).map_err(|e| e.to_string())?;
+            let tick_fn: ForeignTickFn = *lib.get(symbol.as_bytes()).map_err(|e| e.to_string())?;
+
+            Ok(Self {
+                name: format!("plugin:{}", symbol),
+                _lib: std::sync::Arc::new(lib),
+                tick_fn,
+            })
+        }
+    }
+}
+
+impl NanoModule for DynamicPluginModule {
+    fn name(&self) -> &str { &self.name }
+    fn box_clone(&self) -> Box<dyn NanoModule> {
+        Box::new(Self {
+            name: self.name.clone(),
+            _lib: self._lib.clone(),
+            tick_fn: self.tick_fn,
+        })
+    }
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
+        let bus_ptr = bus.proximal().as_ptr() as *mut i32;
+        unsafe { (self.tick_fn)(bus_ptr, bus.size, tick); }
+    }
+    fn on_update_weights(&mut self, _: &mut NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<IValue>) {}
+    fn on_night_phase(&mut self, _: &mut NeuronsSoA, _: &mut SynapsesSoA, _: Option<IValue>) {}
 }
 
 impl Clone for Box<dyn NanoModule> {
@@ -301,14 +369,17 @@ impl ModuleManager {
         use rayon::prelude::*;
 
         for tier_indices in &self.tiered_indices {
-            // Parallel execution within the tier.
-            // We use par_iter() on indices and then access modules.
-            // Since tiered_indices ensures each module belongs to exactly one tier
-            // and we execute tiers sequentially, this is safe.
             self.modules.par_iter_mut().enumerate()
                 .filter(|(idx, _)| tier_indices.contains(idx))
                 .for_each(|(_, m)| {
                     m.on_tick(bus, previous_spikes, tick);
+
+                    // Apply requested global signal modulations
+                    for (sig_id, delta) in m.get_global_modulations() {
+                        if sig_id < bus.global_signals.len() {
+                            InputBus::atomic_saturating_add(&bus.global_signals[sig_id], delta);
+                        }
+                    }
                 });
         }
     }

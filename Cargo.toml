@@ -5,6 +5,7 @@ members = [
     "genesis-compute",
     "genesis-node",
     "nano-cli",
+    "genesis-python",
 ]
 resolver = "2"
 

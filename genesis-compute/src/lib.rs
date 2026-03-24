@@ -5,6 +5,10 @@ pub mod cpu;
 pub mod kernels;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
+#[cfg(feature = "cpp")]
+pub mod cpp_backend;
+#[cfg(feature = "cuda")]
+pub mod cuda_backend;
 
 #[derive(Error, Debug)]
 pub enum BackendError {
@@ -76,6 +80,9 @@ pub trait ComputeBackend {
     /// Synchronizes device-resident state (GPU) back to the CPU model buffers.
     fn sync_state(&mut self, _model: &mut BakedModel) {}
 
+    /// Rebuilds internal indices (CSR or GPU buffers) for efficient simulation.
+    fn rebuild_index(&mut self, _model: &BakedModel) {}
+
     /// Returns the display name of the backend.
     fn name(&self) -> &'static str;
 }
@@ -91,6 +98,10 @@ pub struct KernelContext<'a> {
 pub use cpu::CpuBackend;
 #[cfg(feature = "wgpu")]
 pub use wgpu::WgpuBackend;
+#[cfg(feature = "cpp")]
+pub use cpp_backend::CppBackend;
+#[cfg(feature = "cuda")]
+pub use cuda_backend::CudaBackend;
 
 pub struct BackendRegistry {
     pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Option<Box<dyn ComputeBackend + Send + Sync>>>>,
@@ -102,6 +113,10 @@ impl BackendRegistry {
         registry.register("cpu", || Some(Box::new(CpuBackend::default())));
         #[cfg(feature = "wgpu")]
         registry.register("wgpu", || WgpuBackend::new().ok().map(|b| Box::new(b) as Box<dyn ComputeBackend + Send + Sync>));
+        #[cfg(feature = "cpp")]
+        registry.register("cpp", || Some(Box::new(CppBackend::default())));
+        #[cfg(feature = "cuda")]
+        registry.register("cuda", || Some(Box::new(CudaBackend::default())));
         registry
     }
 

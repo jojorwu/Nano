@@ -31,6 +31,8 @@ pub struct InputBus {
     pub distal_idx: usize,
     pub apical_idx: usize,
     pub basal_idx: usize,
+    /// Global broadcast signals (Hormones/Neuromodulators)
+    pub global_signals: Vec<AtomicI32>,
 }
 
 impl InputBus {
@@ -57,10 +59,13 @@ impl InputBus {
         add_chan("modality:audio");
         add_chan("modality:other");
 
+        let global_signals = (0..16).map(|_| AtomicI32::new(0)).collect();
+
         Self {
             size,
             channels,
             name_map,
+            global_signals,
             proximal_idx,
             distal_idx,
             apical_idx,
@@ -107,6 +112,7 @@ impl InputBus {
         self.channels.par_iter().for_each(|chan| {
             chan.par_iter().for_each(|v| v.store(0, Ordering::Relaxed));
         });
+        self.global_signals.iter().for_each(|v| v.store(0, Ordering::Relaxed));
     }
 
     /// Faster clear when unique access is available, using raw memory fill.
@@ -117,6 +123,9 @@ impl InputBus {
             unsafe {
                 std::ptr::write_bytes(ptr, 0, len);
             }
+        }
+        for v in &mut self.global_signals {
+            v.store(0, Ordering::Relaxed);
         }
     }
 
