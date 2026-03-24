@@ -11,6 +11,15 @@ extern "C" {
         previous_spikes: *const bool,
         neurons: NeuronsFFI
     );
+
+    fn cpp_update_neurons(
+        neurons: NeuronsFFI,
+        current_tick: u32,
+        new_spikes: *mut bool,
+        ip_inc: i32,
+        ip_dec: i32,
+        noise_amp: i32
+    );
 }
 
 pub struct CppBackend {
@@ -51,13 +60,27 @@ impl ComputeBackend for CppBackend {
                 None
             }
             SimulationKernel::UpdateMembranePotentials => {
-                // For now, delegate back to CPU backend or implement in C++
+                // Potential updates are handled within GenerateSpikes for this backend
                 None
             }
             SimulationKernel::GenerateSpikes => {
-                // Delegate to CPU logic for now to ensure parity while we migrate kernels
-                let mut cpu = crate::cpu::CpuBackend::default();
-                cpu.execute_kernel(SimulationKernel::GenerateSpikes, model, ctx)
+                let n_count = model.neurons.len();
+                let mut new_spikes = vec![false; n_count];
+
+                unsafe {
+                    cpp_update_neurons(
+                        model.neurons.as_ffi(),
+                        ctx.current_tick,
+                        new_spikes.as_mut_ptr(),
+                        model.config.ip_increment,
+                        model.config.ip_decay,
+                        model.config.noise_amplitude
+                    );
+                }
+
+                let active_indices: Vec<usize> = new_spikes.iter().enumerate()
+                    .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+                Some(SpikeData::Sparse(active_indices))
             }
             SimulationKernel::ApplyModulation(_) => None,
         }
