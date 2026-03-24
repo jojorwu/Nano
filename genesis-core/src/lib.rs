@@ -111,6 +111,20 @@ pub struct PlasticityContext<'a> {
     pub neurons: &'a NeuronsSoA,
 }
 
+impl<'a> PlasticityContext<'a> {
+    /// Calculates the combined modulation factor based on chemical state and SMBP.
+    pub fn get_modulation_gain(&self) -> i64 {
+        let neuromod = SCALE as i64 + self.neuromodulation.noradrenaline as i64;
+        let dopamine = SCALE as i64 + self.neuromodulation.dopamine.abs() as i64;
+        let smbp = if self.compartment != Compartment::Proximal {
+            SCALE as i64 + self.backprop_signal as i64
+        } else {
+            SCALE as i64
+        };
+        (neuromod * dopamine * smbp) >> 20
+    }
+}
+
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
     fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
@@ -134,19 +148,8 @@ impl PlasticityRule for GsopRule {
             _ => self.learning_rate / 2,
         };
 
-        let smbp_mod = if ctx.compartment != Compartment::Proximal {
-            SCALE as i64 + ctx.backprop_signal as i64
-        } else {
-            SCALE as i64
-        };
-
-        let neuromod_gain = SCALE as i64 + ctx.neuromodulation.noradrenaline as i64;
-        let dopamine_gain = SCALE as i64 + ctx.neuromodulation.dopamine.abs() as i64;
-
-        let lr_f = (lr as i64 * neuromod_gain) >> 10;
-        let lr_f = (lr_f * dopamine_gain) >> 10;
-        let lr_f = (lr_f * smbp_mod) >> 10;
-        let lr_final = lr_f as i32;
+        let lr_final = (lr as i64 * ctx.get_modulation_gain()) >> 10;
+        let lr_final = lr_final as i32;
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
         let lr_mod = lr_final * reward_mod;

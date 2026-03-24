@@ -4,7 +4,6 @@ mod tests {
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
 
     fn create_test_runtime(n_count: usize) -> Runtime {
         let model = BakedModel {

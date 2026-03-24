@@ -17,21 +17,7 @@ pub struct GpuNeuronState {
     pub base_threshold: i32,
 }
 
-pub struct WgpuBackend {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub potential_pipeline: wgpu::ComputePipeline,
-    pub propagation_pipeline: wgpu::ComputePipeline,
-    pub gsop_pipeline: wgpu::ComputePipeline,
-    pub latent_accum_pipeline: wgpu::ComputePipeline,
-    pub latent_distrib_pipeline: wgpu::ComputePipeline,
-    pub potential_layout: wgpu::BindGroupLayout,
-    pub gsop_layout: wgpu::BindGroupLayout,
-    pub latent_accum_layout: wgpu::BindGroupLayout,
-    pub latent_distrib_layout: wgpu::BindGroupLayout,
-    pub propagation_layout: wgpu::BindGroupLayout,
-    pub tick_layout: wgpu::BindGroupLayout,
-    // Cached Buffers
+pub struct GpuResources {
     pub neuron_state_buffer: Option<wgpu::Buffer>,
     pub distal_buffer: Option<wgpu::Buffer>,
     pub proximal_buffer: Option<wgpu::Buffer>,
@@ -66,6 +52,23 @@ pub struct WgpuBackend {
     pub stp_resources_buffer: Option<wgpu::Buffer>,
     pub stp_calcium_buffer: Option<wgpu::Buffer>,
     pub modulation_buffer: Option<wgpu::Buffer>,
+}
+
+pub struct WgpuBackend {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub potential_pipeline: wgpu::ComputePipeline,
+    pub propagation_pipeline: wgpu::ComputePipeline,
+    pub gsop_pipeline: wgpu::ComputePipeline,
+    pub latent_accum_pipeline: wgpu::ComputePipeline,
+    pub latent_distrib_pipeline: wgpu::ComputePipeline,
+    pub potential_layout: wgpu::BindGroupLayout,
+    pub gsop_layout: wgpu::BindGroupLayout,
+    pub latent_accum_layout: wgpu::BindGroupLayout,
+    pub latent_distrib_layout: wgpu::BindGroupLayout,
+    pub propagation_layout: wgpu::BindGroupLayout,
+    pub tick_layout: wgpu::BindGroupLayout,
+    pub resources: GpuResources,
     pub bind_group: Option<wgpu::BindGroup>,
     pub tick_bind_group: Option<wgpu::BindGroup>,
     pub lr_bind_group: Option<wgpu::BindGroup>,
@@ -170,18 +173,22 @@ impl WgpuBackend {
         let latent_accum_pipeline = Self::create_pipeline(&device, "Latent Accum", &latent_accum_layout, &latent_accum_tick_layout, &latent_accum_shader);
         let latent_distrib_pipeline = Self::create_pipeline(&device, "Latent Distrib", &latent_distrib_layout, &tick_layout, &latent_distrib_shader);
 
-        Ok(Self {
-            device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
-            potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, propagation_layout, tick_layout,
+        let resources = GpuResources {
             neuron_state_buffer: None, distal_buffer: None, proximal_buffer: None, apical_buffer: None, basal_buffer: None,
             spikes_buffer: None, sparse_spike_buffer: None, spike_counter_buffer: None, input_buffer: None,
             interval_buffer: None, gate_threshold_buffer: None, expert_mask_buffer: None, dendritic_gate_buffer: None,
             weight_buffer: None, source_buffer: None, target_buffer: None, compartment_buffer: None,
-            pre_spike_buffer: None, post_spike_buffer: None,
-            u_matrix_buffer: None, v_matrix_buffer: None, latent_state_buffer: None, config_uniform_buffer: None,
-            tick_buffer: None, lr_buffer: None, staging_spikes: None, staging_counter: None, staging_state: None,
-            is_excitatory_buffer: None, spike_history_buffer: None, delay_buffer: None,
-            stp_resources_buffer: None, stp_calcium_buffer: None, modulation_buffer: None,
+            pre_spike_buffer: None, post_spike_buffer: None, u_matrix_buffer: None, v_matrix_buffer: None,
+            latent_state_buffer: None, config_uniform_buffer: None, tick_buffer: None, lr_buffer: None,
+            staging_spikes: None, staging_counter: None, staging_state: None, is_excitatory_buffer: None,
+            spike_history_buffer: None, delay_buffer: None, stp_resources_buffer: None, stp_calcium_buffer: None,
+            modulation_buffer: None,
+        };
+
+        Ok(Self {
+            device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
+            potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, propagation_layout, tick_layout,
+            resources,
             bind_group: None, tick_bind_group: None, lr_bind_group: None,
             cached_neuron_count: 0, cached_synapse_count: 0
         })
@@ -264,12 +271,14 @@ impl ComputeBackend for WgpuBackend {
         let s_count = model.synapses.len();
         if s_count == 0 { return; }
 
+        let res = &mut self.resources;
+
         // 1. Ensure buffers are ready and uploaded
-        Self::ensure_buffer(&self.device, &mut self.weight_buffer, "Weight Buffer", &model.synapses.weight, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, false);
-        Self::ensure_buffer(&self.device, &mut self.source_buffer, "Source Buffer", &model.synapses.source_index, wgpu::BufferUsages::STORAGE, false);
-        Self::ensure_buffer(&self.device, &mut self.target_buffer, "Target Buffer", &model.synapses.target_index, wgpu::BufferUsages::STORAGE, false);
+        Self::ensure_buffer(&self.device, &mut res.weight_buffer, "Weight Buffer", &model.synapses.weight, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, false);
+        Self::ensure_buffer(&self.device, &mut res.source_buffer, "Source Buffer", &model.synapses.source_index, wgpu::BufferUsages::STORAGE, false);
+        Self::ensure_buffer(&self.device, &mut res.target_buffer, "Target Buffer", &model.synapses.target_index, wgpu::BufferUsages::STORAGE, false);
         let comp_u32: Vec<u32> = model.synapses.compartment.iter().map(|&c| c as u32).collect();
-        Self::ensure_buffer(&self.device, &mut self.compartment_buffer, "Compartment Buffer", &comp_u32, wgpu::BufferUsages::STORAGE, false);
+        Self::ensure_buffer(&self.device, &mut res.compartment_buffer, "Compartment Buffer", &comp_u32, wgpu::BufferUsages::STORAGE, false);
 
         // Prepare GpuNeuronState buffer
         let n_count = model.neurons.len();
@@ -288,46 +297,46 @@ impl ComputeBackend for WgpuBackend {
                 base_threshold: model.neurons.base_threshold[i],
             });
         }
-        Self::ensure_buffer(&self.device, &mut self.neuron_state_buffer, "Neuron State Buffer", &states, wgpu::BufferUsages::STORAGE, true);
+        Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State Buffer", &states, wgpu::BufferUsages::STORAGE, true);
 
         // Convert bool spikes to u32 for WGSL compatibility
         let pre_u32: Vec<u32> = previous_spikes.iter().map(|&s| if s { 1 } else { 0 }).collect();
         let post_u32: Vec<u32> = current_spikes.iter().map(|&s| if s { 1 } else { 0 }).collect();
-        Self::ensure_buffer(&self.device, &mut self.pre_spike_buffer, "Pre Spike Buffer", &pre_u32, wgpu::BufferUsages::STORAGE, true);
-        Self::ensure_buffer(&self.device, &mut self.post_spike_buffer, "Post Spike Buffer", &post_u32, wgpu::BufferUsages::STORAGE, true);
+        Self::ensure_buffer(&self.device, &mut res.pre_spike_buffer, "Pre Spike Buffer", &pre_u32, wgpu::BufferUsages::STORAGE, true);
+        Self::ensure_buffer(&self.device, &mut res.post_spike_buffer, "Post Spike Buffer", &post_u32, wgpu::BufferUsages::STORAGE, true);
 
         // Upload modulation and learning rate
         let mod_data = [modulation.dopamine, modulation.noradrenaline, modulation.serotonin, 0];
-        Self::ensure_buffer(&self.device, &mut self.modulation_buffer, "Modulation Buffer", &mod_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        Self::ensure_buffer(&self.device, &mut res.modulation_buffer, "Modulation Buffer", &mod_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
 
         let lr_data = [model.config.learning_rate];
-        Self::ensure_buffer(&self.device, &mut self.lr_buffer, "LR Buffer", &lr_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        Self::ensure_buffer(&self.device, &mut res.lr_buffer, "LR Buffer", &lr_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
 
         // 2. Create Bind Groups
         // Ensure excitatory buffer is ready and uploaded (cached)
         let excit_u32: Vec<u32> = model.synapses.source_index.iter().map(|&s| if model.neurons.is_excitatory[s as usize] { 1u32 } else { 0u32 }).collect();
-        Self::ensure_buffer(&self.device, &mut self.is_excitatory_buffer, "Excitatory Buffer", &excit_u32, wgpu::BufferUsages::STORAGE, false);
+        Self::ensure_buffer(&self.device, &mut res.is_excitatory_buffer, "Excitatory Buffer", &excit_u32, wgpu::BufferUsages::STORAGE, false);
 
         let gsop_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GSOP Bind Group"),
             layout: &self.gsop_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.weight_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.source_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.target_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.pre_spike_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.post_spike_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.compartment_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: self.neuron_state_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: self.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: self.modulation_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: res.weight_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: res.source_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: res.target_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: res.pre_spike_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: res.post_spike_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: res.compartment_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: res.neuron_state_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: res.is_excitatory_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: res.modulation_buffer.as_ref().unwrap().as_entire_binding() },
             ],
         });
 
         let lr_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("LR Bind Group"),
             layout: &self.tick_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.lr_buffer.as_ref().unwrap().as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: res.lr_buffer.as_ref().unwrap().as_entire_binding() }],
         });
 
         // 3. Dispatch
@@ -347,7 +356,7 @@ impl ComputeBackend for WgpuBackend {
         cpu.structural_plasticity(model, reward, history);
     }
     fn sync_state(&mut self, model: &mut BakedModel) {
-        if let Some(ref buffer) = self.weight_buffer {
+        if let Some(ref buffer) = self.resources.weight_buffer {
             let size = buffer.size();
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Weight Staging Buffer"),
@@ -378,9 +387,6 @@ impl ComputeBackend for WgpuBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use genesis_core::{NeuronsSoA, SynapsesSoA};
-
     #[test]
     fn test_membrane_potential_calc() {
         use crate::kernels::calculate_membrane_potential;

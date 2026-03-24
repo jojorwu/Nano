@@ -51,7 +51,7 @@ struct SimulationSession {
 }
 
 impl SimulationSession {
-    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Self {
+    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Result<Self, String> {
         let mut settings = if let Ok(content) = fs::read_to_string("nano.toml") {
             let global: GlobalConfig = toml::from_str(&content).unwrap_or_else(|_| GlobalConfig { simulation: None, network: None });
             global.simulation.unwrap_or_default()
@@ -63,7 +63,7 @@ impl SimulationSession {
             settings.preferred_backend = backend_override;
         }
 
-        let mut runtime = Runtime::load_with_settings(model_path, settings).expect("Failed to load model");
+        let mut runtime = Runtime::load_with_settings(model_path, settings).map_err(|e| format!("Failed to load model: {}", e))?;
 
         if let Ok(content) = fs::read_to_string("nano.toml") {
              if let Ok(global) = toml::from_str::<GlobalConfig>(&content) {
@@ -76,7 +76,7 @@ impl SimulationSession {
         if let Some(lr) = lr_override {
             runtime.engine.model.config.learning_rate = lr;
         }
-        Self { runtime }
+        Ok(Self { runtime })
     }
 
     fn run_multimodal(&mut self, text: Option<&str>, img_path: Option<&str>, byte_level: bool) {
@@ -161,7 +161,7 @@ vocab_size = 1000
             println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
-            let mut session = SimulationSession::new(model, *learning_rate, backend.clone());
+            let mut session = SimulationSession::new(model, *learning_rate, backend.clone()).expect("Session init failed");
             session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level);
             session.finish(model);
         }
@@ -200,7 +200,7 @@ vocab_size = 1000
             println!("🚀 Model '{}' exported to {}. Use ./run.sh to start the interactive console.", name, dir);
         }
         Commands::Shell { model, backend } => {
-            let mut session = SimulationSession::new(model, None, backend.clone());
+            let mut session = SimulationSession::new(model, None, backend.clone()).expect("Session init failed");
             println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.engine.backend.name());
             println!("Type 'help' for a list of commands.");
 

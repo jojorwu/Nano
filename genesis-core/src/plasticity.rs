@@ -20,26 +20,17 @@ impl crate::PlasticityRule for StdpRule {
         let pre_spiked = ctx.pre_spiked;
         let post_spiked = ctx.post_spiked;
 
-        // SMBP Modulation: backpropagation signal amplifies LTP
-        let smbp_mod = if ctx.compartment != crate::Compartment::Proximal {
-            (crate::SCALE + ctx.backprop_signal) as i64
-        } else {
-            crate::SCALE as i64
-        };
-
-        // Neuromodulation: Noradrenaline (surprise) amplifies temporal learning
-        let neuromod_mod = (crate::SCALE + ctx.neuromodulation.noradrenaline) as i64;
-        let dopamine_mod = (crate::SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
+        let modulation_gain = ctx.get_modulation_gain();
 
         // 1. Reward-modulated update (R-STDP component)
         if let Some(reward) = ctx.reward {
              if pre_spiked && post_spiked {
-                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * smbp_mod * dopamine_mod) >> 40) as i32;
+                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * modulation_gain) >> 40) as i32;
                 *weight = weight.saturating_add(delta);
             }
         } else {
              if pre_spiked && post_spiked {
-                let delta = (self.a_plus as i64 * smbp_mod * neuromod_mod >> 21) as i32;
+                let delta = (self.a_plus as i64 * modulation_gain >> 20) as i32;
                 *weight = weight.saturating_add(delta);
             }
         }

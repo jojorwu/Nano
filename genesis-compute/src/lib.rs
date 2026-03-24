@@ -142,9 +142,7 @@ mod tests {
 
     #[test]
     fn test_backend_parity() {
-        #[cfg(feature = "wgpu")]
-        use crate::wgpu::GpuNeuronState;
-        let mut model = BakedModel {
+        let model = BakedModel {
             version: "4.2".to_string(),
             config: genesis_core::NetworkConfig { learning_rate: 100, ..Default::default() },
             node_id: 0,
