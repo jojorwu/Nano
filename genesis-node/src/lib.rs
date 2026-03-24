@@ -258,6 +258,47 @@ impl Runtime {
     pub fn handle_command(&mut self, cmd: &str) -> String {
         commands::CommandProcessor::handle(&mut self.engine, cmd)
     }
+
+    /// Processes an input burst (event-driven mode).
+    /// Executes ticks automatically until activity stabilizes or a limit is reached.
+    pub fn process_burst(&mut self, external_inputs: &[i32], max_ticks: u32) -> Vec<bool> {
+        let mut total_spikes = vec![false; self.engine.model.neurons.len()];
+        let mut ticks_done = 0;
+        let mut last_spike_count = 0;
+
+        while ticks_done < max_ticks {
+            let current_spikes = self.tick(if ticks_done == 0 { external_inputs } else { &[] });
+            let current_count = current_spikes.iter().filter(|&&s| s).count();
+
+            for (i, &s) in current_spikes.iter().enumerate() {
+                if s { total_spikes[i] = true; }
+            }
+
+            // Stop if activity has settled (no spikes for 2 ticks or very low activity)
+            if current_count == 0 && last_spike_count == 0 {
+                break;
+            }
+
+            last_spike_count = current_count;
+            ticks_done += 1;
+        }
+
+        log::debug!("Burst completed in {} ticks", ticks_done);
+        total_spikes
+    }
+
+    /// High-level API: Process text without worrying about ticks.
+    pub fn process_text(&mut self, text: &str) -> Vec<bool> {
+        self.inject_text(text);
+        self.process_burst(&[], 32) // Allow up to 32 internal ticks for "thinking"
+    }
+
+    /// High-level API: Process image without worrying about ticks.
+    #[cfg(feature = "vision")]
+    pub fn process_image(&mut self, pixels: &[u8]) -> Vec<bool> {
+        self.inject_image(pixels);
+        self.process_burst(&[], 64)
+    }
 }
 
 #[cfg(test)]

@@ -442,7 +442,7 @@ pub struct BakedModel {
     pub module_states: HashMap<String, Vec<u8>>,
 
     #[cfg(feature = "titan")]
-    pub titan_memory: Option<crate::titan::TitanMemory>,
+    pub titan_memory: Option<crate::titan::BitWiseTitan>,
     #[cfg(feature = "text")]
     pub has_text: bool,
     #[cfg(feature = "vision")]

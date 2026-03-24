@@ -205,6 +205,16 @@ impl PipelineStage for ObservationStage {
             let l2_len = engine.state.l2_history.len();
             engine.state.l2_history[engine.state.l2_ptr] = summary;
             engine.state.l2_ptr = (engine.state.l2_ptr + 1) % l2_len;
+
+            // Update BitWise Titan Memory if present
+            for m in engine.modules.modules.iter_mut() {
+                if m.name() == "titan" {
+                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                        titan.learn_from_history(&engine.state.spikes_history, &engine.model.neurons, context.surprise);
+                        m.set_state(&bincode::serialize(&titan).unwrap());
+                    }
+                }
+            }
         }
 
         // Calculate surprise logic

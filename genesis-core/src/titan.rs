@@ -1,129 +1,95 @@
 use serde::{Deserialize, Serialize};
-use crate::{IValue, SCALE, NanoModule, NeuronsSoA, SynapsesSoA};
+use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TitanMemory {
-    /// Associative memory weights [input_neuron_count * output_neuron_count]
-    pub weights: Vec<IValue>,
-    pub permanent_weights: Vec<IValue>,
+pub struct BitWiseTitan {
+    /// Sparse Associative Memory: maps (input_block_id) -> Vec<(target_neuron_id, weight_counter)>
+    /// This drastically reduces memory for sparse networks.
+    pub sparse_associations: std::collections::HashMap<u32, Vec<Association>>,
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
-    pub moment: Vec<IValue>,
     pub decay_rate: IValue,
-    pub associative_size: usize,
 }
 
-impl TitanMemory {
-    pub fn new(size: usize, lr: IValue) -> Self {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Association {
+    pub target: u32,
+    pub weight: i16, // Using 16-bit counters for efficiency
+}
+
+impl BitWiseTitan {
+    pub fn new(lr: IValue) -> Self {
         Self {
-            weights: vec![0; size * size],
-            permanent_weights: vec![0; size * size],
+            sparse_associations: std::collections::HashMap::new(),
             learning_rate: lr,
             surprise_threshold: 100,
-            moment: vec![0; size * size],
             decay_rate: 1,
-            associative_size: size,
         }
     }
 
-    /// Three-Factor STDP: update = (pre * post * modulator)
-    /// Here 'modulator' is the 'surprise' signal.
-    pub fn step_three_factor(&mut self, pre_pattern: &[bool], post_pattern: &[bool], surprise: IValue, serotonin: IValue) {
-        // Gating Mechanism: Forgetting is modulated by surprise and serotonin.
-        // High serotonin (stability) reduces decay rate.
-        let dynamic_decay = if surprise < self.surprise_threshold {
-            self.decay_rate * 2
-        } else {
-            self.decay_rate / 2
-        };
+    /// Three-Factor Learning using BitPacked history for speed
+    pub fn learn_from_history(&mut self, history: &[crate::SpikeData], neurons: &NeuronsSoA, surprise: IValue) {
+        if surprise < self.surprise_threshold { return; }
 
-        let dynamic_decay = (dynamic_decay as i64 * (SCALE - serotonin).max(100) as i64) >> 10;
-        let dynamic_decay = dynamic_decay as i32;
+        let n_count = neurons.len();
+        if history.len() < 2 { return; }
 
-        if dynamic_decay > 0 {
-            for w in self.weights.iter_mut() {
-                if *w != 0 {
-                    let decay = ((*w as i64 * dynamic_decay as i64) >> 10) as i32;
-                    *w = w.saturating_sub(decay);
+        let now = history[0].to_bitpacked(n_count);
+        let past = history[1].to_bitpacked(n_count);
+
+        // Find co-active blocks
+        for (i, &past_word) in past.iter().enumerate() {
+            if past_word == 0 { continue; }
+            for bit in 0..64 {
+                if (past_word >> bit) & 1 == 1 {
+                    let src_idx = i * 64 + bit;
+                    if src_idx >= n_count { continue; }
+                    let src_bid = neurons.block_id[src_idx];
+
+                    let entries = self.sparse_associations.entry(src_bid).or_insert_with(Vec::new);
+
+                    // Update connections to neurons that are firing NOW
+                    for (j, &now_word) in now.iter().enumerate() {
+                        if now_word == 0 { continue; }
+                        for now_bit in 0..64 {
+                            if (now_word >> now_bit) & 1 == 1 {
+                                let tgt_idx = (j * 64 + now_bit) as u32;
+                                if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
+                                    assoc.weight = assoc.weight.saturating_add(1);
+                                } else if entries.len() < 100 { // Limit fan-out per block for stability
+                                    entries.push(Association { target: tgt_idx, weight: 1 });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Three-Factor Learning: Only update if there is significant surprise (neuromodulation)
-        if surprise > self.surprise_threshold {
-            let update_base = (surprise as i64 * self.learning_rate as i64) >> 10;
-            let update = update_base as i32;
-
-            // Optimized Sparse Loops: Avoid Vec allocation and multiple passes
-            for (i, &pre_spiked) in pre_pattern.iter().take(self.associative_size).enumerate() {
-                if !pre_spiked { continue; }
-                let offset = i * self.associative_size;
-                for (j, &post_spiked) in post_pattern.iter().take(self.associative_size).enumerate() {
-                    if !post_spiked { continue; }
-                    let idx = offset + j;
-
-                    self.moment[idx] = (self.moment[idx] * 8 + update * 2) / 10;
-                    self.weights[idx] = self.weights[idx].saturating_add(self.moment[idx]);
-
-                    // Slow consolidation into permanent memory
-                    let slow_update = self.moment[idx] / 10;
-                    self.permanent_weights[idx] = self.permanent_weights[idx].saturating_add(slow_update);
-
-                    // Clamp
-                    if self.weights[idx] > 10000 { self.weights[idx] = 10000; }
-                    if self.weights[idx] < -10000 { self.weights[idx] = -10000; }
-                }
-            }
-        }
-    }
-
-    pub fn retrieve(&self, input_pattern: &[bool], output_potentials: &mut [IValue]) {
-        let in_len = input_pattern.len().min(self.associative_size);
-        let out_len = output_potentials.len().min(self.associative_size);
-
-        // Optimized Sparse Retrieval
-        for (i, &spiked) in input_pattern.iter().take(in_len).enumerate() {
-            if spiked {
-                let offset = i * self.associative_size;
-                for j in 0..out_len {
-                    let val = self.weights[offset + j].saturating_add(self.permanent_weights[offset + j]);
-                    output_potentials[j] = output_potentials[j].saturating_add(val);
-                }
+        // Periodic Decay
+        if surprise > 500 {
+            for associations in self.sparse_associations.values_mut() {
+                associations.retain_mut(|a| {
+                    a.weight = a.weight.saturating_sub(1);
+                    a.weight > 0
+                });
             }
         }
     }
 }
 
-impl NanoModule for TitanMemory {
+impl NanoModule for BitWiseTitan {
     fn name(&self) -> &str { "titan" }
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
-    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
-        let dist = bus.distal();
-        let n_len = dist.len();
-        let in_len = previous_spikes.len().min(self.associative_size);
-        let out_len = n_len.min(self.associative_size);
-
-        // Memory as Context (S-MAC): Directly inject into distal dendrites without extra vector allocation
-        for (i, &spiked) in previous_spikes.iter().take(in_len).enumerate() {
-            if spiked {
-                let offset = i * self.associative_size;
-                for j in 0..out_len {
-                    let val = self.weights[offset + j].saturating_add(self.permanent_weights[offset + j]);
-                    crate::InputBus::atomic_saturating_add(&dist[j], val);
-                }
-            }
-        }
+    fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+        // Retrieval is now predominantly handled by the backend or specialized calls
+        // to maintain sparse efficiency.
     }
 
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
-        if let Some(s) = surprise {
-            let min_len = self.associative_size.min(previous_spikes.len()).min(current_spikes.len());
-            // Deriving a serotonin-like stability signal from the inverse of surprise for now
-            let serotonin = (SCALE - s).max(0);
-            self.step_three_factor(&previous_spikes[..min_len], &current_spikes[..min_len], s, serotonin);
-        }
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _surprise: Option<IValue>) {
+        // We now use the specialized history-based learning in the pipeline.
     }
 
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
@@ -153,23 +119,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_titan_three_factor() {
-        let mut titan = TitanMemory::new(4, 100);
-        // High surprise (500 > 100 threshold) triggers learning
-        titan.step_three_factor(&[true, false, false, false], &[false, true, false, false], 500, 500);
-
-        let mut potentials = vec![0; 4];
-        titan.retrieve(&[true, false, false, false], &mut potentials);
-        assert!(potentials[1] > 0);
-    }
-
-    #[test]
-    fn test_titan_forgetting() {
-        let mut titan = TitanMemory::new(4, 100);
-        titan.weights[0] = 1000;
-        titan.decay_rate = 10;
-        // Low surprise (50 < 100 threshold) triggers faster forgetting
-        titan.step_three_factor(&[false; 4], &[false; 4], 50, 0);
-        assert!(titan.weights[0] < 1000);
+    fn test_bitwise_titan_init() {
+        let titan = BitWiseTitan::new(100);
+        assert_eq!(titan.sparse_associations.len(), 0);
     }
 }

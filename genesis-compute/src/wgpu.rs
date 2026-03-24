@@ -21,6 +21,13 @@ pub struct GpuNeuronState {
     pub block_id: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Association {
+    pub target: u32,
+    pub weight: i32,
+}
+
 pub struct GpuResources {
     pub neuron_state_buffer: Option<wgpu::Buffer>,
     pub distal_buffer: Option<wgpu::Buffer>,
@@ -68,6 +75,7 @@ pub struct WgpuBackend {
     pub gsop_pipeline: wgpu::ComputePipeline,
     pub latent_accum_pipeline: wgpu::ComputePipeline,
     pub latent_distrib_pipeline: wgpu::ComputePipeline,
+    pub titan_retrieval_pipeline: wgpu::ComputePipeline,
     pub potential_layout: wgpu::BindGroupLayout,
     pub gsop_layout: wgpu::BindGroupLayout,
     pub latent_accum_layout: wgpu::BindGroupLayout,
@@ -103,6 +111,7 @@ impl WgpuBackend {
         let gsop_shader = Self::create_shader(&device, "gsop_update", include_str!("shaders/gsop_update.wgsl"));
         let latent_accum_shader = Self::create_shader(&device, "latent_accum", include_str!("shaders/latent_accum.wgsl"));
         let latent_distrib_shader = Self::create_shader(&device, "latent_distrib", include_str!("shaders/latent_distrib.wgsl"));
+        let titan_shader = Self::create_shader(&device, "titan_retrieval", include_str!("shaders/titan_bit_retrieval.wgsl"));
 
         let potential_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Potential Layout"),
@@ -180,6 +189,18 @@ impl WgpuBackend {
         let latent_accum_pipeline = Self::create_pipeline(&device, "Latent Accum", &latent_accum_layout, &latent_accum_tick_layout, &latent_accum_shader);
         let latent_distrib_pipeline = Self::create_pipeline(&device, "Latent Distrib", &latent_distrib_layout, &tick_layout, &latent_distrib_shader);
 
+        let titan_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Titan Layout"),
+            entries: &[
+                Self::storage_entry(0, true), // associations
+                Self::storage_entry(1, true), // offsets
+                Self::storage_entry(2, true), // spikes
+                Self::storage_entry(3, true), // block_ids
+                Self::storage_entry(4, false), // distal_potentials
+            ],
+        });
+        let titan_retrieval_pipeline = Self::create_pipeline(&device, "Titan Retrieval", &titan_layout, &tick_layout, &titan_shader);
+
         let resources = GpuResources {
             neuron_state_buffer: None, distal_buffer: None, proximal_buffer: None, apical_buffer: None, basal_buffer: None,
             spikes_buffer: None, sparse_spike_buffer: None, spike_counter_buffer: None, input_buffer: None,
@@ -196,6 +217,7 @@ impl WgpuBackend {
 
         Ok(Self {
             device, queue, potential_pipeline, propagation_pipeline, gsop_pipeline, latent_accum_pipeline, latent_distrib_pipeline,
+            titan_retrieval_pipeline,
             potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, propagation_layout, tick_layout,
             resources,
             bind_group: None, tick_bind_group: None, lr_bind_group: None,
@@ -420,7 +442,48 @@ impl ComputeBackend for WgpuBackend {
             pass.dispatch_workgroups((s_count as u32 + 63) / 64, 1, 1);
         }
 
-        // 3. Dispatch Potential Update
+        // 3. Dispatch Titan Retrieval (Sparse Associative Memory)
+        if let Some(mut titan_state) = model.module_states.get("titan").and_then(|s| bincode::deserialize::<genesis_core::titan::BitWiseTitan>(s).ok()) {
+            let mut all_assocs = Vec::new();
+            let mut offsets = vec![0u32];
+            let max_bid = model.neurons.block_id.iter().max().copied().unwrap_or(0);
+
+            for bid in 0..=max_bid {
+                if let Some(assocs) = titan_state.sparse_associations.get(&bid) {
+                    for a in assocs {
+                        all_assocs.push(Association { target: a.target, weight: a.weight as i32 });
+                    }
+                }
+                offsets.push(all_assocs.len() as u32);
+            }
+
+            if !all_assocs.is_empty() {
+                let mut titan_assocs_buffer = None;
+                let mut titan_offsets_buffer = None;
+                Self::ensure_buffer(&self.device, &mut titan_assocs_buffer, "Titan Assocs", &all_assocs, wgpu::BufferUsages::STORAGE, true);
+                Self::ensure_buffer(&self.device, &mut titan_offsets_buffer, "Titan Offsets", &offsets, wgpu::BufferUsages::STORAGE, true);
+
+                let titan_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Titan BG"),
+                    layout: &self.titan_retrieval_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: titan_assocs_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: titan_offsets_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: res.pre_spike_buffer.as_ref().unwrap_or(&res.input_buffer.as_ref().unwrap()).as_entire_binding() }, // Using pre_spikes (previous_spikes)
+                        wgpu::BindGroupEntry { binding: 3, resource: res.block_id_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: res.distal_buffer.as_ref().unwrap().as_entire_binding() },
+                    ],
+                });
+
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Titan Retrieval"), timestamp_writes: None });
+                pass.set_pipeline(&self.titan_retrieval_pipeline);
+                pass.set_bind_group(0, &titan_bg, &[]);
+                pass.set_bind_group(1, &tick_bg, &[]);
+                pass.dispatch_workgroups((n_count as u32 + 63) / 64, 1, 1);
+            }
+        }
+
+        // 4. Dispatch Potential Update
         let pot_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Pot BG"),
             layout: &self.potential_layout,

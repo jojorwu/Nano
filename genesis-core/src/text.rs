@@ -72,6 +72,9 @@ impl NanoModule for TextProcessorModule {
     }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+        // In burst mode, we might process multiple tokens if the bus is cleared between them.
+        // For now, we keep the 1-token-per-tick cadence but allow the Runtime's process_burst
+        // to handle the sequential extraction.
         if let Some(token) = self.last_tokens.get(0) {
             let pattern = self.encode_token(*token);
             let prox = bus.proximal();
