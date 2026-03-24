@@ -80,6 +80,9 @@ pub trait ComputeBackend {
     /// Synchronizes device-resident state (GPU) back to the CPU model buffers.
     fn sync_state(&mut self, _model: &mut BakedModel) {}
 
+    /// Rebuilds internal indices (CSR or GPU buffers) for efficient simulation.
+    fn rebuild_index(&mut self, _model: &BakedModel) {}
+
     /// Returns the display name of the backend.
     fn name(&self) -> &'static str;
 }

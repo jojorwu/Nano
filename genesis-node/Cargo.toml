@@ -12,6 +12,8 @@ audio = ["genesis-core/audio"]
 rl = ["genesis-core/rl"]
 robotics = ["genesis-core/robotics"]
 fusion = ["genesis-core/fusion"]
+cpp = ["genesis-compute/cpp"]
+cuda = ["genesis-compute/cuda"]
 
 [dependencies]
 log = { workspace = true }

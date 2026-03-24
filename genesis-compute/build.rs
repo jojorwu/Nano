@@ -14,12 +14,14 @@ fn main() {
     }
 
     // CUDA build skeleton (uncomment when nvcc is available)
-    /*
-    if std::env::var("CUDA_HOME").is_ok() {
+    #[cfg(feature = "cuda")]
+    {
+        // Try to compile CUDA if nvcc is present, otherwise just re-run on change
         cc::Build::new()
             .cuda(true)
             .file("kernels/cuda_kernels.cu")
             .compile("genesis_cuda");
+        println!("cargo:rustc-link-lib=static=genesis_cuda");
+        println!("cargo:rustc-link-lib=cudart");
     }
-    */
 }

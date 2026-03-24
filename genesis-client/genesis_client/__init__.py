@@ -1,14 +1,33 @@
+import sys
+import os
+
+# Attempt to find the Rust extension library in common build locations
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_root = os.path.abspath(os.path.join(_current_dir, "..", ".."))
+
+_search_paths = [
+    _current_dir, # Packaged location
+    os.path.join(_repo_root, "target", "debug"),
+    os.path.join(_repo_root, "target", "release"),
+]
+
+for _path in _search_paths:
+    if os.path.exists(_path):
+        sys.path.append(_path)
+
 try:
-    from .genesis_python import PyRuntime
+    from genesis_python import PyRuntime
 except ImportError:
-    # If the shared library is not in the same directory, try loading from typical build locations
-    import sys
-    import os
-    # Placeholder for dynamic loading or user instructions
-    pass
+    # Fallback: check if it's already in path or installed
+    try:
+        from genesis_python import PyRuntime
+    except ImportError:
+        PyRuntime = None
 
 class NanoRuntime:
     def __init__(self, model_path: str, backend: str = "cpu"):
+        if PyRuntime is None:
+            raise ImportError("Could not find genesis_python shared library. Please build with 'cargo build -p genesis-python'.")
         self._inner = PyRuntime(model_path, backend)
 
     def tick(self, inputs: list[int]) -> list[bool]:
@@ -63,7 +82,7 @@ class BrainBuilder:
         return toml.dumps(data)
 
     def build(self, output_path: str):
-        with open("temp_blueprint.toml", "w") as f:
+        with open(output_path, "w") as f:
             f.write(self.to_toml())
         # Here we would call genesis-baker (potentially via FFI too)
-        print(f"Blueprint saved to temp_blueprint.toml. Run 'nano-cli bake' to create the model.")
+        print(f"Blueprint saved to {output_path}. Run 'nano-cli bake' to create the model.")

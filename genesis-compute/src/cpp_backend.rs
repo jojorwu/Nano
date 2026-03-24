@@ -1,21 +1,19 @@
-use genesis_core::{BakedModel, IValue, SpikeData, NeuromodulationState, NeuronsFFI};
+use genesis_core::{BakedModel, IValue, SpikeData, NeuromodulationState, NeuronsFFI, SynapsesFFI};
 use crate::{ComputeBackend, SimulationKernel, KernelContext};
 
 extern "C" {
     fn cpp_propagate_spikes(
-        source_indices: *const u32,
-        target_indices: *const u32,
-        weights: *const IValue,
-        compartments: *const u8,
-        synapse_count: u32,
+        synapses: SynapsesFFI,
         previous_spikes: *const bool,
         neurons: NeuronsFFI
     );
 
+    fn cpp_recover_stp(synapses: SynapsesFFI);
+
     fn cpp_update_neurons(
         neurons: NeuronsFFI,
         current_tick: u32,
-        new_spikes: *mut bool,
+        new_spikes: *mut u8,
         ip_inc: i32,
         ip_dec: i32,
         noise_amp: i32
@@ -39,23 +37,22 @@ impl ComputeBackend for CppBackend {
         match kernel {
             SimulationKernel::PropagateSynapses => {
                 let n_count = model.neurons.len();
-                // Apply external inputs directly to proximal potential
+                // Apply external inputs directly to proximal potential with dendritic gating
                 for (i, &val) in ctx.external_inputs.iter().enumerate() {
                     if i < n_count {
-                        model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(val);
+                        let gate = model.neurons.dendritic_gate[i];
+                        let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
+                        model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
                     }
                 }
 
                 unsafe {
                     cpp_propagate_spikes(
-                        model.synapses.source_index.as_ptr(),
-                        model.synapses.target_index.as_ptr(),
-                        model.synapses.weight.as_ptr(),
-                        model.synapses.compartment.as_ptr() as *const u8,
-                        model.synapses.len() as u32,
+                        model.synapses.as_ffi(),
                         ctx.previous_spikes.as_ptr(),
                         model.neurons.as_ffi()
                     );
+                    cpp_recover_stp(model.synapses.as_ffi());
                 }
                 None
             }
@@ -65,7 +62,7 @@ impl ComputeBackend for CppBackend {
             }
             SimulationKernel::GenerateSpikes => {
                 let n_count = model.neurons.len();
-                let mut new_spikes = vec![false; n_count];
+                let mut new_spikes = vec![0u8; n_count];
 
                 unsafe {
                     cpp_update_neurons(
@@ -79,7 +76,7 @@ impl ComputeBackend for CppBackend {
                 }
 
                 let active_indices: Vec<usize> = new_spikes.iter().enumerate()
-                    .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+                    .filter(|&(_, &s)| s != 0).map(|(i, _)| i).collect();
                 Some(SpikeData::Sparse(active_indices))
             }
             SimulationKernel::ApplyModulation(_) => None,

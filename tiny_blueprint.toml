@@ -1,0 +1,8 @@
+name = "TinyNano"
+[architecture]
+neuron_count = 10
+synapse_count = 50
+
+[[modules]]
+type = "TextProcessor"
+vocab_size = 100
