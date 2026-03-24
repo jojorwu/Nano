@@ -189,26 +189,26 @@ mod tests {
             let b = Arc::clone(&bus);
             std::thread::spawn(move || {
                 for i in 0..100 {
-                    InputBus::atomic_saturating_add(&b.proximal[i], 10);
+                    InputBus::atomic_saturating_add(&b.proximal()[i], 10);
                 }
             })
         }).collect();
 
         for t in threads { t.join().unwrap(); }
         for i in 0..100 {
-            assert_eq!(bus.proximal[i].load(Ordering::Relaxed), 100);
+            assert_eq!(bus.proximal()[i].load(Ordering::Relaxed), 100);
         }
 
         bus.clear();
-        assert_eq!(bus.proximal[0].load(Ordering::Relaxed), 0);
+        assert_eq!(bus.proximal()[0].load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn test_input_bus_clear_mut() {
         let mut bus = InputBus::new(100);
-        bus.proximal[50].store(500, Ordering::Relaxed);
+        bus.proximal()[50].store(500, Ordering::Relaxed);
         bus.clear_mut();
-        assert_eq!(bus.proximal[50].load(Ordering::Relaxed), 0);
+        assert_eq!(bus.proximal()[50].load(Ordering::Relaxed), 0);
     }
 
     #[test]

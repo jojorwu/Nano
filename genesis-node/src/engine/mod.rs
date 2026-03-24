@@ -4,6 +4,9 @@ use genesis_compute::ComputeBackend;
 use crate::SimulationSettings;
 use std::sync::{Arc, Mutex};
 
+pub mod pipeline;
+pub mod neuromodulation;
+
 pub struct SimulationEngine {
     pub model: BakedModel,
     pub state: SimulationState,
@@ -63,66 +66,17 @@ impl SimulationEngine {
         use rayon::prelude::*;
         use std::sync::atomic::Ordering;
         self.model.neurons.proximal_potential.par_iter_mut()
-            .zip(&self.input_bus.proximal)
+            .zip(self.input_bus.proximal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.distal_potential.par_iter_mut()
-            .zip(&self.input_bus.distal)
+            .zip(self.input_bus.distal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.apical_potential.par_iter_mut()
-            .zip(&self.input_bus.apical)
+            .zip(self.input_bus.apical())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
         self.model.neurons.basal_potential.par_iter_mut()
-            .zip(&self.input_bus.basal)
+            .zip(self.input_bus.basal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
     }
 
-    pub fn execute_thinking_cycles(&mut self, initial_spike_data: SpikeData) -> SpikeData {
-        let n_count = self.model.neurons.len();
-        let mut think_ticks = 0;
-        for m in &self.modules.modules {
-            if m.name() == "think" {
-                if let Some(tm) = m.as_any().downcast_ref::<genesis_core::ThinkModule>() {
-                    if tm.active { think_ticks = tm.extra_ticks; }
-                } else if let Ok(state) = bincode::deserialize::<genesis_core::ThinkModule>(&m.get_state()) {
-                     if state.active { think_ticks = state.extra_ticks; }
-                }
-                break;
-            }
-        }
-
-        if think_ticks > 0 {
-            let mut current_dense = vec![false; n_count];
-            match &initial_spike_data {
-                SpikeData::Sparse(indices) => { for &i in indices { if i < n_count { current_dense[i] = true; } } }
-                SpikeData::Dense(mask) => { for i in 0..n_count { if (mask[i/8] >> (i%8)) & 1 == 1 { current_dense[i] = true; } } }
-                _ => {}
-            }
-            self.backend.think_cycles(&mut self.model, &current_dense, think_ticks, self.state.tick_counter, self.state.global_modulators)
-        } else {
-            initial_spike_data
-        }
-    }
-
-    pub fn calculate_surprise(&mut self, current_spike_count: usize) -> i32 {
-        let current = current_spike_count as f32;
-        let surprise = (current - self.state.rolling_spike_count).abs();
-        self.state.rolling_spike_count = self.state.rolling_spike_count * 0.9 + current * 0.1;
-        let scaled_surprise = (surprise * 1024.0 / (self.state.rolling_spike_count + 1.0)) as i32;
-        scaled_surprise.min(2048)
-    }
-
-    pub fn prepare_merged_inputs(&mut self, external_inputs: &[i32]) {
-        let n_count = self.model.neurons.len();
-        self.state.merged_inputs_buffer.fill(0);
-        let merge_len = external_inputs.len().min(n_count);
-        self.state.merged_inputs_buffer[..merge_len].copy_from_slice(&external_inputs[..merge_len]);
-
-        let mut remote_spikes = self.remote_spike_queue.lock().unwrap();
-        for &idx in remote_spikes.iter() {
-            if idx < n_count {
-                self.state.merged_inputs_buffer[idx] = self.state.merged_inputs_buffer[idx].saturating_add(genesis_core::SCALE);
-            }
-        }
-        remote_spikes.clear();
-    }
 }

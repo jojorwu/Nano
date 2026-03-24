@@ -212,7 +212,7 @@ mod tests {
         runtime.tick(&vec![0; n_count]);
 
         // Fusion neuron (index 5) should have received combined signals
-        assert!(runtime.engine.input_bus.proximal[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert!(runtime.engine.input_bus.proximal()[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 
     #[test]

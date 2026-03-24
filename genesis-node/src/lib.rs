@@ -303,56 +303,38 @@ impl Runtime {
     }
 
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
+        use crate::engine::pipeline::{SimulationPipeline, PipelineContext};
+
         let start_time = std::time::Instant::now();
         let normalized_reward = self.prepare_reward(reward);
         self.engine.state.tick_counter = self.engine.state.tick_counter.wrapping_add(1);
-        let n_count = self.engine.model.neurons.len();
+        let tick = self.engine.state.tick_counter;
 
-        self.emit_event(SimulationEvent::TickStarted(self.engine.state.tick_counter));
+        self.emit_event(SimulationEvent::TickStarted(tick));
 
-        self.engine.reset_potential_buffers();
-        self.engine.prepare_merged_inputs(external_inputs);
+        let mut context = PipelineContext {
+            tick,
+            external_inputs: external_inputs.to_vec(),
+            reward,
+            normalized_reward,
+            surprise: 0,
+            start_time,
+        };
 
-        self.engine.input_bus.clear_mut();
-        self.engine.modules.on_tick(&self.engine.input_bus, &self.engine.state.previous_spikes, self.engine.state.tick_counter);
+        let mut pipeline = SimulationPipeline::new();
+        pipeline.execute(&mut self.engine, &mut context);
 
-        self.engine.finalize_potentials_from_bus();
-
-        let full_history = self.engine.reconstruct_history(16);
-        let spike_data = self.engine.backend.day_phase(&mut self.engine.model, &self.engine.state.merged_inputs_buffer, &self.engine.state.previous_spikes, &full_history, self.engine.state.tick_counter, self.engine.state.global_modulators);
-
-        let final_spike_data = self.engine.execute_thinking_cycles(spike_data);
-
-        // Convert final spike data to dense buffer for subsequent logic
-        self.engine.state.current_spikes_buffer.fill(false);
-        let mut spike_count = 0;
-        match &final_spike_data {
-            genesis_core::SpikeData::Sparse(indices) => {
-                spike_count = indices.len();
-                for &idx in indices { if idx < n_count { self.engine.state.current_spikes_buffer[idx] = true; } }
-            }
-            genesis_core::SpikeData::Dense(mask) => {
-                for i in 0..n_count {
-                    if (mask[i / 8] >> (i % 8)) & 1 == 1 {
-                        self.engine.state.current_spikes_buffer[i] = true;
-                        spike_count += 1;
-                    }
-                }
-            }
-            _ => {}
-        }
+        let final_spike_data = self.engine.state.spikes_history[self.engine.state.history_ptr].clone();
+        let spike_count = self.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
 
         self.emit_event(SimulationEvent::TickComplete {
-            tick: self.engine.state.tick_counter,
+            tick,
             spike_count,
-            data: final_spike_data.clone(),
+            data: final_spike_data,
             execution_time: start_time.elapsed(),
         });
 
-        let surprise = self.engine.calculate_surprise(spike_count);
-        self.emit_event(SimulationEvent::SurpriseDetected(surprise));
-
-        self.apply_neuromodulation(surprise, normalized_reward);
+        self.emit_event(SimulationEvent::SurpriseDetected(context.surprise));
 
         // Critical sync path for safety
         for obs in &mut self.observers {
@@ -361,13 +343,12 @@ impl Runtime {
             }
         }
 
-        self.engine.state.spikes_history[self.engine.state.history_ptr] = final_spike_data;
         self.engine.state.history_ptr = (self.engine.state.history_ptr + 1) % self.engine.state.spikes_history.len();
 
-        if self.engine.state.tick_counter > 0 && self.engine.state.tick_counter % self.settings.night_phase_interval == 0 {
-            self.emit_event(SimulationEvent::NightPhaseStarted(self.engine.state.tick_counter));
-            self.perform_night_phase(reward, normalized_reward, layer_mask, surprise);
-            self.emit_event(SimulationEvent::NightPhaseComplete(self.engine.state.tick_counter));
+        if tick > 0 && tick % self.settings.night_phase_interval == 0 {
+            self.emit_event(SimulationEvent::NightPhaseStarted(tick));
+            self.perform_night_phase(reward, normalized_reward, layer_mask, context.surprise);
+            self.emit_event(SimulationEvent::NightPhaseComplete(tick));
         }
 
         self.engine.state.previous_spikes.copy_from_slice(&self.engine.state.current_spikes_buffer);
@@ -385,16 +366,6 @@ impl Runtime {
         })
     }
 
-    fn apply_neuromodulation(&mut self, surprise: i32, normalized_reward: Option<i32>) {
-        self.engine.state.global_modulators.noradrenaline = surprise;
-        if let Some(r) = normalized_reward {
-            self.engine.state.global_modulators.dopamine = r;
-        } else {
-            self.engine.state.global_modulators.dopamine = (self.engine.state.global_modulators.dopamine * 9) / 10;
-        }
-        // Serotonin tracks long-term stability
-        self.engine.state.global_modulators.serotonin = (self.engine.state.global_modulators.serotonin * 99 + (1024 - surprise).max(0)) / 100;
-    }
 
     fn perform_night_phase(&mut self, raw_reward: Option<i32>, normalized_reward: Option<i32>, layer_mask: Option<u16>, surprise: i32) {
         let modulators = self.engine.state.global_modulators;

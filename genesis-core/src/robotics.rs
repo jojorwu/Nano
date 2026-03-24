@@ -41,13 +41,14 @@ impl NanoModule for SpikingCerebellumModule {
         // simulating the role of the cerebellum in temporal coordination.
         if self.delay_line.len() >= self.max_delay {
             let delayed = &self.delay_line[self.max_delay - 1];
+            let apical = bus.apical();
             for (i, &spiked) in delayed.iter().enumerate() {
                 if spiked {
                     // Inject into corresponding Purkinje (output) neurons' apical dendrites
                     if i < self.purkinje_indices.len() {
                         let target = self.purkinje_indices[i];
-                        if target < bus.apical.len() {
-                            crate::InputBus::atomic_saturating_add(&bus.apical[target], SCALE / 2);
+                        if target < apical.len() {
+                            crate::InputBus::atomic_saturating_add(&apical[target], SCALE / 2);
                         }
                     }
                 }
@@ -106,14 +107,15 @@ impl NanoModule for RobotControlModule {
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
+        let prox = bus.proximal();
         // Heuristic: Inject noise if total activity is low (derived from previous spikes)
         let total_active = previous_spikes.iter().filter(|&&s| s).count();
         if total_active < self.motor_neuron_indices.len() / 2 {
             for &idx in &self.motor_neuron_indices {
-                if idx < bus.proximal.len() {
+                if idx < prox.len() {
                     // Stochastic boost to proximal potential
                     if rng.gen::<f32>() < 0.1 {
-                        crate::InputBus::atomic_saturating_add(&bus.proximal[idx], 500);
+                        crate::InputBus::atomic_saturating_add(&prox[idx], 500);
                     }
                 }
             }
