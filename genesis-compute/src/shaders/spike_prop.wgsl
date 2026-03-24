@@ -10,7 +10,7 @@
 @group(0) @binding(8) var<storage, read_write> basal_potentials: array<atomic<i32>>;
 
 @group(0) @binding(9) var<storage, read> dendritic_gates: array<i32>;
-@group(0) @binding(10) var<storage, read> spike_history: array<u32>;
+@group(0) @binding(10) var<storage, read> spike_history: array<vec2<u32>>; // BitPacked u64 history
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
 @compute @workgroup_size(64)
@@ -21,9 +21,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let src = source_indices[idx];
     let delay = delays[idx];
     let n_count = arrayLength(&dendritic_gates);
+    let packed_count = (n_count + 63u) / 64u;
 
     let slot = (current_tick + 16u - delay) % 16u;
-    let fired = spike_history[slot * n_count + src];
+
+    // Extract bit from packed history
+    let word_idx = src / 64u;
+    let bit_idx = src % 64u;
+    let packed_word = spike_history[slot * packed_count + (word_idx / 2u)];
+
+    var fired = 0u;
+    if (word_idx % 2u == 0u) {
+        fired = (packed_word.x >> bit_idx) & 1u;
+    } else {
+        fired = (packed_word.y >> bit_idx) & 1u;
+    }
 
     if (fired != 0u) {
         let tgt = target_indices[idx];

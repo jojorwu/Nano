@@ -9,6 +9,9 @@ struct NeuronState {
     adaptation: i32,
     activity_ema: i32,
     base_threshold: i32,
+    distal_gate: i32,
+    apical_gate: i32,
+    basal_gate: i32,
 }
 
 @group(0) @binding(0) var<storage, read_write> neuron_states: array<NeuronState>;
@@ -65,9 +68,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let proximal = proximal_potentials[i];
-    let distal = distal_potentials[i];
-    let apical = apical_potentials[i];
-    let basal = basal_potentials[i];
+    let distal = (distal_potentials[i] * neuron_states[i].distal_gate) >> 10;
+    let apical = (apical_potentials[i] * neuron_states[i].apical_gate) >> 10;
+    let basal = (basal_potentials[i] * neuron_states[i].basal_gate) >> 10;
 
     let gate_threshold = gate_thresholds[i];
     let dist_diff = proximal - gate_threshold;
@@ -99,7 +102,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var pot = neuron_states[i].potential + gated_input + proximal + dist_gated + apical_gated + noise - neuron_states[i].adaptation;
     pot = (pot * mod_factor) >> 10;
 
-    let liquid_mod = ((abs(proximal) + abs(distal)) * 10) >> 10;
+    let liquid_mod = ((abs(proximal) + abs(distal_potentials[i])) * 10) >> 10;
     let final_decay = max(1, neuron_states[i].decay - liquid_mod);
     pot = (pot * (1024 - final_decay)) >> 10;
 

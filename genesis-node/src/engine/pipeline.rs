@@ -115,6 +115,11 @@ impl PipelineStage for PropagationStage {
                     if (mask[i / 8] >> (i % 8)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
                 }
             }
+            SpikeData::BitPacked(packed) => {
+                for i in 0..n_count {
+                    if (packed[i / 64] >> (i % 64)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
+                }
+            }
             _ => {}
         }
         engine.state.spikes_history[engine.state.history_ptr] = spike_data;
@@ -161,6 +166,11 @@ impl PipelineStage for ThinkingStage {
             SpikeData::Dense(mask) => {
                 for i in 0..n_count {
                     if (mask[i / 8] >> (i % 8)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
+                }
+            }
+            SpikeData::BitPacked(packed) => {
+                for i in 0..n_count {
+                    if (packed[i / 64] >> (i % 64)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
                 }
             }
             _ => {}

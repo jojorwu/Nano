@@ -49,6 +49,9 @@ impl SimulationEngine {
                 SpikeData::Dense(mask) => {
                     for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
                 }
+                SpikeData::BitPacked(packed) => {
+                    for i in 0..n_count { if (packed[i / 64] >> (i % 64)) & 1 == 1 { vec[i] = true; } }
+                }
                 _ => {}
             }
             vec

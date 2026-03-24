@@ -7,13 +7,42 @@ use std::io::{BufReader, BufWriter};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SpikeData {
     Sparse(Vec<usize>),
-    Dense(Vec<u8>), // Bitmask
+    Dense(Vec<u8>), // Bitmask (byte-aligned)
+    BitPacked(Vec<u64>), // 64-bit optimized bitmask for SIMD/GPU
     Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
 }
 
 impl Default for SpikeData {
     fn default() -> Self {
         Self::Sparse(Vec::new())
+    }
+}
+
+impl SpikeData {
+    pub fn to_bitpacked(&self, n_count: usize) -> Vec<u64> {
+        let packed_len = (n_count + 63) / 64;
+        let mut packed = vec![0u64; packed_len];
+        match self {
+            SpikeData::BitPacked(p) => return p.clone(),
+            SpikeData::Sparse(indices) => {
+                for &idx in indices {
+                    if idx < n_count {
+                        packed[idx / 64] |= 1 << (idx % 64);
+                    }
+                }
+            }
+            SpikeData::Dense(mask) => {
+                for i in 0..n_count {
+                    if (mask[i / 8] >> (i % 8)) & 1 == 1 {
+                        packed[i / 64] |= 1 << (i % 64);
+                    }
+                }
+            }
+            SpikeData::Compressed(_) => {
+                // Not implemented for now, fallback to empty
+            }
+        }
+        packed
     }
 }
 
@@ -56,6 +85,9 @@ pub struct NeuronsSoA {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
+    pub distal_gate: Vec<IValue>, // Gating scalars per compartment
+    pub apical_gate: Vec<IValue>,
+    pub basal_gate: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
     pub is_excitatory: Vec<u8>,    // 1 = true, 0 = false (FFI compatible)
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
@@ -72,6 +104,9 @@ pub struct NeuronsFFI {
     pub threshold: *mut IValue,
     pub decay: *mut IValue,
     pub dendritic_gate: *mut IValue,
+    pub distal_gate: *mut IValue,
+    pub apical_gate: *mut IValue,
+    pub basal_gate: *mut IValue,
     pub gate_threshold: *mut IValue,
     pub adaptation_current: *mut IValue,
     pub refractory_timer: *mut i32,
@@ -95,6 +130,9 @@ impl NeuronsSoA {
             threshold: self.threshold.as_mut_ptr(),
             decay: self.decay.as_mut_ptr(),
             dendritic_gate: self.dendritic_gate.as_mut_ptr(),
+            distal_gate: self.distal_gate.as_mut_ptr(),
+            apical_gate: self.apical_gate.as_mut_ptr(),
+            basal_gate: self.basal_gate.as_mut_ptr(),
             gate_threshold: self.gate_threshold.as_mut_ptr(),
             adaptation_current: self.adaptation_current.as_mut_ptr(),
             refractory_timer: self.refractory_timer.as_mut_ptr(),
@@ -135,6 +173,9 @@ impl NeuronsSoA {
             x: Vec::with_capacity(capacity),
             y: Vec::with_capacity(capacity),
             gate_threshold: Vec::with_capacity(capacity),
+            distal_gate: Vec::with_capacity(capacity),
+            apical_gate: Vec::with_capacity(capacity),
+            basal_gate: Vec::with_capacity(capacity),
             activity_ema: Vec::with_capacity(capacity),
             is_excitatory: Vec::with_capacity(capacity),
             adaptation_current: Vec::with_capacity(capacity),
@@ -183,6 +224,9 @@ impl NeuronsSoA {
         self.x.resize(new_size, 0);
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
+        self.distal_gate.resize(new_size, SCALE);
+        self.apical_gate.resize(new_size, SCALE);
+        self.basal_gate.resize(new_size, SCALE);
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, 1);
         self.adaptation_current.resize(new_size, 0);
@@ -208,6 +252,9 @@ impl NeuronsSoA {
         self.x.shrink_to_fit();
         self.y.shrink_to_fit();
         self.gate_threshold.shrink_to_fit();
+        self.distal_gate.shrink_to_fit();
+        self.apical_gate.shrink_to_fit();
+        self.basal_gate.shrink_to_fit();
         self.activity_ema.shrink_to_fit();
         self.is_excitatory.shrink_to_fit();
         self.adaptation_current.shrink_to_fit();
@@ -353,11 +400,12 @@ pub struct SimulationState {
 
 impl SimulationState {
     pub fn new(n_count: usize, history_len: usize) -> Self {
+        let bitpacked_len = (n_count + 63) / 64;
         Self {
             previous_spikes: vec![false; n_count],
             current_spikes_buffer: vec![false; n_count],
             merged_inputs_buffer: vec![0; n_count],
-            spikes_history: vec![SpikeData::Sparse(Vec::new()); history_len.max(16)],
+            spikes_history: vec![SpikeData::BitPacked(vec![0; bitpacked_len]); history_len.max(16)],
             history_ptr: 0,
             tick_counter: 0,
             global_modulators: crate::NeuromodulationState::default(),

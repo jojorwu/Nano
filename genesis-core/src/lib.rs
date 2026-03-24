@@ -21,11 +21,13 @@ pub mod fusion;
 pub mod graph;
 pub mod robotics;
 pub mod plasticity;
+pub mod attention;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
 pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput, ForeignModule, ForeignTickFn};
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI, SynapsesFFI};
+pub use attention::AttnResModule;
 pub use config::NetworkConfig;
 
 pub type IValue = i32;

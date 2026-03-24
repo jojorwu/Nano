@@ -89,6 +89,8 @@ impl CpuBackend {
     }
 
     fn propagate_sparse_delayed_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool], history: &[Vec<bool>]) {
+        // Pack spikes for SIMD-like processing if possible
+        // (Note: full SIMD requires specialized crates, but we can optimize the loops)
         if self.synapse_offsets.is_empty() {
             self.rebuild_index_internal(model);
         }
@@ -132,10 +134,21 @@ impl CpuBackend {
 
                     let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
                     match model.synapses.compartment[syn_idx] {
-                        Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
-                        Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
-                        Compartment::Apical => { model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight); }
-                        Compartment::Basal => { model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight); }
+                        Compartment::Proximal => {
+                            model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
+                        }
+                        Compartment::Distal => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.distal_gate[target] as i64) >> 10) as i32;
+                            model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(attn_gated);
+                        }
+                        Compartment::Apical => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.apical_gate[target] as i64) >> 10) as i32;
+                            model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(attn_gated);
+                        }
+                        Compartment::Basal => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.basal_gate[target] as i64) >> 10) as i32;
+                            model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(attn_gated);
+                        }
                     }
                 }
             }
@@ -199,16 +212,23 @@ impl CpuBackend {
             .zip(&neurons.distal_potential)
             .zip(&neurons.apical_potential)
             .zip(&neurons.basal_potential)
+            .zip(&neurons.distal_gate)
+            .zip(&neurons.apical_gate)
+            .zip(&neurons.basal_gate)
             .zip(&neurons.gate_threshold)
             .zip(&neurons.liquid_current)
             .zip(&neurons.decay)
             .zip(&neurons.update_interval)
             .zip(0..n_count)
-            .map(|(((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), g_thresh), liquid), decay), upd_int), i)| {
+            .map(|((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), i)| {
                 if current_tick < *next_upd { return false; }
                 if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
-                let current_pot = calculate_membrane_potential(*pot, *prox, *dist, *apical, *basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation);
+                let attn_dist = ((*dist as i64 * *d_gate as i64) >> 10) as i32;
+                let attn_apical = ((*apical as i64 * *a_gate as i64) >> 10) as i32;
+                let attn_basal = ((*basal as i64 * *b_gate as i64) >> 10) as i32;
+
+                let current_pot = calculate_membrane_potential(*pot, *prox, attn_dist, attn_apical, attn_basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation);
 
                 // Relative Refractory: Exponentially decaying threshold multiplier
                 let refr_mult = if *refr > 0 { 1 + (1 << *refr) } else { 1 };

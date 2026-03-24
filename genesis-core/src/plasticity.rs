@@ -14,6 +14,45 @@ pub struct StdpRule {
     pub reward_scale: IValue, // R-STDP factor
 }
 
+/// Highly efficient STDP implementation using BitPacked history
+pub struct SparseStdpRule {
+    pub tau: u64,
+    pub a_plus: IValue,
+    pub a_minus: IValue,
+}
+
+impl SparseStdpRule {
+    pub fn apply_bitpacked(&self, weight: &mut IValue, src: usize, tgt: usize, history: &[crate::SpikeData]) {
+        let n_count = (src.max(tgt) + 64) / 64 * 64; // Approximate
+        let mut ltp_count = 0;
+        let mut ltd_count = 0;
+
+        // Optimized bitwise coincidence detection across time window
+        for t in 1..self.tau as usize {
+            if t >= history.len() { break; }
+            let now = &history[0].to_bitpacked(n_count);
+            let past = &history[t].to_bitpacked(n_count);
+
+            let src_word = src / 64;
+            let src_bit = src % 64;
+            let tgt_word = tgt / 64;
+            let tgt_bit = tgt % 64;
+
+            // LTP: Pre (past) -> Post (now)
+            if ((past[src_word] >> src_bit) & 1 == 1) && ((now[tgt_word] >> tgt_bit) & 1 == 1) {
+                ltp_count += 1;
+            }
+            // LTD: Post (past) -> Pre (now)
+            if ((past[tgt_word] >> tgt_bit) & 1 == 1) && ((now[src_word] >> src_bit) & 1 == 1) {
+                ltd_count += 1;
+            }
+        }
+
+        let delta = (self.a_plus * ltp_count as i32) - (self.a_minus * ltd_count as i32);
+        *weight = weight.saturating_add(delta / 10);
+    }
+}
+
 impl crate::PlasticityRule for StdpRule {
     fn apply(&self, weight: &mut IValue, ctx: &crate::PlasticityContext) {
         let weight_before = *weight;
