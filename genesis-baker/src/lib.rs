@@ -56,7 +56,7 @@ impl ModelBlueprint {
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        for i in 0..self.architecture.synapse_count {
+        for _ in 0..self.architecture.synapse_count {
             let src = rng.gen_range(0..self.architecture.neuron_count) as u32;
             let tgt = rng.gen_range(0..self.architecture.neuron_count) as u32;
             if src == tgt { continue; }

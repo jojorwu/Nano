@@ -3,6 +3,8 @@ use serde::{Serialize, Deserialize};
 use std::fs;
 use genesis_baker::ModelBlueprint;
 use genesis_node::{Runtime, SimulationSettings};
+use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 struct Cli {
@@ -11,12 +13,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a new Nano project with default config and blueprint
     Init,
+    /// Bake a neural model from a blueprint TOML
     Bake {
         #[arg(short, long)] blueprint: String,
         #[arg(short, long, default_value = "model.state")] output: String,
         #[arg(long)] backend: Option<String>,
     },
+    /// Run a multimodal simulation on a model
     Run {
         #[arg(short, long)] model: String,
         #[arg(short, long)] input: Option<String>,
@@ -27,15 +32,24 @@ enum Commands {
         #[arg(short, long)] learning_rate: Option<i32>,
         #[arg(long)] backend: Option<String>,
     },
+    /// Run a Reinforcement Learning environment (Gym)
     Gym {
         #[arg(short, long)] model: String,
         #[arg(short, long, default_value = "cartpole")] env: String,
         #[arg(short = 'n', long, default_value_t = 100)] episodes: usize,
         #[arg(long)] backend: Option<String>,
     },
+    /// Export a model and its configuration for distribution
     Export { #[arg(short, long)] model: String, #[arg(short, long)] name: String },
+    /// Start an interactive shell for the model
     Shell {
         #[arg(short, long)] model: String,
+        #[arg(long)] backend: Option<String>,
+    },
+    /// Benchmark simulation performance
+    Bench {
+        #[arg(short, long)] model: String,
+        #[arg(short, long, default_value_t = 1000)] ticks: usize,
         #[arg(long)] backend: Option<String>,
     },
 }
@@ -51,35 +65,35 @@ struct SimulationSession {
 }
 
 impl SimulationSession {
-    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Self {
-        let mut settings = if let Ok(content) = fs::read_to_string("nano.toml") {
-            let global: GlobalConfig = toml::from_str(&content).unwrap_or_else(|_| GlobalConfig { simulation: None, network: None });
-            global.simulation.unwrap_or_default()
-        } else {
-            genesis_node::SimulationSettings::default()
-        };
+    fn load_global_config() -> GlobalConfig {
+        fs::read_to_string("nano.toml")
+            .ok()
+            .and_then(|c| toml::from_str(&c).ok())
+            .unwrap_or(GlobalConfig { simulation: None, network: None })
+    }
 
-        if backend_override.is_some() {
-            settings.preferred_backend = backend_override;
+    fn new(model_path: &str, lr_override: Option<i32>, backend_override: Option<String>) -> Result<Self> {
+        let global = Self::load_global_config();
+        let mut settings = global.simulation.unwrap_or_default();
+
+        if let Some(b) = backend_override {
+            settings.preferred_backend = Some(b);
         }
 
-        let mut runtime = Runtime::load_with_settings(model_path, settings).expect("Failed to load model");
+        let mut runtime = Runtime::load_with_settings(model_path, settings)
+            .with_context(|| format!("Failed to load model from {}", model_path))?;
 
-        if let Ok(content) = fs::read_to_string("nano.toml") {
-             if let Ok(global) = toml::from_str::<GlobalConfig>(&content) {
-                 if let Some(net_cfg) = global.network {
-                     runtime.model.config = net_cfg;
-                 }
-             }
+        if let Some(net_cfg) = global.network {
+            runtime.engine.model.config = net_cfg;
         }
 
         if let Some(lr) = lr_override {
-            runtime.model.config.learning_rate = lr;
+            runtime.engine.model.config.learning_rate = lr;
         }
-        Self { runtime }
+        Ok(Self { runtime })
     }
 
-    fn run_multimodal(&mut self, text: Option<&str>, img_path: Option<&str>, byte_level: bool) {
+    fn run_multimodal(&mut self, text: Option<&str>, img_path: Option<&str>, byte_level: bool) -> Result<()> {
         if let Some(t) = text {
             println!("📝 Injecting Text: '{}' (Mode: {})", t, if byte_level { "Byte-Level" } else { "Modular" });
             self.runtime.inject_text(t);
@@ -88,39 +102,47 @@ impl SimulationSession {
         #[cfg(feature = "vision")]
         if let Some(path) = img_path {
             println!("🖼️ Injecting Image: '{}'", path);
-            let img = image::open(path).expect("Failed to open image");
+            let img = image::open(path).with_context(|| format!("Failed to open image at {}", path))?;
             let gray = img.to_luma8();
             self.runtime.inject_image(gray.as_raw());
         }
 
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] {msg}")
+            .context("Invalid progress bar template")?);
+        pb.set_message("Processing signals...");
+
         // Execution loop: run until all transient inputs are processed
         loop {
-            let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+            let spikes = self.runtime.tick(&vec![0; self.runtime.engine.model.neurons.len()]);
             let count = spikes.iter().filter(|&&s| s).count();
 
             let mut transient_active = false;
-            for m in &self.runtime.modules.modules {
+            for m in &self.runtime.engine.modules.modules {
                 if m.name() == "text_processor" {
-                    let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
+                    let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state())?;
                     if !state.last_tokens.is_empty() { transient_active = true; }
                 }
-                // Vision is currently one-shot injection
             }
 
-            println!("   Tick: {} spikes", count);
+            pb.set_message(format!("Tick: {} spikes", count));
             if !transient_active { break; }
         }
+        pb.finish_with_message("✅ Signal processing complete.");
+        Ok(())
     }
 
-    fn finish(&mut self, path: &str) {
+    fn finish(&mut self, path: &str) -> Result<()> {
         self.runtime.sync_state();
-        self.runtime.model.save(path).expect("Failed to save model");
+        self.runtime.engine.model.save(path).with_context(|| format!("Failed to save model to {}", path))?;
         println!("✨ Simulation finished. State saved.");
+        Ok(())
     }
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
     match &cli.command {
@@ -135,7 +157,7 @@ default_threshold = 1024
 learning_rate = 10
 neurogenesis_reward_threshold = 200
 "#;
-            fs::write("nano.toml", config).expect("Failed to write nano.toml");
+            fs::write("nano.toml", config).context("Failed to write nano.toml")?;
 
             let blueprint = r#"name = "MyFirstNano"
 [architecture]
@@ -146,63 +168,62 @@ synapse_count = 5000
 type = "TextProcessor"
 vocab_size = 1000
 "#;
-            fs::write("blueprint.toml", blueprint).expect("Failed to write blueprint.toml");
+            fs::write("blueprint.toml", blueprint).context("Failed to write blueprint.toml")?;
             println!("✨ Nano environment initialized. Edit nano.toml and blueprint.toml, then run 'bake'.");
         }
         Commands::Bake { blueprint, output, backend } => {
-            let content = fs::read_to_string(blueprint).expect("Failed to read");
-            let mut bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            let content = fs::read_to_string(blueprint).with_context(|| format!("Failed to read blueprint: {}", blueprint))?;
+            let mut bp: ModelBlueprint = toml::from_str(&content).with_context(|| "Invalid blueprint format")?;
             if let Some(b) = backend {
                 if bp.config.is_none() { bp.config = Some(Default::default()); }
                 if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
             }
             let baked = bp.bake();
-            baked.save(output).expect("Failed to save");
+            baked.save(output).with_context(|| format!("Failed to save model to {}", output))?;
             println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
-            let mut session = SimulationSession::new(model, *learning_rate, backend.clone());
-            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level);
-            session.finish(model);
+            let mut session = SimulationSession::new(model, *learning_rate, backend.clone())?;
+            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level)?;
+            session.finish(model)?;
         }
         Commands::Gym { model, env: env_name, episodes, backend } => {
             let settings = SimulationSettings {
                 preferred_backend: backend.clone(),
                 ..Default::default()
             };
-            let mut runtime = Runtime::load_with_settings(model, settings).expect("Failed to load");
+            let mut runtime = Runtime::load_with_settings(model, settings).context("Failed to load model for Gym")?;
             #[cfg(feature = "rl")]
             {
                 run_gym_commands(&mut runtime, env_name, *episodes);
             }
-            runtime.model.save(model).expect("Failed to save");
+            runtime.engine.model.save(model).context("Failed to save model after Gym session")?;
         }
         Commands::Export { model, name } => {
             let dir = format!("models/{}", name);
-            fs::create_dir_all(&dir).expect("Failed to create dir");
-            fs::copy(model, format!("{}/state.bin", dir)).expect("Failed to copy state");
+            fs::create_dir_all(&dir).with_context(|| format!("Failed to create export directory: {}", dir))?;
+            fs::copy(model, format!("{}/state.bin", dir)).context("Failed to copy model state")?;
 
             let config = fs::read_to_string("nano.toml").unwrap_or_default();
-            fs::write(format!("{}/config.toml", dir), config).expect("Failed to write config");
+            fs::write(format!("{}/config.toml", dir), config).context("Failed to write exported config")?;
 
-            // Create a simple launcher script
             let launcher = format!("#!/bin/bash\ncargo run -p nano-cli -- shell --model state.bin\n");
-            fs::write(format!("{}/run.sh", dir), launcher).expect("Failed to write launcher");
+            fs::write(format!("{}/run.sh", dir), launcher).context("Failed to write exported launcher")?;
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(format!("{}/run.sh", dir)).unwrap().permissions();
+                let mut perms = fs::metadata(format!("{}/run.sh", dir)).context("Metadata error")?.permissions();
                 perms.set_mode(0o755);
-                fs::set_permissions(format!("{}/run.sh", dir), perms).unwrap();
+                fs::set_permissions(format!("{}/run.sh", dir), perms).context("Failed to set perms")?;
             }
 
             println!("🚀 Model '{}' exported to {}. Use ./run.sh to start the interactive console.", name, dir);
         }
         Commands::Shell { model, backend } => {
-            let mut session = SimulationSession::new(model, None, backend.clone());
-            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.backend.name());
-            println!("Type 'help' for a list of commands.");
+            let mut session = SimulationSession::new(model, None, backend.clone())?;
+            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.engine.backend.name());
+            println!("Commands: help, save, run <text>, load_image <path>, exit");
 
             use std::io::{Write, BufRead};
             let stdin = std::io::stdin();
@@ -211,13 +232,17 @@ vocab_size = 1000
             print!("> ");
             let _ = stdout.flush();
             for line in stdin.lock().lines() {
-                let l = line.unwrap();
+                let l = line.context("Stdin error")?;
                 let cmd = l.trim();
                 if cmd == "exit" || cmd == "quit" { break; }
-                if cmd == "save" { session.finish(model); }
+                if cmd == "save" { session.finish(model)?; }
                 else if cmd.starts_with("run ") {
                     let input = &cmd[4..];
-                    session.run_multimodal(Some(input), None, false);
+                    session.run_multimodal(Some(input), None, false)?;
+                }
+                else if cmd.starts_with("load_image ") {
+                    let path = &cmd[11..];
+                    session.run_multimodal(None, Some(path), false)?;
                 }
                 else {
                     let resp = session.runtime.handle_command(cmd);
@@ -227,14 +252,41 @@ vocab_size = 1000
                 let _ = stdout.flush();
             }
         }
+        Commands::Bench { model, ticks, backend } => {
+            let mut session = SimulationSession::new(model, None, backend.clone())?;
+            println!("⏳ Benchmarking simulation ({} ticks, Backend: {})...", ticks, session.runtime.engine.backend.name());
+
+            let pb = ProgressBar::new(*ticks as u64);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+                .context("Progress bar error")?);
+
+            let start = std::time::Instant::now();
+            let n_count = session.runtime.engine.model.neurons.len();
+            let empty_inputs = vec![0; n_count];
+
+            for _ in 0..*ticks {
+                session.runtime.tick(&empty_inputs);
+                pb.inc(1);
+            }
+
+            let duration = start.elapsed();
+            pb.finish_with_message("✅ Benchmark complete.");
+
+            let tps = (*ticks as f64) / duration.as_secs_f64();
+            println!("\nPerformance Results:");
+            println!("  Total Ticks: {}", ticks);
+            println!("  Total Time:  {:.2?}", duration);
+            println!("  Throughput:  {:.2} ticks/sec (TPS)", tps);
+        }
     }
+    Ok(())
 }
 
 #[cfg(feature = "rl")]
 fn run_gym_commands(runtime: &mut Runtime, env_name: &str, episodes: usize) {
     let mut episode_rewards = Vec::new();
 
-    // Simple factory-like selection
     if env_name == "arm" {
         let mut env = genesis_node::examples_rl::arm_sim::RobotArmEnv::new();
         run_gym_loop(runtime, &mut env, episodes, &mut episode_rewards);
@@ -247,20 +299,20 @@ fn run_gym_commands(runtime: &mut Runtime, env_name: &str, episodes: usize) {
 #[cfg(feature = "rl")]
 fn run_gym_loop(runtime: &mut Runtime, env: &mut dyn genesis_core::rl::Environment, episodes: usize, history: &mut Vec<i32>) {
     use genesis_core::rl::RLAgent;
-    let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
+    let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.engine.model.neurons.len());
 
     for ep in 0..episodes {
         let mut obs = env.reset();
         let mut total_reward = 0;
         let mut done = false;
         while !done {
-            let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
+            let inputs = agent.encode_observation(&obs, runtime.engine.model.neurons.len());
             let spikes = runtime.tick_with_reward(&inputs, None);
             let actions = agent.decode_action(&spikes);
             let (next_obs, reward, is_done) = env.step(&actions);
 
             let mean = if history.is_empty() { 0 } else { history.iter().sum::<i32>() / history.len() as i32 };
-            runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(reward - mean));
+            runtime.tick_with_reward(&vec![0; runtime.engine.model.neurons.len()], Some(reward - mean));
 
             total_reward += reward;
             obs = next_obs;

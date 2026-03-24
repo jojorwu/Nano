@@ -3,6 +3,7 @@ use serde::{Serialize, Deserialize};
 pub mod bus;
 pub mod module;
 pub mod model;
+pub mod physics;
 pub mod config;
 
 #[cfg(feature = "titan")]
@@ -69,6 +70,7 @@ impl ThinkModule {
 impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
     fn handle_input(&mut self, input: &ModuleInput) {
         if let ModuleInput::Control(name, val) = input {
             if name == "active" { self.active = *val != 0; }
@@ -111,6 +113,20 @@ pub struct PlasticityContext<'a> {
     pub neurons: &'a NeuronsSoA,
 }
 
+impl<'a> PlasticityContext<'a> {
+    /// Calculates the combined modulation factor based on chemical state and SMBP.
+    pub fn get_modulation_gain(&self) -> i64 {
+        let neuromod = SCALE as i64 + self.neuromodulation.noradrenaline as i64;
+        let dopamine = SCALE as i64 + self.neuromodulation.dopamine.abs() as i64;
+        let smbp = if self.compartment != Compartment::Proximal {
+            SCALE as i64 + self.backprop_signal as i64
+        } else {
+            SCALE as i64
+        };
+        (neuromod * dopamine * smbp) >> 20
+    }
+}
+
 /// Trait for weight update rules (e.g., GSOP, STDP)
 pub trait PlasticityRule {
     fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
@@ -134,20 +150,11 @@ impl PlasticityRule for GsopRule {
             _ => self.learning_rate / 2,
         };
 
-        let smbp_mod = if ctx.compartment != Compartment::Proximal {
-            (SCALE + ctx.backprop_signal) >> 10
-        } else {
-            1
-        };
-
-        let neuromod_gain = (SCALE + ctx.neuromodulation.noradrenaline) as i64;
-        let dopamine_gain = (SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
-
-        let lr = (lr as i64 * neuromod_gain * dopamine_gain) >> 20;
-        let lr = lr as i32;
+        let lr_final = (lr as i64 * ctx.get_modulation_gain()) >> 10;
+        let lr_final = lr_final as i32;
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
-        let lr_mod = lr * reward_mod * smbp_mod;
+        let lr_mod = lr_final * reward_mod;
 
         let old_weight = *weight;
         if ctx.pre_spiked && ctx.post_spiked {
@@ -182,26 +189,26 @@ mod tests {
             let b = Arc::clone(&bus);
             std::thread::spawn(move || {
                 for i in 0..100 {
-                    InputBus::atomic_saturating_add(&b.proximal[i], 10);
+                    InputBus::atomic_saturating_add(&b.proximal()[i], 10);
                 }
             })
         }).collect();
 
         for t in threads { t.join().unwrap(); }
         for i in 0..100 {
-            assert_eq!(bus.proximal[i].load(Ordering::Relaxed), 100);
+            assert_eq!(bus.proximal()[i].load(Ordering::Relaxed), 100);
         }
 
         bus.clear();
-        assert_eq!(bus.proximal[0].load(Ordering::Relaxed), 0);
+        assert_eq!(bus.proximal()[0].load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn test_input_bus_clear_mut() {
         let mut bus = InputBus::new(100);
-        bus.proximal[50].store(500, Ordering::Relaxed);
+        bus.proximal()[50].store(500, Ordering::Relaxed);
         bus.clear_mut();
-        assert_eq!(bus.proximal[50].load(Ordering::Relaxed), 0);
+        assert_eq!(bus.proximal()[50].load(Ordering::Relaxed), 0);
     }
 
     #[test]

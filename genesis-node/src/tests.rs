@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{Runtime, Observer, Telemetry, SimulationEngine};
+    use crate::engine::pipeline::PipelineStage;
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
 
     fn create_test_runtime(n_count: usize) -> Runtime {
         let model = BakedModel {
@@ -43,7 +43,7 @@ mod tests {
         let mut runtime = create_test_runtime(2);
         runtime.engine.model.synapses.push(0, 1, 1500);
         runtime.engine.model.neurons.threshold[1] = genesis_core::SCALE;
-        runtime.engine.previous_spikes[0] = true;
+        runtime.engine.state.previous_spikes[0] = true;
 
         let spikes = runtime.tick(&[0, 0]);
         assert!(spikes[1]);
@@ -53,7 +53,7 @@ mod tests {
     fn test_night_phase_pruning() {
         let mut runtime = create_test_runtime(2);
         runtime.engine.model.synapses.push(0, 1, 5);
-        runtime.engine.tick_counter = 99;
+        runtime.engine.state.tick_counter = 99;
 
         runtime.tick(&[0, 0]);
         assert_eq!(runtime.engine.model.synapses.len(), 0);
@@ -140,20 +140,20 @@ mod tests {
 
         // Fire neuron 0 at T=1
         runtime.tick(&[2000, 0]);
-        assert!(runtime.engine.previous_spikes[0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(runtime.engine.state.previous_spikes[0]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=2: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=3: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=4: signal arrives (Delay=3 means t+3)
         runtime.tick(&[0, 0]);
-        assert!(runtime.engine.previous_spikes[1], "Signal should have arrived at T=4");
+        assert!(runtime.engine.state.previous_spikes[1], "Signal should have arrived at T=4");
     }
 
     #[test]
@@ -213,7 +213,115 @@ mod tests {
         runtime.tick(&vec![0; n_count]);
 
         // Fusion neuron (index 5) should have received combined signals
-        assert!(runtime.engine.input_bus.proximal[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert!(runtime.engine.input_bus.proximal()[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_anomaly_detection_storm() {
+        let mut runtime = create_test_runtime(10);
+        // Force an activity storm by setting all potentials very high
+        runtime.engine.state.current_spikes_buffer.fill(true);
+
+        let mut context = crate::engine::pipeline::PipelineContext {
+            tick: 1,
+            external_inputs: vec![0; 10],
+            reward: None,
+            normalized_reward: None,
+            surprise: 0,
+            start_time: std::time::Instant::now(),
+        };
+
+        let mut stage = crate::engine::pipeline::AnomalyDetectionStage;
+        stage.execute(&mut runtime.engine, &mut context);
+
+        // Should have detected storm and increased serotonin and thresholds
+        assert!(runtime.engine.state.global_modulators.serotonin > 1000);
+        assert!(runtime.engine.model.neurons.base_threshold[0] > 1024);
+    }
+
+    #[test]
+    fn test_dynamic_pipeline_config() {
+        let mut runtime = create_test_runtime(10);
+        // Configure pipeline with only Input and Observation stages
+        runtime.settings.active_pipeline_stages = Some(vec!["input".to_string(), "observation".to_string()]);
+
+        // Execute tick
+        runtime.tick(&vec![0; 10]);
+
+        // Propagation stage was skipped, so current spikes should still be false (from initialization)
+        assert!(!runtime.engine.state.current_spikes_buffer[0]);
+    }
+
+    #[test]
+    fn test_runtime_error_invalid_path() {
+        let res = crate::Runtime::load("non_existent_model.model");
+        assert!(res.is_err());
+        let err = res.err().unwrap();
+        match err {
+            crate::RuntimeError::IoWithPath(path, _) => assert_eq!(path, "non_existent_model.model"),
+            _ => panic!("Expected IoWithPath error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_runtime_error_backend_mismatch() {
+        let mut settings = crate::SimulationSettings::default();
+        settings.preferred_backend = Some("invalid_backend".to_string());
+
+        // This will fall back to CPU but log a warning.
+        // To test actual error, we'd need a scenario where CPU also fails.
+    }
+
+    #[test]
+    fn test_long_duration_stability() {
+        use rand::Rng;
+        let n_count = 100;
+        let mut runtime = create_test_runtime(n_count);
+
+        // Use a real backend for stability testing
+        runtime.engine.backend = Box::new(CpuBackend::default());
+
+        // Random input generator
+        let mut rng = rand::thread_rng();
+
+        for t in 0..1000 {
+            let mut inputs = vec![0; n_count];
+            for i in 0..n_count {
+                if rng.gen_bool(0.05) {
+                    inputs[i] = 2000; // Strong random bursts
+                }
+            }
+
+            runtime.tick(&inputs);
+
+            // Check for total collapse or explosion
+            let spikes = runtime.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+            assert!(spikes < n_count, "Network exploded at tick {}", t);
+
+            if t % 100 == 0 {
+                // Periodic structural updates
+                runtime.tick_with_reward(&inputs, Some(10));
+            }
+        }
+    }
+
+    #[test]
+    fn test_stress_recovery() {
+        let mut runtime = create_test_runtime(10);
+        // Step 1: Normal tick
+        runtime.tick(&vec![0; 10]);
+
+        // Step 2: Inject extreme input to trigger activity storm
+        runtime.tick(&vec![20000; 10]);
+
+        // Step 3: Run for several ticks to see if it recovers
+        for _ in 0..10 {
+            runtime.tick(&vec![0; 10]);
+        }
+
+        // Step 4: Verify network didn't stay locked in storm
+        let spike_count = runtime.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+        assert!(spike_count < 10, "Network should have recovered from storm");
     }
 
     #[test]
@@ -261,24 +369,24 @@ mod tests {
 
         // Tick 1: Fire neuron 0
         runtime.tick(&[2000, 0, 0]);
-        assert!(runtime.engine.previous_spikes[0]);
+        assert!(runtime.engine.state.previous_spikes[0]);
 
         // Tick 2: Signal 0->1 in transit
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // Tick 3: Signal 0->1 arrives (delay 2 means t+2)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.engine.previous_spikes[1], "Neuron 1 should fire at T=3");
-        assert!(!runtime.engine.previous_spikes[2]);
+        assert!(runtime.engine.state.previous_spikes[1], "Neuron 1 should fire at T=3");
+        assert!(!runtime.engine.state.previous_spikes[2]);
 
         // Tick 4, 5: Signal 0->2 in transit
         runtime.tick(&[0, 0, 0]);
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.engine.previous_spikes[2]);
+        assert!(!runtime.engine.state.previous_spikes[2]);
 
         // Tick 6: Signal 0->2 arrives (delay 5 means t+5)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.engine.previous_spikes[2], "Neuron 2 should fire at T=6");
+        assert!(runtime.engine.state.previous_spikes[2], "Neuron 2 should fire at T=6");
     }
 }

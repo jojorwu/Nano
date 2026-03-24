@@ -17,7 +17,19 @@ pub enum BackendError {
 /// Defines the interface for simulation execution and learning logic.
 /// Backends can be optimized for different hardware (CPU, WGPU, etc.) while
 /// maintaining numerical parity through standardized bit-shift physics.
+/// Represents a composable simulation step.
+pub enum SimulationKernel {
+    PropagateSynapses,
+    UpdateMembranePotentials,
+    GenerateSpikes,
+    ApplyModulation(NeuromodulationState),
+}
+
 pub trait ComputeBackend {
+    /// Executes a specific simulation kernel. This allows the runtime to orchestrate
+    /// the simulation steps more flexibly.
+    fn execute_kernel(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext) -> Option<SpikeData>;
+
     /// Executes the main simulation kernels for a single tick:
     /// spike propagation, multi-compartment potential integration, and spike generation.
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData;
@@ -66,6 +78,14 @@ pub trait ComputeBackend {
 
     /// Returns the display name of the backend.
     fn name(&self) -> &'static str;
+}
+
+pub struct KernelContext<'a> {
+    pub external_inputs: &'a [i32],
+    pub previous_spikes: &'a [bool],
+    pub history: &'a [Vec<bool>],
+    pub current_tick: u32,
+    pub modulation: NeuromodulationState,
 }
 
 pub use cpu::CpuBackend;
@@ -138,6 +158,55 @@ mod tests {
         // Far above threshold
         let pot_high = calculate_membrane_potential(0, 1500, 1000, 0, 0, thresh, 0, 0, 0, 0);
         assert!(pot_high >= 1000);
+    }
+
+    #[test]
+    fn test_backend_parity() {
+        let model = BakedModel {
+            version: "4.2".to_string(),
+            config: genesis_core::NetworkConfig { learning_rate: 100, ..Default::default() },
+            node_id: 0,
+            local_range: (0, 2),
+            neurons: {
+                let mut n = NeuronsSoA::new(2);
+                n.last_spike_tick[0] = 5;
+                n.last_spike_tick[1] = 8;
+                n
+            },
+            synapses: {
+                let mut s = SynapsesSoA::with_capacity(1);
+                s.push(0, 1, 1000);
+                s
+            },
+            module_states: std::collections::HashMap::new(),
+            #[cfg(feature = "titan")]
+            titan_memory: None,
+            has_text: false,
+            has_vision: false,
+            has_audio: false,
+            has_robotics: false,
+            has_fusion: false,
+            vocabulary: std::collections::HashMap::new(),
+        };
+
+        let mut cpu = CpuBackend::default();
+        let mut model_cpu = model.clone();
+        cpu.update_weights_modulated(&mut model_cpu, &[true, false], &[false, true], 10, None, Default::default(), &[]);
+
+        #[cfg(feature = "wgpu")]
+        {
+            match crate::wgpu::WgpuBackend::new() {
+                Ok(mut wgpu) => {
+                    let mut model_gpu = model.clone();
+                    wgpu.update_weights_modulated(&mut model_gpu, &[true, false], &[false, true], 10, None, Default::default(), &[]);
+                    wgpu.sync_state(&mut model_gpu);
+                    assert_eq!(model_cpu.synapses.weight[0], model_gpu.synapses.weight[0], "CPU/GPU Weight parity failed");
+                }
+                Err(e) => {
+                    log::warn!("WGPU Backend not available for parity test: {}", e);
+                }
+            }
+        }
     }
 
     #[test]

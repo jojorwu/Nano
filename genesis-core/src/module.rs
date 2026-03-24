@@ -23,12 +23,22 @@ pub enum ModuleInput {
     Control(String, IValue),
 }
 
+/// Defines the behavior and lifecycle of a functional unit (Module) in the SNN.
+///
+/// Modules can handle external inputs, inject signals into the `InputBus`,
+/// and manage their own internal learning and structural plasticity rules.
 pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;
 
     /// Execution priority: lower tiers run first.
     fn tier(&self) -> u32 { 0 }
+
+    /// Declares which channels this module writes to.
+    fn outputs(&self) -> Vec<String> { Vec::new() }
+
+    /// Declares which channels this module reads from.
+    fn inputs(&self) -> Vec<String> { Vec::new() }
 
     /// Optional downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any { &() }
@@ -121,6 +131,74 @@ impl Default for ModuleManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockModule {
+        name: String,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+    }
+
+    impl NanoModule for MockModule {
+        fn name(&self) -> &str { &self.name }
+        fn inputs(&self) -> Vec<String> { self.inputs.clone() }
+        fn outputs(&self) -> Vec<String> { self.outputs.clone() }
+        fn on_tick(&mut self, _: &InputBus, _: &[bool], _: u32) {}
+        fn on_update_weights(&mut self, _: &mut NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<IValue>) {}
+        fn on_night_phase(&mut self, _: &mut NeuronsSoA, _: &mut SynapsesSoA, _: Option<IValue>) {}
+        fn box_clone(&self) -> Box<dyn NanoModule> {
+            Box::new(Self { name: self.name.clone(), inputs: self.inputs.clone(), outputs: self.outputs.clone() })
+        }
+    }
+
+    #[test]
+    fn test_module_dependency_sorting() {
+        let mut manager = ModuleManager::new();
+        manager.add_module(Box::new(MockModule {
+            name: "fusion".into(),
+            inputs: vec!["modality:text".into()],
+            outputs: vec!["fused".into()],
+        }));
+        manager.add_module(Box::new(MockModule {
+            name: "text".into(),
+            inputs: vec![],
+            outputs: vec!["modality:text".into()],
+        }));
+
+        manager.rebuild_tiers();
+
+        // "text" must be in an earlier tier than "fusion"
+        let text_idx = manager.modules.iter().position(|m| m.name() == "text").unwrap();
+        let fusion_idx = manager.modules.iter().position(|m| m.name() == "fusion").unwrap();
+
+        let text_tier = manager.tiered_indices.iter().position(|t| t.contains(&text_idx)).unwrap();
+        let fusion_tier = manager.tiered_indices.iter().position(|t| t.contains(&fusion_idx)).unwrap();
+
+        assert!(text_tier < fusion_tier);
+    }
+
+    #[test]
+    fn test_circular_dependency_fallback() {
+        let mut manager = ModuleManager::new();
+        manager.add_module(Box::new(MockModule {
+            name: "A".into(),
+            inputs: vec!["B_out".into()],
+            outputs: vec!["A_out".into()],
+        }));
+        manager.add_module(Box::new(MockModule {
+            name: "B".into(),
+            inputs: vec!["A_out".into()],
+            outputs: vec!["B_out".into()],
+        }));
+
+        // Should not panic, but fallback to manual tiers (usually 0)
+        manager.rebuild_tiers();
+        assert!(!manager.tiered_indices.is_empty());
+    }
+}
+
 impl ModuleManager {
     pub fn new() -> Self {
         Self::default()
@@ -147,16 +225,65 @@ impl ModuleManager {
     }
 
     pub fn rebuild_tiers(&mut self) {
-        let mut tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
-        tiers.sort_unstable();
-        tiers.dedup();
+        // Dependency analysis based on inputs/outputs
+        let n = self.modules.len();
+        let mut adj = vec![Vec::new(); n];
+        let mut in_degree = vec![0; n];
 
-        self.tiered_indices = tiers.into_iter().map(|t| {
-            self.modules.iter().enumerate()
-                .filter(|(_, m)| m.tier() == t)
-                .map(|(i, _)| i)
-                .collect()
-        }).collect();
+        for i in 0..n {
+            let outputs = self.modules[i].outputs();
+            for j in 0..n {
+                if i == j { continue; }
+                let inputs = self.modules[j].inputs();
+                if outputs.iter().any(|o| inputs.contains(o)) {
+                    adj[i].push(j);
+                    in_degree[j] += 1;
+                }
+            }
+        }
+
+        // BFS for topological sort (Kahn's algorithm)
+        let mut tiers = Vec::new();
+        let mut current_tier = Vec::new();
+
+        for i in 0..n {
+            if in_degree[i] == 0 {
+                current_tier.push(i);
+            }
+        }
+
+        while !current_tier.is_empty() {
+            let mut next_tier = Vec::new();
+            let mut tier_indices = Vec::new();
+
+            for &u in &current_tier {
+                tier_indices.push(u);
+                for &v in &adj[u] {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 {
+                        next_tier.push(v);
+                    }
+                }
+            }
+            tiers.push(tier_indices);
+            current_tier = next_tier;
+        }
+
+        // If not all modules are covered, there's a cycle.
+        // Fallback to manual tiers if cycle detected or simple dependency is missing.
+        if tiers.iter().map(|t| t.len()).sum::<usize>() < n {
+             let mut manual_tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
+             manual_tiers.sort_unstable();
+             manual_tiers.dedup();
+             self.tiered_indices = manual_tiers.into_iter().map(|t| {
+                 self.modules.iter().enumerate()
+                     .filter(|(_, m)| m.tier() == t)
+                     .map(|(i, _)| i)
+                     .collect()
+             }).collect();
+        } else {
+            self.tiered_indices = tiers;
+        }
     }
 
     pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), ModuleError> {

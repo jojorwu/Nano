@@ -1,4 +1,5 @@
 use genesis_core::{IValue, SCALE};
+use genesis_core::physics::{sigmoid_gate_approx, calculate_dynamic_decay};
 
 pub fn calculate_membrane_potential(
     base_pot: IValue,
@@ -7,27 +8,17 @@ pub fn calculate_membrane_potential(
     apical: IValue,
     basal: IValue,
     gate_threshold: IValue,
-    liquid: IValue,
+    liquid: IValue, // Reserved
     decay: IValue,
     noise_amp: IValue,
     adaptation: IValue
 ) -> IValue {
     // Non-linear Sigmoidal Dendritic Gating (Smooth NMDA-like response)
-    // f(x) = SCALE / (1 + exp(-k*(x - theta)))
-    // Efficient integer approximation:
-    let sigmoid_gate = |input: IValue, theta: IValue| -> i64 {
-        let diff = input - theta;
-        if diff > 512 { return 1024; }
-        if diff < -512 { return 64; } // Minimal leakage
-        // Linear interpolation for the active region (-512 to 512)
-        (diff + 512) as i64
-    };
+    let dist_gain = sigmoid_gate_approx(proximal, gate_threshold);
+    let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
 
-    let dist_gain = sigmoid_gate(proximal, gate_threshold);
-    let dist_gated = ((distal as i64 * dist_gain) >> 10) as i32;
-
-    let apical_gain = sigmoid_gate(dist_gated, gate_threshold);
-    let apical_gated = ((apical as i64 * apical_gain) >> 10) as i32;
+    let apical_gain = sigmoid_gate_approx(dist_gated, gate_threshold);
+    let apical_gated = ((apical as i64 * apical_gain as i64) >> 10) as i32;
 
     // Basal Modulation (Lateral inhibition/excitation)
     let mod_factor = if basal < 0 { 800 } else if basal > 512 { 1200 } else { 1024 };
@@ -58,8 +49,7 @@ pub fn calculate_membrane_potential(
     pot = ((pot as i64 * mod_factor as i64) >> 10) as i32;
 
     // LLIF: Leaky Integrate-and-Fire Dynamics
-    let liquid_mod = ((proximal.abs() + distal.abs()) * 10) >> 10;
-    let final_decay = (decay - liquid_mod).max(1);
+    let final_decay = calculate_dynamic_decay(decay, proximal, distal);
 
     // Pot = Pot * (1 - decay/SCALE)
     ((pot as i64 * (SCALE - final_decay) as i64) >> 10) as i32

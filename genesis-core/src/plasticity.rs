@@ -20,26 +20,17 @@ impl crate::PlasticityRule for StdpRule {
         let pre_spiked = ctx.pre_spiked;
         let post_spiked = ctx.post_spiked;
 
-        // SMBP Modulation: backpropagation signal amplifies LTP
-        let smbp_mod = if ctx.compartment != crate::Compartment::Proximal {
-            (crate::SCALE + ctx.backprop_signal) as i64
-        } else {
-            crate::SCALE as i64
-        };
-
-        // Neuromodulation: Noradrenaline (surprise) amplifies temporal learning
-        let neuromod_mod = (crate::SCALE + ctx.neuromodulation.noradrenaline) as i64;
-        let dopamine_mod = (crate::SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
+        let modulation_gain = ctx.get_modulation_gain();
 
         // 1. Reward-modulated update (R-STDP component)
         if let Some(reward) = ctx.reward {
              if pre_spiked && post_spiked {
-                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * smbp_mod * dopamine_mod) >> 40) as i32;
+                let delta = ((self.a_plus as i64 * reward as i64 * self.reward_scale as i64 * modulation_gain) >> 40) as i32;
                 *weight = weight.saturating_add(delta);
             }
         } else {
              if pre_spiked && post_spiked {
-                let delta = (self.a_plus as i64 * smbp_mod * neuromod_mod >> 21) as i32;
+                let delta = (self.a_plus as i64 * modulation_gain >> 20) as i32;
                 *weight = weight.saturating_add(delta);
             }
         }
@@ -207,13 +198,13 @@ impl EvolutionaryOptimizer {
 
                     // Spatial Optimization: Search in a local neighborhood first
                     let mut best_target = (src + 1) % neuron_count as u32;
-                    let mut min_score = 1000000i32;
+                    let mut max_score = -1000000i32;
 
                     // Instead of global sampling, we sample indices near the source index
                     // assuming similar indices are spatially closer (standard for SoA layouts)
                     let search_radius = (neuron_count / 20).max(50);
 
-                    for _ in 0..15 {
+                    for _ in 0..20 {
                         let offset = rng.gen_range(0..search_radius * 2) as i32 - search_radius as i32;
                         let cand = ((src as i32 + offset).rem_euclid(neuron_count as i32)) as u32;
                         if cand == src { continue; }
@@ -222,18 +213,24 @@ impl EvolutionaryOptimizer {
                         let dy = (neurons.y[cand as usize] - sy) as i32;
                         let dist_sq = dx*dx + dy*dy;
 
-                        // Score: prefer nearby neurons
-                        let score = dist_sq;
+                        // Score: prefer nearby neurons AND those with high long-term activity (activity_ema)
+                        // but not too much activity (avoid hyper-hubs)
+                        let activity = neurons.activity_ema[cand as usize];
 
-                        if score < min_score {
-                            min_score = score;
+                        // Higher score is better
+                        let score = (activity as i32 * 10) - (dist_sq / 10);
+
+                        if score > max_score {
+                            max_score = score;
                             best_target = cand;
                         }
                     }
 
                     // Targeted compartment selection based on distance
-                    // Proximal = very local, Distal/Apical = inter-columnar
-                    let dist = (min_score as f32).sqrt();
+                    let dx = (neurons.x[best_target as usize] - sx) as i32;
+                    let dy = (neurons.y[best_target as usize] - sy) as i32;
+                    let dist = ((dx*dx + dy*dy) as f32).sqrt();
+
                     let comp = if dist < 10.0 {
                         Compartment::Proximal
                     } else if dist < 50.0 {

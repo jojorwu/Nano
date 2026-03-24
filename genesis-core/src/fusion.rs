@@ -60,10 +60,14 @@ impl SpikingFusionModule {
 impl NanoModule for SpikingFusionModule {
     fn name(&self) -> &str { "fusion" }
     fn tier(&self) -> u32 { 1 }
+    fn outputs(&self) -> Vec<String> { vec!["proximal".to_string(), "distal".to_string()] }
+    fn inputs(&self) -> Vec<String> { vec!["modality:vision".to_string(), "modality:text".to_string(), "modality:audio".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
+        let prox = bus.proximal();
+        let dist = bus.distal();
         let range = if self.fusion_neuron_indices.is_empty() {
-             0..bus.proximal.len()
+             0..prox.len()
         } else {
              0..0
         };
@@ -76,19 +80,19 @@ impl NanoModule for SpikingFusionModule {
 
                 let fused_val = self.fuse_scalar(v, t, a);
                 if fused_val > 0 {
-                    crate::InputBus::atomic_saturating_add(&bus.proximal[i], fused_val);
-                    crate::InputBus::atomic_saturating_add(&bus.distal[i], fused_val / 2);
+                    crate::InputBus::atomic_saturating_add(&prox[i], fused_val);
+                    crate::InputBus::atomic_saturating_add(&dist[i], fused_val / 2);
                 }
             }
         } else {
             for &i in &self.fusion_neuron_indices {
-                if i < bus.proximal.len() {
+                if i < prox.len() {
                     let v = bus.get_modality(crate::Modality::Vision, i);
                     let t = bus.get_modality(crate::Modality::Text, i);
                     let a = bus.get_modality(crate::Modality::Audio, i);
                     let fused_val = self.fuse_scalar(v, t, a);
-                    crate::InputBus::atomic_saturating_add(&bus.proximal[i], fused_val);
-                    crate::InputBus::atomic_saturating_add(&bus.distal[i], fused_val / 2);
+                    crate::InputBus::atomic_saturating_add(&prox[i], fused_val);
+                    crate::InputBus::atomic_saturating_add(&dist[i], fused_val / 2);
                 }
             }
         }
@@ -147,7 +151,7 @@ mod tests {
 
         module.on_tick(&bus, &[false], 1);
 
-        assert!(bus.proximal[0].load(Ordering::Relaxed) > 0);
-        assert!(bus.distal[0].load(Ordering::Relaxed) > 0);
+        assert!(bus.proximal()[0].load(Ordering::Relaxed) > 0);
+        assert!(bus.distal()[0].load(Ordering::Relaxed) > 0);
     }
 }

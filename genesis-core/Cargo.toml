@@ -22,3 +22,6 @@ bincode = { workspace = true }
 rand = { workspace = true }
 rayon = "1.7"
 thiserror = "1.0"
+
+[dev-dependencies]
+proptest = "1.2"

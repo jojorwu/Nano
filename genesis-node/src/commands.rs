@@ -40,7 +40,7 @@ impl CommandProcessor {
             },
             "set_think" => Self::handle_set_think(engine, &parts),
             "status" => {
-                format!("Tick: {}, Synapses: {}, Neurons: {}", engine.tick_counter, engine.model.synapses.len(), engine.model.neurons.len())
+                format!("Tick: {}, Synapses: {}, Neurons: {}", engine.state.tick_counter, engine.model.synapses.len(), engine.model.neurons.len())
             },
             _ => format!("Unknown command: {}", parts[0]),
         }
