@@ -23,6 +23,8 @@ impl SpikingCerebellumModule {
 
 impl NanoModule for SpikingCerebellumModule {
     fn name(&self) -> &str { "cerebellum" }
+    fn outputs(&self) -> Vec<String> { vec!["apical".to_string()] }
+    fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // 1. Maintain delay line of mossy fiber activity
@@ -94,6 +96,8 @@ impl RobotControlModule {
 
 impl NanoModule for RobotControlModule {
     fn name(&self) -> &str { "robot_control" }
+    fn outputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
+    fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Intrinsic Motivation (Surprise-driven exploration):

@@ -97,6 +97,7 @@ impl TitanMemory {
 impl NanoModule for TitanMemory {
     fn name(&self) -> &str { "titan" }
     fn tier(&self) -> u32 { 0 }
+    fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         let n_len = bus.distal.len();

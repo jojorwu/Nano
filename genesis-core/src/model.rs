@@ -255,6 +255,34 @@ impl SynapsesSoA {
     }
 }
 
+/// Represents the transient, ephemeral state of a simulation session.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SimulationState {
+    pub previous_spikes: Vec<bool>,
+    pub current_spikes_buffer: Vec<bool>,
+    pub merged_inputs_buffer: Vec<IValue>,
+    pub spikes_history: Vec<SpikeData>,
+    pub history_ptr: usize,
+    pub tick_counter: u32,
+    pub global_modulators: crate::NeuromodulationState,
+    pub rolling_spike_count: f32,
+}
+
+impl SimulationState {
+    pub fn new(n_count: usize, history_len: usize) -> Self {
+        Self {
+            previous_spikes: vec![false; n_count],
+            current_spikes_buffer: vec![false; n_count],
+            merged_inputs_buffer: vec![0; n_count],
+            spikes_history: vec![SpikeData::Sparse(Vec::new()); history_len.max(16)],
+            history_ptr: 0,
+            tick_counter: 0,
+            global_modulators: crate::NeuromodulationState::default(),
+            rolling_spike_count: 0.0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BakedModel {
     pub version: String,

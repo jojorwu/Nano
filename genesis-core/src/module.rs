@@ -30,6 +30,12 @@ pub trait NanoModule: Send + Sync {
     /// Execution priority: lower tiers run first.
     fn tier(&self) -> u32 { 0 }
 
+    /// Declares which channels this module writes to.
+    fn outputs(&self) -> Vec<String> { Vec::new() }
+
+    /// Declares which channels this module reads from.
+    fn inputs(&self) -> Vec<String> { Vec::new() }
+
     /// Optional downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any { &() }
 
@@ -147,16 +153,65 @@ impl ModuleManager {
     }
 
     pub fn rebuild_tiers(&mut self) {
-        let mut tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
-        tiers.sort_unstable();
-        tiers.dedup();
+        // Dependency analysis based on inputs/outputs
+        let n = self.modules.len();
+        let mut adj = vec![Vec::new(); n];
+        let mut in_degree = vec![0; n];
 
-        self.tiered_indices = tiers.into_iter().map(|t| {
-            self.modules.iter().enumerate()
-                .filter(|(_, m)| m.tier() == t)
-                .map(|(i, _)| i)
-                .collect()
-        }).collect();
+        for i in 0..n {
+            let outputs = self.modules[i].outputs();
+            for j in 0..n {
+                if i == j { continue; }
+                let inputs = self.modules[j].inputs();
+                if outputs.iter().any(|o| inputs.contains(o)) {
+                    adj[i].push(j);
+                    in_degree[j] += 1;
+                }
+            }
+        }
+
+        // BFS for topological sort (Kahn's algorithm)
+        let mut tiers = Vec::new();
+        let mut current_tier = Vec::new();
+
+        for i in 0..n {
+            if in_degree[i] == 0 {
+                current_tier.push(i);
+            }
+        }
+
+        while !current_tier.is_empty() {
+            let mut next_tier = Vec::new();
+            let mut tier_indices = Vec::new();
+
+            for &u in &current_tier {
+                tier_indices.push(u);
+                for &v in &adj[u] {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 {
+                        next_tier.push(v);
+                    }
+                }
+            }
+            tiers.push(tier_indices);
+            current_tier = next_tier;
+        }
+
+        // If not all modules are covered, there's a cycle.
+        // Fallback to manual tiers if cycle detected or simple dependency is missing.
+        if tiers.iter().map(|t| t.len()).sum::<usize>() < n {
+             let mut manual_tiers: Vec<u32> = self.modules.iter().map(|m| m.tier()).collect();
+             manual_tiers.sort_unstable();
+             manual_tiers.dedup();
+             self.tiered_indices = manual_tiers.into_iter().map(|t| {
+                 self.modules.iter().enumerate()
+                     .filter(|(_, m)| m.tier() == t)
+                     .map(|(i, _)| i)
+                     .collect()
+             }).collect();
+        } else {
+            self.tiered_indices = tiers;
+        }
     }
 
     pub fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), ModuleError> {

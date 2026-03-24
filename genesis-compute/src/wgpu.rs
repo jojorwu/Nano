@@ -259,6 +259,27 @@ impl WgpuBackend {
 
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
+
+    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, _model: &mut BakedModel, _ctx: &crate::KernelContext) -> Option<SpikeData> {
+        match kernel {
+            crate::SimulationKernel::PropagateSynapses => {
+                // Dispatch spike_prop.wgsl
+                None
+            }
+            crate::SimulationKernel::UpdateMembranePotentials => {
+                // Dispatch potential_update.wgsl
+                None
+            }
+            crate::SimulationKernel::GenerateSpikes => {
+                // Final result already calculated by potential_update
+                None
+            }
+            crate::SimulationKernel::ApplyModulation(_modulation) => {
+                None
+            }
+        }
+    }
+
     fn day_phase(&mut self, _model: &mut BakedModel, _external_inputs: &[i32], _previous_spikes: &[bool], _history: &[Vec<bool>], _current_tick: u32, _modulation: NeuromodulationState) -> SpikeData {
         // GPU kernels would be dispatched here
         SpikeData::Sparse(Vec::new())

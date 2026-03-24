@@ -17,7 +17,19 @@ pub enum BackendError {
 /// Defines the interface for simulation execution and learning logic.
 /// Backends can be optimized for different hardware (CPU, WGPU, etc.) while
 /// maintaining numerical parity through standardized bit-shift physics.
+/// Represents a composable simulation step.
+pub enum SimulationKernel {
+    PropagateSynapses,
+    UpdateMembranePotentials,
+    GenerateSpikes,
+    ApplyModulation(NeuromodulationState),
+}
+
 pub trait ComputeBackend {
+    /// Executes a specific simulation kernel. This allows the runtime to orchestrate
+    /// the simulation steps more flexibly.
+    fn execute_kernel(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext) -> Option<SpikeData>;
+
     /// Executes the main simulation kernels for a single tick:
     /// spike propagation, multi-compartment potential integration, and spike generation.
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData;
@@ -66,6 +78,14 @@ pub trait ComputeBackend {
 
     /// Returns the display name of the backend.
     fn name(&self) -> &'static str;
+}
+
+pub struct KernelContext<'a> {
+    pub external_inputs: &'a [i32],
+    pub previous_spikes: &'a [bool],
+    pub history: &'a [Vec<bool>],
+    pub current_tick: u32,
+    pub modulation: NeuromodulationState,
 }
 
 pub use cpu::CpuBackend;

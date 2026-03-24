@@ -26,6 +26,7 @@ impl VisionModule {
 impl NanoModule for VisionModule {
     fn name(&self) -> &str { "vision" }
     fn tier(&self) -> u32 { 0 }
+    fn outputs(&self) -> Vec<String> { vec!["modality:vision".to_string(), "proximal".to_string()] }
 
     fn handle_input(&mut self, input: &crate::ModuleInput) {
         if let crate::ModuleInput::Image(pixels) = input {

@@ -42,7 +42,7 @@ mod tests {
         let mut runtime = create_test_runtime(2);
         runtime.engine.model.synapses.push(0, 1, 1500);
         runtime.engine.model.neurons.threshold[1] = genesis_core::SCALE;
-        runtime.engine.previous_spikes[0] = true;
+        runtime.engine.state.previous_spikes[0] = true;
 
         let spikes = runtime.tick(&[0, 0]);
         assert!(spikes[1]);
@@ -52,7 +52,7 @@ mod tests {
     fn test_night_phase_pruning() {
         let mut runtime = create_test_runtime(2);
         runtime.engine.model.synapses.push(0, 1, 5);
-        runtime.engine.tick_counter = 99;
+        runtime.engine.state.tick_counter = 99;
 
         runtime.tick(&[0, 0]);
         assert_eq!(runtime.engine.model.synapses.len(), 0);
@@ -139,20 +139,20 @@ mod tests {
 
         // Fire neuron 0 at T=1
         runtime.tick(&[2000, 0]);
-        assert!(runtime.engine.previous_spikes[0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(runtime.engine.state.previous_spikes[0]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=2: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=3: signal in transit
         runtime.tick(&[0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // T=4: signal arrives (Delay=3 means t+3)
         runtime.tick(&[0, 0]);
-        assert!(runtime.engine.previous_spikes[1], "Signal should have arrived at T=4");
+        assert!(runtime.engine.state.previous_spikes[1], "Signal should have arrived at T=4");
     }
 
     #[test]
@@ -260,24 +260,24 @@ mod tests {
 
         // Tick 1: Fire neuron 0
         runtime.tick(&[2000, 0, 0]);
-        assert!(runtime.engine.previous_spikes[0]);
+        assert!(runtime.engine.state.previous_spikes[0]);
 
         // Tick 2: Signal 0->1 in transit
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.engine.previous_spikes[1]);
+        assert!(!runtime.engine.state.previous_spikes[1]);
 
         // Tick 3: Signal 0->1 arrives (delay 2 means t+2)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.engine.previous_spikes[1], "Neuron 1 should fire at T=3");
-        assert!(!runtime.engine.previous_spikes[2]);
+        assert!(runtime.engine.state.previous_spikes[1], "Neuron 1 should fire at T=3");
+        assert!(!runtime.engine.state.previous_spikes[2]);
 
         // Tick 4, 5: Signal 0->2 in transit
         runtime.tick(&[0, 0, 0]);
         runtime.tick(&[0, 0, 0]);
-        assert!(!runtime.engine.previous_spikes[2]);
+        assert!(!runtime.engine.state.previous_spikes[2]);
 
         // Tick 6: Signal 0->2 arrives (delay 5 means t+5)
         runtime.tick(&[0, 0, 0]);
-        assert!(runtime.engine.previous_spikes[2], "Neuron 2 should fire at T=6");
+        assert!(runtime.engine.state.previous_spikes[2], "Neuron 2 should fire at T=6");
     }
 }

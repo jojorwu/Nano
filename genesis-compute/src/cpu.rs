@@ -248,36 +248,55 @@ impl CpuBackend {
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, _modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
-        let n_count = model.neurons.len();
 
-        // Apply external inputs directly to proximal potential with dendritic gating
-        for (i, &val) in external_inputs.iter().enumerate() {
-            if i < n_count {
-                let gate = model.neurons.dendritic_gate[i];
-                let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
-                model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
+    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<genesis_core::SpikeData> {
+        let n_count = model.neurons.len();
+        match kernel {
+            crate::SimulationKernel::PropagateSynapses => {
+                // Apply external inputs directly to proximal potential with dendritic gating
+                for (i, &val) in ctx.external_inputs.iter().enumerate() {
+                    if i < n_count {
+                        let gate = model.neurons.dendritic_gate[i];
+                        let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
+                        model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
+                    }
+                }
+                self.propagate_sparse_delayed_spikes(model, ctx.previous_spikes, ctx.history);
+                self.propagate_latent_spikes(model, ctx.previous_spikes);
+
+                // Parallelized STP Recovery
+                let synapses = &mut model.synapses;
+                synapses.stp_resources.par_iter_mut()
+                    .zip(synapses.stp_calcium.par_iter_mut())
+                    .for_each(|(r, c)| {
+                        *r = (*r * 99 + SCALE) / 100;
+                        *c = (*c * 95) / 100;
+                    });
+                None
+            }
+            crate::SimulationKernel::UpdateMembranePotentials => {
+                // Potential updates are handled within GenerateSpikes for CPU for efficiency
+                None
+            }
+            crate::SimulationKernel::GenerateSpikes => {
+                let mut new_spikes = vec![false; n_count];
+                self.update_neuron_states(model, ctx.current_tick, &mut new_spikes);
+
+                let active_indices: Vec<usize> = new_spikes.iter().enumerate()
+                    .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+                Some(genesis_core::SpikeData::Sparse(active_indices))
+            }
+            crate::SimulationKernel::ApplyModulation(_modulation) => {
+                // Modulators are currently handled during weight updates
+                None
             }
         }
+    }
 
-        self.propagate_sparse_delayed_spikes(model, previous_spikes, history);
-        self.propagate_latent_spikes(model, previous_spikes);
-
-        // Parallelized STP Recovery
-        let synapses = &mut model.synapses;
-        synapses.stp_resources.par_iter_mut()
-            .zip(synapses.stp_calcium.par_iter_mut())
-            .for_each(|(r, c)| {
-                *r = (*r * 99 + SCALE) / 100;
-                *c = (*c * 95) / 100;
-            });
-
-        let mut new_spikes = vec![false; n_count];
-        self.update_neuron_states(model, current_tick, &mut new_spikes);
-
-        let active_indices: Vec<usize> = new_spikes.iter().enumerate()
-            .filter(|&(_, &s)| s).map(|(i, _)| i).collect();
-        genesis_core::SpikeData::Sparse(active_indices)
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
+        let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation };
+        self.execute_kernel(crate::SimulationKernel::PropagateSynapses, model, &ctx);
+        self.execute_kernel(crate::SimulationKernel::GenerateSpikes, model, &ctx).unwrap_or_default()
     }
 
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {

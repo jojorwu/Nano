@@ -60,6 +60,8 @@ impl SpikingFusionModule {
 impl NanoModule for SpikingFusionModule {
     fn name(&self) -> &str { "fusion" }
     fn tier(&self) -> u32 { 1 }
+    fn outputs(&self) -> Vec<String> { vec!["proximal".to_string(), "distal".to_string()] }
+    fn inputs(&self) -> Vec<String> { vec!["modality:vision".to_string(), "modality:text".to_string(), "modality:audio".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         let range = if self.fusion_neuron_indices.is_empty() {
