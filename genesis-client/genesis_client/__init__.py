@@ -27,6 +27,15 @@ class NanoRuntime:
     def neuron_count(self) -> int:
         return self._inner.neuron_count()
 
+    def get_potentials(self) -> list[int]:
+        return self._inner.get_potentials()
+
+    def set_potential(self, index: int, val: int):
+        self._inner.set_potential(index, val)
+
+    def get_thresholds(self) -> list[int]:
+        return self._inner.get_thresholds()
+
 class BrainBuilder:
     """Helper class for building TOML blueprints from Python."""
     def __init__(self, name: str):

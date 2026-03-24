@@ -42,6 +42,20 @@ impl PyRuntime {
     fn neuron_count(&self) -> usize {
         self.inner.engine.model.neurons.len()
     }
+
+    fn get_potentials(&self) -> Vec<i32> {
+        self.inner.engine.model.neurons.potential.clone()
+    }
+
+    fn set_potential(&mut self, index: usize, val: i32) {
+        if index < self.inner.engine.model.neurons.len() {
+            self.inner.engine.model.neurons.potential[index] = val;
+        }
+    }
+
+    fn get_thresholds(&self) -> Vec<i32> {
+        self.inner.engine.model.neurons.threshold.clone()
+    }
 }
 
 #[pymodule]

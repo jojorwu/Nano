@@ -7,6 +7,8 @@ pub mod kernels;
 pub mod wgpu;
 #[cfg(feature = "cpp")]
 pub mod cpp_backend;
+#[cfg(feature = "cuda")]
+pub mod cuda_backend;
 
 #[derive(Error, Debug)]
 pub enum BackendError {
@@ -95,6 +97,8 @@ pub use cpu::CpuBackend;
 pub use wgpu::WgpuBackend;
 #[cfg(feature = "cpp")]
 pub use cpp_backend::CppBackend;
+#[cfg(feature = "cuda")]
+pub use cuda_backend::CudaBackend;
 
 pub struct BackendRegistry {
     pub backends: std::collections::HashMap<String, Box<dyn Fn() -> Option<Box<dyn ComputeBackend + Send + Sync>>>>,
@@ -108,6 +112,8 @@ impl BackendRegistry {
         registry.register("wgpu", || WgpuBackend::new().ok().map(|b| Box::new(b) as Box<dyn ComputeBackend + Send + Sync>));
         #[cfg(feature = "cpp")]
         registry.register("cpp", || Some(Box::new(CppBackend::default())));
+        #[cfg(feature = "cuda")]
+        registry.register("cuda", || Some(Box::new(CudaBackend::default())));
         registry
     }
 

@@ -58,27 +58,29 @@ extern "C" {
         int32_t ip_dec,
         int32_t noise_amp
     ) {
+        // Use a single loop with minimal branching to encourage SIMD auto-vectorization
+        #pragma omp parallel for
         for (uint32_t i = 0; i < neurons.len; ++i) {
-            // Very simplified version of calculate_membrane_potential for the demo
-            int32_t dist_gain = sigmoid_gate_approx(neurons.proximal_potential[i], 512);
-            int32_t dist_gated = (int64_t(neurons.distal_potential[i]) * dist_gain) >> 10;
+            int32_t prox = neurons.proximal_potential[i];
+            int32_t dist = neurons.distal_potential[i];
 
-            int32_t pot = neurons.potential[i] + neurons.proximal_potential[i] + dist_gated;
+            int32_t dist_gain = sigmoid_gate_approx(prox, 512);
+            int32_t dist_gated = (int64_t(dist) * dist_gain) >> 10;
 
-            // Apply decay (SCALE = 1024)
-            pot = (int64_t(pot) * (1024 - neurons.decay[i])) >> 10;
+            int32_t current_pot = neurons.potential[i] + prox + dist_gated;
+            int32_t decayed_pot = (int64_t(current_pot) * (1024 - neurons.decay[i])) >> 10;
 
-            if (pot >= neurons.threshold[i]) {
-                new_spikes[i] = true;
-                neurons.potential[i] = 0;
-                neurons.threshold[i] += ip_inc;
-            } else {
-                new_spikes[i] = false;
-                neurons.potential[i] = pot;
-                if (neurons.threshold[i] > 1024) neurons.threshold[i] -= ip_dec;
-            }
+            bool fired = decayed_pot >= neurons.threshold[i];
+            new_spikes[i] = fired;
 
-            // Reset compartment potentials for next tick
+            // Conditional updates without explicit branching where possible
+            neurons.potential[i] = fired ? 0 : decayed_pot;
+
+            int32_t target_thresh = fired ? (neurons.threshold[i] + ip_inc) :
+                                   (neurons.threshold[i] > 1024 ? neurons.threshold[i] - ip_dec : neurons.threshold[i]);
+            neurons.threshold[i] = target_thresh;
+
+            // Clear compartments
             neurons.proximal_potential[i] = 0;
             neurons.distal_potential[i] = 0;
             neurons.apical_potential[i] = 0;

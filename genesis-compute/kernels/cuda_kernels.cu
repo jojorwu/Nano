@@ -42,6 +42,38 @@ __global__ void propagate_spikes_kernel(
     }
 }
 
+// Grid-stride loop for spike propagation on CUDA
+__global__ void cuda_update_neurons_kernel(
+    NeuronsFFI neurons,
+    uint32_t current_tick,
+    bool* new_spikes,
+    int32_t ip_inc,
+    int32_t ip_dec
+) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < neurons.len) {
+        // Leaky Integrate-and-Fire with Integer Physics on GPU
+        int32_t pot = neurons.proximal_potential[i] + neurons.distal_potential[i];
+
+        // Apply decay
+        pot = (int64_t(pot) * (1024 - neurons.decay[i])) >> 10;
+
+        if (pot >= neurons.threshold[i]) {
+            new_spikes[i] = true;
+            neurons.potential[i] = 0;
+            neurons.threshold[i] += ip_inc;
+        } else {
+            new_spikes[i] = false;
+            neurons.potential[i] = pot;
+            if (neurons.threshold[i] > 1024) neurons.threshold[i] -= ip_dec;
+        }
+
+        // Reset buffers
+        neurons.proximal_potential[i] = 0;
+        neurons.distal_potential[i] = 0;
+    }
+}
+
 extern "C" {
     void cuda_propagate_spikes(
         const uint32_t* source_indices,
@@ -50,9 +82,28 @@ extern "C" {
         const uint8_t* compartments,
         uint32_t synapse_count,
         const bool* previous_spikes,
-        NeuronsFFI neurons
+        NeuronsFFI neurons,
+        cudaStream_t stream
     ) {
-        // This is a skeleton. In a real implementation, we would manage VRAM here
-        // or expect data to already be on the device.
+        uint32_t threadsPerBlock = 256;
+        uint32_t blocksPerGrid = (synapse_count + threadsPerBlock - 1) / threadsPerBlock;
+        propagate_spikes_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
+            source_indices, target_indices, weights, compartments, synapse_count, previous_spikes, neurons
+        );
+    }
+
+    void cuda_update_neurons(
+        NeuronsFFI neurons,
+        uint32_t current_tick,
+        bool* new_spikes,
+        int32_t ip_inc,
+        int32_t ip_dec,
+        cudaStream_t stream
+    ) {
+        uint32_t threadsPerBlock = 256;
+        uint32_t blocksPerGrid = (neurons.len + threadsPerBlock - 1) / threadsPerBlock;
+        cuda_update_neurons_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
+            neurons, current_tick, new_spikes, ip_inc, ip_dec
+        );
     }
 }

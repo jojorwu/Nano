@@ -3,9 +3,13 @@ fn main() {
     {
         cc::Build::new()
             .cpp(true)
+            .flag("-fopenmp")
+            .flag("-O3")
+            .flag("-march=native")
             .file("kernels/cpu_kernels.cpp")
             .compile("genesis_kernels");
         println!("cargo:rustc-link-lib=static=genesis_kernels");
+        println!("cargo:rustc-link-lib=gomp");
         println!("cargo:rerun-if-changed=kernels/cpu_kernels.cpp");
     }
 
