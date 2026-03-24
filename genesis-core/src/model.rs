@@ -19,6 +19,15 @@ impl Default for SpikeData {
 }
 
 impl SpikeData {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            SpikeData::Sparse(v) => v.is_empty(),
+            SpikeData::Dense(v) => v.iter().all(|&b| b == 0),
+            SpikeData::BitPacked(v) => v.iter().all(|&w| w == 0),
+            SpikeData::Compressed(v) => v.is_empty(),
+        }
+    }
+
     pub fn to_bitpacked(&self, n_count: usize) -> Vec<u64> {
         let packed_len = (n_count + 63) / 64;
         let mut packed = vec![0u64; packed_len];

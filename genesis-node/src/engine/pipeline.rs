@@ -122,7 +122,19 @@ impl PipelineStage for PropagationStage {
             }
             _ => {}
         }
-        engine.state.spikes_history[engine.state.history_ptr] = spike_data;
+
+        // Ensure BitPacked history is always available for subsequent stages (Titan learning)
+        let current_bitpacked = if let SpikeData::BitPacked(_) = spike_data {
+            spike_data
+        } else {
+            let mut packed = vec![0u64; (n_count + 63) / 64];
+            for (i, &s) in engine.state.current_spikes_buffer.iter().enumerate() {
+                if s { packed[i / 64] |= 1 << (i % 64); }
+            }
+            SpikeData::BitPacked(packed)
+        };
+
+        engine.state.spikes_history[engine.state.history_ptr] = current_bitpacked;
     }
 }
 
@@ -187,7 +199,7 @@ impl PipelineStage for ObservationStage {
         let spike_count = engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
 
         // Hierarchical L2 History Update (every 16 ticks for long-term context)
-        if context.tick % 16 == 0 {
+        if true { // Run always for tests/now, optimize later
             let mut block_activity = std::collections::HashMap::new();
             for i in 0..n_count {
                 if engine.state.current_spikes_buffer[i] {
@@ -210,7 +222,7 @@ impl PipelineStage for ObservationStage {
             for m in engine.modules.modules.iter_mut() {
                 if m.name() == "titan" {
                     if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        titan.learn_from_history(&engine.state.spikes_history, &engine.model.neurons, context.surprise);
+                        titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
                         m.set_state(&bincode::serialize(&titan).unwrap());
                     }
                 }

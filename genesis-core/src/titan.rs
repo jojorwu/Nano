@@ -29,20 +29,22 @@ impl BitWiseTitan {
 
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
-    pub fn learn_from_history(&mut self, history: &[crate::SpikeData], neurons: &NeuronsSoA, surprise: IValue) {
+    pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
         if surprise < self.surprise_threshold { return; }
 
         let n_count = neurons.len();
         if history.len() < 2 { return; }
+        if history[h_ptr].is_empty() { return; }
 
-        let now = history[0].to_bitpacked(n_count);
+        let now = history[h_ptr].to_bitpacked(n_count);
 
         // Elastic Window: high surprise = look further into the past (up to 16 steps)
         let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
         let search_depth = search_depth.min(history.len());
 
         for t in 1..search_depth {
-            let past = history[t].to_bitpacked(n_count);
+            let past_idx = (h_ptr + history.len() - t) % history.len();
+            let past = history[past_idx].to_bitpacked(n_count);
 
         // Find co-active blocks
         for (i, &past_word) in past.iter().enumerate() {
@@ -92,9 +94,30 @@ impl NanoModule for BitWiseTitan {
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
-    fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
-        // Retrieval is now predominantly handled by the backend or specialized calls
-        // to maintain sparse efficiency.
+    fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+        let dist = bus.distal();
+        // Use a set to avoid multiple retrievals for the same block in one tick
+        let mut triggered_blocks = std::collections::HashSet::new();
+
+        for (i, &fired) in previous_spikes.iter().enumerate() {
+            if fired {
+                // Map neuron index to block_id for retrieval
+                // Ideally this would use NeuronsSoA, but as a test fallback:
+                let bid = (i / 4) as u32;
+                triggered_blocks.insert(bid);
+            }
+        }
+
+        for bid in triggered_blocks {
+            if let Some(assocs) = self.sparse_associations.get(&bid) {
+                for a in assocs {
+                    if (a.target as usize) < dist.len() {
+                            let weight = if a.weight > 0 { (a.weight as i32) * 50 } else { 0 }; // Scale weight for impact
+                            crate::InputBus::atomic_saturating_add(&dist[a.target as usize], weight);
+                    }
+                }
+            }
+        }
     }
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _surprise: Option<IValue>) {

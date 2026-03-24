@@ -106,6 +106,9 @@ impl Runtime {
         };
         pipeline.execute(&mut self.engine, &mut context);
 
+        // History population is now handled by the Propagation stage (or sub-ticks)
+        // to ensure it's available for Neuromodulation/Observation stages.
+
         let final_spike_data = self.engine.state.spikes_history[self.engine.state.history_ptr].clone();
         let spike_count = self.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
 
@@ -126,6 +129,9 @@ impl Runtime {
         }
 
         self.engine.state.history_ptr = (self.engine.state.history_ptr + 1) % self.engine.state.spikes_history.len();
+
+        // High resolution sync for testing/real-time
+        self.engine.finalize_potentials_from_bus();
 
         if tick > 0 && tick % self.settings.night_phase_interval == 0 {
             self.emit_event(SimulationEvent::NightPhaseStarted(tick));
@@ -315,8 +321,11 @@ impl Runtime {
             for m in &mut self.engine.modules.modules {
                 if m.name() == "titan" {
                     if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        // Replay learning with boosted surprise to force consolidation
-                        titan.learn_from_history(history, &self.engine.model.neurons, 1000);
+                        // Memory Replay: iterate through history and treat each step as "now"
+                        let h_len = history.len();
+                        for i in 0..h_len {
+                            titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
+                        }
                         m.set_state(&bincode::serialize(&titan).unwrap());
                     }
                 }
@@ -331,3 +340,5 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_advanced;
