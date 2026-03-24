@@ -3,6 +3,7 @@ use serde::{Serialize, Deserialize};
 pub mod bus;
 pub mod module;
 pub mod model;
+pub mod physics;
 pub mod config;
 
 #[cfg(feature = "titan")]

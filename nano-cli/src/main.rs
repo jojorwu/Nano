@@ -150,14 +150,14 @@ vocab_size = 1000
             println!("✨ Nano environment initialized. Edit nano.toml and blueprint.toml, then run 'bake'.");
         }
         Commands::Bake { blueprint, output, backend } => {
-            let content = fs::read_to_string(blueprint).expect("Failed to read");
-            let mut bp: ModelBlueprint = toml::from_str(&content).expect("Invalid");
+            let content = fs::read_to_string(blueprint).map_err(|e| format!("Failed to read blueprint: {}", e)).unwrap();
+            let mut bp: ModelBlueprint = toml::from_str(&content).map_err(|e| format!("Invalid blueprint: {}", e)).unwrap();
             if let Some(b) = backend {
                 if bp.config.is_none() { bp.config = Some(Default::default()); }
                 if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
             }
             let baked = bp.bake();
-            baked.save(output).expect("Failed to save");
+            baked.save(output).map_err(|e| format!("Failed to save model: {}", e)).unwrap();
             println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {

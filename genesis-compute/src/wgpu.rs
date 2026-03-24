@@ -297,20 +297,44 @@ impl ComputeBackend for WgpuBackend {
                 base_threshold: model.neurons.base_threshold[i],
             });
         }
-        Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State Buffer", &states, wgpu::BufferUsages::STORAGE, true);
+
+        let needs_realloc = res.neuron_state_buffer.is_none() || res.neuron_state_buffer.as_ref().unwrap().size() != (states.len() * std::mem::size_of::<GpuNeuronState>()) as u64;
+        if needs_realloc {
+            Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State Buffer", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, true);
+        } else {
+            self.queue.write_buffer(res.neuron_state_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&states));
+        }
 
         // Convert bool spikes to u32 for WGSL compatibility
-        let pre_u32: Vec<u32> = previous_spikes.iter().map(|&s| if s { 1 } else { 0 }).collect();
-        let post_u32: Vec<u32> = current_spikes.iter().map(|&s| if s { 1 } else { 0 }).collect();
-        Self::ensure_buffer(&self.device, &mut res.pre_spike_buffer, "Pre Spike Buffer", &pre_u32, wgpu::BufferUsages::STORAGE, true);
-        Self::ensure_buffer(&self.device, &mut res.post_spike_buffer, "Post Spike Buffer", &post_u32, wgpu::BufferUsages::STORAGE, true);
+        let pre_u32: Vec<u32> = previous_spikes.iter().map(|&s| if s { 1u32 } else { 0u32 }).collect();
+        let post_u32: Vec<u32> = current_spikes.iter().map(|&s| if s { 1u32 } else { 0u32 }).collect();
 
-        // Upload modulation and learning rate
+        if res.pre_spike_buffer.as_ref().map_or(true, |b| b.size() != (pre_u32.len() * 4) as u64) {
+            Self::ensure_buffer(&self.device, &mut res.pre_spike_buffer, "Pre Spike Buffer", &pre_u32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, true);
+        } else {
+            self.queue.write_buffer(res.pre_spike_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&pre_u32));
+        }
+
+        if res.post_spike_buffer.as_ref().map_or(true, |b| b.size() != (post_u32.len() * 4) as u64) {
+            Self::ensure_buffer(&self.device, &mut res.post_spike_buffer, "Post Spike Buffer", &post_u32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, true);
+        } else {
+            self.queue.write_buffer(res.post_spike_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&post_u32));
+        }
+
+        // Upload modulation and learning rate using efficient write_buffer
         let mod_data = [modulation.dopamine, modulation.noradrenaline, modulation.serotonin, 0];
-        Self::ensure_buffer(&self.device, &mut res.modulation_buffer, "Modulation Buffer", &mod_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        if res.modulation_buffer.is_none() {
+            Self::ensure_buffer(&self.device, &mut res.modulation_buffer, "Modulation Buffer", &mod_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        } else {
+            self.queue.write_buffer(res.modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&mod_data));
+        }
 
         let lr_data = [model.config.learning_rate];
-        Self::ensure_buffer(&self.device, &mut res.lr_buffer, "LR Buffer", &lr_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        if res.lr_buffer.is_none() {
+            Self::ensure_buffer(&self.device, &mut res.lr_buffer, "LR Buffer", &lr_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
+        } else {
+            self.queue.write_buffer(res.lr_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&lr_data));
+        }
 
         // 2. Create Bind Groups
         // Ensure excitatory buffer is ready and uploaded (cached)

@@ -8,7 +8,13 @@ pub struct CpuBackend {
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
     pub expert_masks: Vec<bool>, // MoE: which neuron groups are active
-    pub synapse_index: Vec<[Vec<usize>; 16]>, // source_neuron -> delay (1..16) -> list of synapse_indices
+
+    // Flat CSR representation for synapse indices
+    pub synapse_offsets: Vec<u32>,      // size: (n_count * 16) + 1
+    pub synapse_indices_flat: Vec<usize>,
+
+    pub incoming_synapse_offsets: Vec<u32>, // size: n_count + 1
+    pub incoming_synapse_indices_flat: Vec<usize>,
 }
 
 impl Default for CpuBackend {
@@ -18,7 +24,10 @@ impl Default for CpuBackend {
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
             optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
             expert_masks: Vec::new(),
-            synapse_index: Vec::new(),
+            synapse_offsets: Vec::new(),
+            synapse_indices_flat: Vec::new(),
+            incoming_synapse_offsets: Vec::new(),
+            incoming_synapse_indices_flat: Vec::new(),
         }
     }
 }
@@ -26,25 +35,67 @@ impl Default for CpuBackend {
 impl CpuBackend {
     pub fn rebuild_index(&mut self, model: &BakedModel) {
         let n_count = model.neurons.len();
-        self.synapse_index.clear();
-        self.synapse_index.resize_with(n_count, Default::default);
+        let s_count = model.synapses.len();
 
+        // 1. Build Forward Index (CSR)
+        let mut forward_counts = vec![0u32; n_count * 16];
+        for (&src, &delay) in model.synapses.source_index.iter().zip(&model.synapses.delay) {
+            let src = src as usize;
+            if src < n_count {
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                forward_counts[src * 16 + d_idx] += 1;
+            }
+        }
+
+        self.synapse_offsets = vec![0u32; n_count * 16 + 1];
+        for i in 0..(n_count * 16) {
+            self.synapse_offsets[i + 1] = self.synapse_offsets[i] + forward_counts[i];
+        }
+
+        self.synapse_indices_flat = vec![0; s_count];
+        let mut current_forward_offsets = self.synapse_offsets.clone();
         for (i, (&src, &delay)) in model.synapses.source_index.iter().zip(&model.synapses.delay).enumerate() {
             let src = src as usize;
-            let d_idx = (delay.clamp(1, 16) - 1) as usize;
             if src < n_count {
-                self.synapse_index[src][d_idx].push(i);
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                let pos = &mut current_forward_offsets[src * 16 + d_idx];
+                self.synapse_indices_flat[*pos as usize] = i;
+                *pos += 1;
+            }
+        }
+
+        // 2. Build Incoming Index (CSR)
+        let mut incoming_counts = vec![0u32; n_count];
+        for &tgt in &model.synapses.target_index {
+            if (tgt as usize) < n_count {
+                incoming_counts[tgt as usize] += 1;
+            }
+        }
+
+        self.incoming_synapse_offsets = vec![0u32; n_count + 1];
+        for i in 0..n_count {
+            self.incoming_synapse_offsets[i + 1] = self.incoming_synapse_offsets[i] + incoming_counts[i];
+        }
+
+        self.incoming_synapse_indices_flat = vec![0; s_count];
+        let mut current_incoming_offsets = self.incoming_synapse_offsets.clone();
+        for (i, &tgt) in model.synapses.target_index.iter().enumerate() {
+            if (tgt as usize) < n_count {
+                let pos = &mut current_incoming_offsets[tgt as usize];
+                self.incoming_synapse_indices_flat[*pos as usize] = i;
+                *pos += 1;
             }
         }
     }
 
     fn propagate_sparse_delayed_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool], history: &[Vec<bool>]) {
-        if self.synapse_index.len() != model.neurons.len() {
+        if self.synapse_offsets.is_empty() {
             self.rebuild_index(model);
         }
 
-        // Optimized O(active_spikes * average_fanout) lookup.
-        // We only iterate over spiked neurons across the rolling temporal window.
+        let n_count = model.neurons.len();
+
+        // Optimized CSR traversal for spike propagation
         for d in 1..=16 {
             let spikes = if d == 1 {
                 previous_spikes
@@ -56,24 +107,14 @@ impl CpuBackend {
 
             let d_idx = (d - 1) as usize;
 
-            // Find active source neurons
-            let active_sources: Vec<usize> = spikes.iter().enumerate()
-                .filter(|&(_, &fired)| fired)
-                .map(|(i, _)| i)
-                .collect();
+            for (src, &fired) in spikes.iter().enumerate() {
+                if !fired || src >= n_count { continue; }
 
-            if active_sources.is_empty() { continue; }
+                let start = self.synapse_offsets[src * 16 + d_idx] as usize;
+                let end = self.synapse_offsets[src * 16 + d_idx + 1] as usize;
 
-            // To parallelize without atomics, we'd need to group by target.
-            // Instead, let's process source neurons in parallel chunks
-            // and use raw pointers for potential additions (safe if we accept
-            // minor jitter or use a more complex grouping).
-            // For now, let's optimize the inner loop processing.
-
-            for &src in &active_sources {
-                if src >= self.synapse_index.len() { continue; }
-
-                for &syn_idx in &self.synapse_index[src][d_idx] {
+                for i in start..end {
+                    let syn_idx = self.synapse_indices_flat[i];
                     let target = model.synapses.target_index[syn_idx] as usize;
                     let gate = model.neurons.dendritic_gate[target];
                     if gate < 8 { continue; }
@@ -83,7 +124,7 @@ impl CpuBackend {
                     let r_depression = model.synapses.stp_resources[syn_idx];
 
                     let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
-                    let stp_weight = ((stp_weight as i64 * (SCALE + u_facilitation) as i64) >> 10) as i32;
+                    let stp_weight = ((stp_weight as i64 * (SCALE as i64 + u_facilitation as i64)) >> 10) as i32;
 
                     // Consumption: firing uses resources and increases calcium
                     model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] * 800) >> 10;
@@ -244,9 +285,11 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, _history: &[Vec<bool>]) {
-        if self.synapse_index.len() != model.neurons.len() {
+        if self.synapse_offsets.is_empty() {
             self.rebuild_index(model);
         }
+
+        let n_count = model.neurons.len();
 
         // Apply learning rate from model config
         self.plasticity_rule = Box::new(GsopRule { learning_rate: model.config.learning_rate });
@@ -254,21 +297,29 @@ impl ComputeBackend for CpuBackend {
         use std::collections::HashSet;
         let mut active_synapses = HashSet::new();
 
-        // Sparse selection: only synapses where source OR target spiked
+        // Sparse selection using CSR Forward Index
         for (src, &fired) in previous_spikes.iter().enumerate() {
-            if fired && src < self.synapse_index.len() {
+            if fired && src < n_count {
                 for d in 0..16 {
-                    for &syn_idx in &self.synapse_index[src][d] {
-                        active_synapses.insert(syn_idx);
+                    let start = self.synapse_offsets[src * 16 + d] as usize;
+                    let end = self.synapse_offsets[src * 16 + d + 1] as usize;
+                    for i in start..end {
+                        active_synapses.insert(self.synapse_indices_flat[i]);
                     }
                 }
             }
         }
 
-        // Note: we don't have an incoming_synapse_index here,
-        // we'll rely on source spikes primarily for now or add the index if needed.
-        // Actually, I should have implemented incoming index earlier.
-        // Re-implementing with the logic I intended.
+        // Sparse selection using CSR Incoming Index
+        for (tgt, &fired) in current_spikes.iter().enumerate() {
+            if fired && tgt < n_count {
+                let start = self.incoming_synapse_offsets[tgt] as usize;
+                let end = self.incoming_synapse_offsets[tgt + 1] as usize;
+                for i in start..end {
+                    active_synapses.insert(self.incoming_synapse_indices_flat[i]);
+                }
+            }
+        }
 
         let active_indices: Vec<usize> = active_synapses.into_iter().collect();
 
@@ -311,7 +362,7 @@ impl ComputeBackend for CpuBackend {
         model.synapses.shrink_to_fit();
 
         // Structure changed -> Index must be rebuilt next tick
-        self.synapse_index.clear();
+        self.synapse_offsets.clear();
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
