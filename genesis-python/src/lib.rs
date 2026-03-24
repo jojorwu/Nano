@@ -96,7 +96,7 @@ struct PythonModuleProxy {
 impl genesis_core::NanoModule for PythonModuleProxy {
     fn name(&self) -> &str { &self.name }
     fn box_clone(&self) -> Box<dyn genesis_core::NanoModule> { Box::new(self.clone()) }
-    fn on_tick(&mut self, bus: &genesis_core::InputBus, _previous_spikes: &[bool], tick: u32) {
+    fn on_tick(&mut self, _bus: &genesis_core::InputBus, _previous_spikes: &[bool], tick: u32) {
         Python::with_gil(|py| {
             let _ = self.callback.call1(py, (tick,));
             // In a real implementation, we would pass the bus to the callback

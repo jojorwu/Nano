@@ -1,0 +1,12 @@
+syntax = "proto3";
+package genesis;
+
+service SpikeStream {
+    rpc StreamSpikes(stream SpikeBatch) returns (stream SpikeBatch);
+}
+
+message SpikeBatch {
+    uint64 tick = 1;
+    repeated uint32 indices = 2;
+    string node_id = 3;
+}

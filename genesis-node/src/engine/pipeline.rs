@@ -1,5 +1,5 @@
-use crate::{SimulationEngine, SimulationEvent};
-use genesis_core::{SpikeData, SCALE};
+use crate::{SimulationEngine};
+use genesis_core::{SpikeData};
 use std::time::Instant;
 
 pub trait PipelineStage: Send + Sync {

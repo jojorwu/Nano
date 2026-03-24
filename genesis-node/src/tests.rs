@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{Runtime, Observer, Telemetry, SimulationEngine, SimulationObserver};
-    use crate::engine::pipeline::PipelineStage;
-    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData, SCALE};
+    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
 
@@ -64,7 +63,7 @@ mod tests {
     fn test_stp_dynamics_parity() {
         #[cfg(feature = "cpp")]
         {
-            let n_count = 10;
+            let _n_count = 10;
             let mut rt_cpu = create_test_runtime_with_backend(n_count, "cpu");
             let mut rt_cpp = create_test_runtime_with_backend(n_count, "cpp");
 
@@ -168,11 +167,13 @@ mod tests {
 
             // Seed both with same complex topology
             for i in 0..n_count {
-                rt_cpu.engine.model.synapses.push(i as u32, ((i + 1) % n_count) as u32, 1000 + i as i32);
-                rt_cpp.engine.model.synapses.push(i as u32, ((i + 1) % n_count) as u32, 1000 + i as i32);
+                let i = i as u32;
+                let n = n_count as u32;
+                rt_cpu.engine.model.synapses.push(i, (i + 1) % n, 1000 + i as i32);
+                rt_cpp.engine.model.synapses.push(i, (i + 1) % n, 1000 + i as i32);
 
-                rt_cpu.engine.model.synapses.push_to_compartment(i as u32, ((i + 5) % n_count) as u32, 500, 1, genesis_core::Compartment::Distal);
-                rt_cpp.engine.model.synapses.push_to_compartment(i as u32, ((i + 5) % n_count) as u32, 500, 1, genesis_core::Compartment::Distal);
+                rt_cpu.engine.model.synapses.push_to_compartment(i, (i + 5) % n, 500, 1, genesis_core::Compartment::Distal);
+                rt_cpp.engine.model.synapses.push_to_compartment(i, (i + 5) % n, 500, 1, genesis_core::Compartment::Distal);
             }
 
             let inputs = (0..n_count).map(|i| (i * 10) as i32).collect::<Vec<_>>();

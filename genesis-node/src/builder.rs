@@ -5,6 +5,8 @@ pub struct RuntimeBuilder {
     pub model_path: Option<String>,
     pub settings: SimulationSettings,
     pub observers: Vec<Box<dyn SimulationObserver>>,
+    pub peers: Vec<String>,
+    pub node_id: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -13,6 +15,8 @@ impl RuntimeBuilder {
             model_path: None,
             settings: SimulationSettings::default(),
             observers: Vec::new(),
+            peers: Vec::new(),
+            node_id: None,
         }
     }
 
@@ -83,11 +87,27 @@ impl RuntimeBuilder {
 
         modules.rebuild_tiers();
 
+        let engine = SimulationEngine::new(model, modules, backend, &self.settings);
+
+        let nm = if !self.peers.is_empty() {
+             let node_id = self.node_id.clone().unwrap_or_else(|| "node0".to_string());
+             let remote_queue = engine.remote_spike_queue.clone();
+             let nm = pollster::block_on(crate::network::NetworkManager::new(
+                 node_id,
+                 self.peers.clone(),
+                 self.settings.distributed_port,
+                 remote_queue
+             )).map_err(|e| RuntimeError::NetworkError("node_init".into(), e.to_string()))?;
+             Some(std::sync::Arc::new(nm))
+        } else {
+            None
+        };
+
         let mut rt = Runtime {
-            engine: SimulationEngine::new(model, modules, backend, &self.settings),
+            engine,
             settings: self.settings,
             episode_reward_history: Vec::new(),
-            network_manager: None,
+            network_manager: nm,
             observers,
         };
         rt.post_init()?;

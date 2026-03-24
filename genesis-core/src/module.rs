@@ -100,6 +100,45 @@ impl NanoModule for ForeignModule {
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
 }
 
+/// Dynamic Plugin System for loading external shared libraries (.so, .dll)
+pub struct DynamicPluginModule {
+    pub name: String,
+    _lib: std::sync::Arc<libloading::Library>,
+    tick_fn: ForeignTickFn,
+}
+
+impl DynamicPluginModule {
+    pub fn load(path: &str, symbol: &str) -> Result<Self, String> {
+        unsafe {
+            let lib = libloading::Library::new(path).map_err(|e| e.to_string())?;
+            let tick_fn: ForeignTickFn = *lib.get(symbol.as_bytes()).map_err(|e| e.to_string())?;
+
+            Ok(Self {
+                name: format!("plugin:{}", symbol),
+                _lib: std::sync::Arc::new(lib),
+                tick_fn,
+            })
+        }
+    }
+}
+
+impl NanoModule for DynamicPluginModule {
+    fn name(&self) -> &str { &self.name }
+    fn box_clone(&self) -> Box<dyn NanoModule> {
+        Box::new(Self {
+            name: self.name.clone(),
+            _lib: self._lib.clone(),
+            tick_fn: self.tick_fn,
+        })
+    }
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
+        let bus_ptr = bus.proximal().as_ptr() as *mut i32;
+        unsafe { (self.tick_fn)(bus_ptr, bus.size, tick); }
+    }
+    fn on_update_weights(&mut self, _: &mut NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<IValue>) {}
+    fn on_night_phase(&mut self, _: &mut NeuronsSoA, _: &mut SynapsesSoA, _: Option<IValue>) {}
+}
+
 impl Clone for Box<dyn NanoModule> {
     fn clone(&self) -> Box<dyn NanoModule> {
         self.box_clone()
@@ -328,7 +367,6 @@ impl ModuleManager {
     /// Tier 0 is typically for raw input modules, while higher tiers are for fusion and reasoning.
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
-        use std::sync::atomic::Ordering;
 
         for tier_indices in &self.tiered_indices {
             self.modules.par_iter_mut().enumerate()

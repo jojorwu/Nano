@@ -1,5 +1,5 @@
 use crate::{Runtime, SimulationSettings};
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr};
 use std::os::raw::c_char;
 
 pub struct RuntimeOpaque(Runtime);
