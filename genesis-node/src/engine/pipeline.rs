@@ -220,6 +220,32 @@ impl PipelineStage for ObservationStage {
         // Calculate surprise logic
         let current = spike_count as f32;
         let surprise = (current - engine.state.rolling_spike_count).abs();
+
+        // Update Block Surprise Map
+        let max_bid = engine.model.neurons.block_id.iter().max().copied().unwrap_or(0) as usize;
+        if engine.state.block_surprise.len() <= max_bid {
+            engine.state.block_surprise.resize(max_bid + 1, 0.0);
+        }
+
+        // Simple heuristic: surprise is higher for blocks whose activity deviated from history
+        let l2_ptr = if engine.state.l2_ptr == 0 { engine.state.l2_history.len() - 1 } else { engine.state.l2_ptr - 1 };
+        let prev_summary = &engine.state.l2_history[l2_ptr];
+
+        for i in 0..n_count {
+            let bid = engine.model.neurons.block_id[i] as usize;
+            if bid < prev_summary.len() {
+                let fired = engine.state.current_spikes_buffer[i];
+                let block_avg = prev_summary[bid] as f32;
+
+                // If a neuron fires in a block that was expected to be quiet, or vice versa
+                if fired && block_avg < 1.0 {
+                    engine.state.block_surprise[bid] = engine.state.block_surprise[bid] * 0.95 + 1.0 * 0.05;
+                } else {
+                    engine.state.block_surprise[bid] *= 0.99;
+                }
+            }
+        }
+
         engine.state.rolling_spike_count = engine.state.rolling_spike_count * 0.9 + current * 0.1;
         let scaled_surprise = (surprise * 1024.0 / (engine.state.rolling_spike_count + 1.0)) as i32;
         context.surprise = scaled_surprise.min(2048);
@@ -286,7 +312,7 @@ impl PipelineStage for StructuralPlasticityStage {
 
         let reward_val = context.reward.map(|r| r as i32);
         let history = engine.reconstruct_history(16);
-        engine.backend.structural_plasticity(&mut engine.model, reward_val, &history);
+        engine.backend.structural_plasticity_with_surprise(&mut engine.model, reward_val, &history, &engine.state.block_surprise);
 
         engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
     }

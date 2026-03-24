@@ -299,6 +299,34 @@ impl Runtime {
         self.inject_image(pixels);
         self.process_burst(&[], 64)
     }
+
+    /// Enters a memory consolidation phase (Replay Mode).
+    /// The network processes its own history to strengthen permanent associations.
+    pub fn consolidate_memory(&mut self, iterations: u32) {
+        log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
+        let n_count = self.engine.model.neurons.len();
+
+        for _ in 0..iterations {
+            // Memory Replay: Fetch past bitpacked patterns
+            let history = &self.engine.state.spikes_history;
+            if history.len() < 2 { break; }
+
+            // Trigger Titan learning specifically from its own internal history
+            for m in &mut self.engine.modules.modules {
+                if m.name() == "titan" {
+                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                        // Replay learning with boosted surprise to force consolidation
+                        titan.learn_from_history(history, &self.engine.model.neurons, 1000);
+                        m.set_state(&bincode::serialize(&titan).unwrap());
+                    }
+                }
+            }
+
+            // Run a few "thinking" ticks to propagate these internal patterns
+            self.process_burst(&[], 5);
+        }
+        log::info!("Consolidation complete.");
+    }
 }
 
 #[cfg(test)]

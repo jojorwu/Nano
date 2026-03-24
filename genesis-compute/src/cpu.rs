@@ -406,6 +406,10 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
+        self.structural_plasticity_with_surprise(model, reward, history, &[])
+    }
+
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
         model.synapses.shrink_to_fit();
 
@@ -414,7 +418,7 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses);
+            self.optimizer.mutate_with_surprise(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses, block_surprise);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
                 let grow_size = (model.neurons.len() / 20).max(1);

@@ -157,12 +157,22 @@ impl PlasticityRule for GsopRule {
         let lr_final = lr_final as i32;
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
-        let lr_mod = lr_final * reward_mod;
+
+        // Predictive Coding: Reward connections that contributed to a correct prediction.
+        // If the compartment is Distal (Memory), and it matches the somatic spike, boost it.
+        let prediction_gain = if ctx.compartment == Compartment::Distal && ctx.post_spiked {
+            2 // Double reward for memory that correctly predicted firing
+        } else {
+            1
+        };
+
+        let lr_mod = (lr_final * reward_mod * prediction_gain) as i32;
 
         let old_weight = *weight;
         if ctx.pre_spiked && ctx.post_spiked {
             *weight = weight.saturating_add(lr_mod);
         } else if ctx.pre_spiked && !ctx.post_spiked {
+            // Error Signal: if memory fired (pre) but no spike occurred (post), reduce weight (LTD)
             *weight = weight.saturating_sub(lr_mod / 2);
         }
 

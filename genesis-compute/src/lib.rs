@@ -76,6 +76,7 @@ pub trait ComputeBackend {
 
     /// Performs large-scale structural changes (pruning, neurogenesis, and SNNaS optimization).
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]);
 
     /// Synchronizes device-resident state (GPU) back to the CPU model buffers.
     fn sync_state(&mut self, _model: &mut BakedModel) {}

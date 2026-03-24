@@ -408,6 +408,8 @@ pub struct SimulationState {
     /// Each entry is a Vec of activity counts (one per block_id).
     pub l2_history: Vec<Vec<u16>>,
     pub l2_ptr: usize,
+    /// Per-block surprise rolling average for targeted neurogenesis
+    pub block_surprise: Vec<f32>,
 }
 
 impl SimulationState {
@@ -425,6 +427,7 @@ impl SimulationState {
             dead_ticks: 0,
             l2_history: vec![Vec::new(); 16], // L2 window
             l2_ptr: 0,
+            block_surprise: Vec::new(),
         }
     }
 }

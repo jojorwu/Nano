@@ -151,4 +151,9 @@ impl ComputeBackend for CppBackend {
         let mut cpu = crate::cpu::CpuBackend::default();
         cpu.structural_plasticity(model, reward, history);
     }
+
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
+        let mut cpu = crate::cpu::CpuBackend::default();
+        cpu.structural_plasticity_with_surprise(model, reward, history, block_surprise);
+    }
 }

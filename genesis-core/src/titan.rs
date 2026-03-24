@@ -27,7 +27,8 @@ impl BitWiseTitan {
         }
     }
 
-    /// Three-Factor Learning using BitPacked history for speed
+    /// Three-Factor Learning using BitPacked history for speed.
+    /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], neurons: &NeuronsSoA, surprise: IValue) {
         if surprise < self.surprise_threshold { return; }
 
@@ -35,7 +36,13 @@ impl BitWiseTitan {
         if history.len() < 2 { return; }
 
         let now = history[0].to_bitpacked(n_count);
-        let past = history[1].to_bitpacked(n_count);
+
+        // Elastic Window: high surprise = look further into the past (up to 16 steps)
+        let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
+        let search_depth = search_depth.min(history.len());
+
+        for t in 1..search_depth {
+            let past = history[t].to_bitpacked(n_count);
 
         // Find co-active blocks
         for (i, &past_word) in past.iter().enumerate() {
@@ -55,15 +62,17 @@ impl BitWiseTitan {
                             if (now_word >> now_bit) & 1 == 1 {
                                 let tgt_idx = (j * 64 + now_bit) as u32;
                                 if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
-                                    assoc.weight = assoc.weight.saturating_add(1);
-                                } else if entries.len() < 100 { // Limit fan-out per block for stability
-                                    entries.push(Association { target: tgt_idx, weight: 1 });
+                                    // Prediction Success: boost weight significantly
+                                    assoc.weight = assoc.weight.saturating_add(2);
+                                } else if entries.len() < 100 {
+                                    entries.push(Association { target: tgt_idx, weight: 5 }); // Initial confidence
                                 }
                             }
                         }
                     }
                 }
             }
+        }
         }
 
         // Periodic Decay

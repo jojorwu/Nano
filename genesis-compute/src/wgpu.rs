@@ -701,8 +701,12 @@ impl ComputeBackend for WgpuBackend {
         self.queue.submit(Some(encoder.finish()));
     }
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
+        self.structural_plasticity_with_surprise(model, reward, history, &[]);
+    }
+
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
         let mut cpu = CpuBackend::default();
-        cpu.structural_plasticity(model, reward, history);
+        cpu.structural_plasticity_with_surprise(model, reward, history, block_surprise);
     }
     fn sync_state(&mut self, model: &mut BakedModel) {
         if let Some(ref buffer) = self.resources.weight_buffer {

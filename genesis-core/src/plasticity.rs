@@ -196,6 +196,18 @@ impl EvolutionaryOptimizer {
         activity_history: &[Vec<bool>],
         max_synapses: usize
     ) {
+        self.mutate_with_surprise(synapses, neurons, reward, activity_history, max_synapses, &[]);
+    }
+
+    pub fn mutate_with_surprise(
+        &self,
+        synapses: &mut SynapsesSoA,
+        neurons: &crate::NeuronsSoA,
+        reward: IValue,
+        activity_history: &[Vec<bool>],
+        max_synapses: usize,
+        block_surprise: &[f32],
+    ) {
         let neuron_count = neurons.len();
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
@@ -239,7 +251,14 @@ impl EvolutionaryOptimizer {
                                     };
 
                                     let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
-                                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &config) {
+
+                    // Surprise-Targeted Growth: increase initial weight for neurons in surprised blocks
+                    let initial_weight = if !block_surprise.is_empty() {
+                        let bid = neurons.block_id[j] as usize;
+                        if bid < block_surprise.len() && block_surprise[bid] > 0.5 { 200 } else { 100 }
+                    } else { 100 };
+
+                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, initial_weight, comp, &config) {
                                         grown += 1;
                                     }
                                 }
