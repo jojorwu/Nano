@@ -46,43 +46,80 @@ class NanoRuntime:
     def neuron_count(self) -> int:
         return self._inner.neuron_count()
 
-    def get_potentials(self) -> list[int]:
-        return self._inner.get_potentials()
+    def get_potentials(self, copy: bool = True):
+        """Returns neural potentials as a NumPy array."""
+        if copy:
+            return self._inner.get_potentials()
+        else:
+            return self._inner.get_potentials_view()
 
     def set_potential(self, index: int, val: int):
         self._inner.set_potential(index, val)
 
-    def get_thresholds(self) -> list[int]:
-        return self._inner.get_thresholds()
+    def get_thresholds(self, copy: bool = True):
+        """Returns neural thresholds as a NumPy array."""
+        if copy:
+            return self._inner.get_thresholds()
+        else:
+            return self._inner.get_thresholds_view()
 
     def add_module(self, name: str, callback: callable):
         self._inner.add_python_module(name, callback)
 
 class BrainBuilder:
-    """Helper class for building TOML blueprints from Python."""
+    """Helper class for building TOML blueprints and model configurations from Python."""
     def __init__(self, name: str):
         self.name = name
-        self.neurons = 1000
-        self.synapses = 5000
+        self.layers = {}
+        self.connections = []
         self.modules = []
+        self.global_config = {
+            "default_threshold": 1024,
+            "learning_rate": 10
+        }
+
+    def add_layer(self, name: str, size: int, excitatory: bool = True):
+        self.layers[name] = {
+            "size": size,
+            "is_excitatory": excitatory,
+            "start_index": sum(l["size"] for l in self.layers.values())
+        }
+        return self
+
+    def connect(self, source: str, target: str, weight: int = 500, pattern: str = "all-to-all", density: float = 1.0):
+        self.connections.append({
+            "source": source,
+            "target": target,
+            "weight": weight,
+            "pattern": pattern,
+            "density": density
+        })
+        return self
 
     def add_module(self, module_type: str, **kwargs):
         self.modules.append({"type": module_type, **kwargs})
+        return self
+
+    def set_config(self, **kwargs):
+        self.global_config.update(kwargs)
+        return self
 
     def to_toml(self) -> str:
         import toml
+        total_neurons = sum(l["size"] for l in self.layers.values())
         data = {
             "name": self.name,
+            "config": self.global_config,
             "architecture": {
-                "neuron_count": self.neurons,
-                "synapse_count": self.synapses
+                "neuron_count": total_neurons,
+                "layers": self.layers,
+                "connections": self.connections
             },
             "modules": self.modules
         }
         return toml.dumps(data)
 
-    def build(self, output_path: str):
+    def build_blueprint(self, output_path: str):
         with open(output_path, "w") as f:
             f.write(self.to_toml())
-        # Here we would call genesis-baker (potentially via FFI too)
-        print(f"Blueprint saved to {output_path}. Run 'nano-cli bake' to create the model.")
+        print(f"Blueprint saved to {output_path}. Use 'nano-cli bake' to generate the binary model.")

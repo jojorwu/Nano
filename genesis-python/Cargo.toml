@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
+numpy = "0.20"
 genesis-core = { path = "../genesis-core" }
 genesis-node = { path = "../genesis-node" }
 genesis-compute = { path = "../genesis-compute" }

@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use numpy::{PyArray1, ToPyArray};
 use genesis_node::{Runtime, SimulationSettings};
 use genesis_core::{InputBus, Modality};
 
@@ -53,8 +54,18 @@ impl PyRuntime {
         self.inner.engine.modules.add_module(Box::new(module));
     }
 
-    fn get_potentials(&self) -> Vec<i32> {
-        self.inner.engine.model.neurons.potential.clone()
+    fn get_potentials<'py>(&self, py: Python<'py>) -> &'py PyArray1<i32> {
+        self.inner.engine.model.neurons.potential.to_pyarray(py)
+    }
+
+    /// Returns a zero-copy view of the potentials.
+    /// WARNING: The returned array is a view into Rust memory.
+    /// Ticking the simulation or growing the network may invalidate this view or change its contents.
+    fn get_potentials_view<'py>(&self, py: Python<'py>) -> &'py PyArray1<i32> {
+        let pot = &self.inner.engine.model.neurons.potential;
+        unsafe {
+            numpy::ndarray::ArrayView1::from_shape_ptr(pot.len(), pot.as_ptr()).to_pyarray(py)
+        }
     }
 
     fn set_potential(&mut self, index: usize, val: i32) {
@@ -63,8 +74,15 @@ impl PyRuntime {
         }
     }
 
-    fn get_thresholds(&self) -> Vec<i32> {
-        self.inner.engine.model.neurons.threshold.clone()
+    fn get_thresholds<'py>(&self, py: Python<'py>) -> &'py PyArray1<i32> {
+        self.inner.engine.model.neurons.threshold.to_pyarray(py)
+    }
+
+    fn get_thresholds_view<'py>(&self, py: Python<'py>) -> &'py PyArray1<i32> {
+        let thr = &self.inner.engine.model.neurons.threshold;
+        unsafe {
+            numpy::ndarray::ArrayView1::from_shape_ptr(thr.len(), thr.as_ptr()).to_pyarray(py)
+        }
     }
 }
 

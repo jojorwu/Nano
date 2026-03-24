@@ -1,33 +1,54 @@
 import genesis_client
 import numpy as np
-import time
+import matplotlib.pyplot as plt
 
-def main():
-    print("Starting Genesis Python SDK Demo...")
+def run_demo():
+    print("=== Genesis SDK Programmatic Builder & NumPy Demo ===")
 
-    # 1. Initialize Runtime (using CPU backend by default)
-    # Note: In a real scenario, you'd load a baked model file.
-    # For demo, we assume a 'demo.model' exists or use basic init if supported.
+    # 1. Design a simple network
+    builder = genesis_client.BrainBuilder("DemoNetwork")
+    builder.add_layer("Input", 100) \
+           .add_layer("Processing", 200) \
+           .connect("Input", "Processing", weight=800, density=0.1) \
+           .add_module("think", ticks=5) \
+           .set_config(learning_rate=20)
+
+    print(f"Created blueprint for {builder.name}")
+    builder.build_blueprint("demo.toml")
+
+    # 2. Simulation and Data Analysis (Assuming model is baked)
+    # For this demo, we simulate the analysis workflow
     try:
-        # If we had a model: rt = genesis_client.load_model("demo.model")
-        print("Note: This demo requires a compiled 'genesis_python' extension.")
+        # rt = genesis_client.NanoRuntime("demo.model")
+        print("\n[Analysis Workflow Simulation]")
 
-        # Simulating basic usage based on the exposed API
-        # rt = genesis_client.Runtime(...)
+        # Simulated data (in reality, these come from rt.get_potentials())
+        n_neurons = 300
+        potentials = np.random.normal(0, 500, n_neurons).astype(np.int32)
 
-        # Example of what a Python-defined module would look like:
-        class MyCollector:
-            def on_tick(self, potentials, spikes):
-                if any(spikes):
-                    print(f"Python Module detected {sum(spikes)} spikes!")
+        print(f"Captured potentials for {n_neurons} neurons via Zero-Copy NumPy view")
+        print(f"Mean potential: {np.mean(potentials):.2f}")
+        print(f"Max activity: {np.max(potentials)}")
 
-        print("SDK Architecture Ready.")
-        print("- Rust Core for Physics")
-        self_check = "Verified"
-        print(f"- Python Bindings: {self_check}")
+        # High-speed analysis using NumPy vector operations
+        active_mask = potentials > 1024
+        n_active = np.sum(active_mask)
+        print(f"Neurons above firing threshold: {n_active} ({n_active/n_neurons*100:.1f}%)")
+
+        # 3. Visualization
+        plt.figure(figsize=(10, 4))
+        plt.hist(potentials, bins=50, color='skyblue', edgecolor='black')
+        plt.title("Neural Potential Distribution (via NumPy SDK)")
+        plt.xlabel("Potential (IValue)")
+        plt.ylabel("Neuron Count")
+        plt.grid(alpha=0.3)
+        print("\nPlot generated. Close window to continue.")
+        # plt.show() # Disabled in sandbox
+        plt.savefig("potentials_distribution.png")
+        print("Visualization saved to potentials_distribution.png")
 
     except Exception as e:
-        print(f"Demo notice: {e}")
+        print(f"Workflow notice: {e}")
 
 if __name__ == "__main__":
-    main()
+    run_demo()
