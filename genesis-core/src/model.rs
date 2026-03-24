@@ -61,6 +61,36 @@ pub struct NeuronsSoA {
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
 }
 
+/// FFI-safe view of the NeuronsSoA for Zero-Copy access from C++ and Python.
+#[repr(C)]
+pub struct NeuronsFFI {
+    pub potential: *mut IValue,
+    pub proximal_potential: *mut IValue,
+    pub distal_potential: *mut IValue,
+    pub apical_potential: *mut IValue,
+    pub basal_potential: *mut IValue,
+    pub threshold: *mut IValue,
+    pub decay: *mut IValue,
+    pub dendritic_gate: *mut IValue,
+    pub len: u32,
+}
+
+impl NeuronsSoA {
+    pub fn as_ffi(&mut self) -> NeuronsFFI {
+        NeuronsFFI {
+            potential: self.potential.as_mut_ptr(),
+            proximal_potential: self.proximal_potential.as_mut_ptr(),
+            distal_potential: self.distal_potential.as_mut_ptr(),
+            apical_potential: self.apical_potential.as_mut_ptr(),
+            basal_potential: self.basal_potential.as_mut_ptr(),
+            threshold: self.threshold.as_mut_ptr(),
+            decay: self.decay.as_mut_ptr(),
+            dendritic_gate: self.dendritic_gate.as_mut_ptr(),
+            len: self.len() as u32,
+        }
+    }
+}
+
 impl NeuronsSoA {
     pub fn new(size: usize) -> Self {
         Self::with_capacity(size, size)

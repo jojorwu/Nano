@@ -1,0 +1,15 @@
+[package]
+name = "genesis-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "genesis_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+genesis-core = { path = "../genesis-core" }
+genesis-node = { path = "../genesis-node" }
+genesis-compute = { path = "../genesis-compute" }
+serde_json = "1.0"
