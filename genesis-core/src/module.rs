@@ -23,6 +23,10 @@ pub enum ModuleInput {
     Control(String, IValue),
 }
 
+/// Defines the behavior and lifecycle of a functional unit (Module) in the SNN.
+///
+/// Modules can handle external inputs, inject signals into the `InputBus`,
+/// and manage their own internal learning and structural plasticity rules.
 pub trait NanoModule: Send + Sync {
     /// Unique identifier for the module type.
     fn name(&self) -> &str;

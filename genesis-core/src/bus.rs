@@ -14,8 +14,11 @@ pub enum Modality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelId(pub usize);
 
-/// Represents a modular functional unit within the Spiking Neural Network.
-/// Modules can inject signals, observe activity, and manage their own internal plasticity rules.
+/// Represents the central signal exchange bus of the network.
+///
+/// The `InputBus` facilitates asynchronous communication between modules and the core
+/// simulation engine. It uses atomic integers to allow multiple threads (modules)
+/// to inject potentials concurrently without locking.
 pub struct InputBus {
     pub size: usize,
     /// All channels in a flat vector for fast access via index.

@@ -240,6 +240,19 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamic_pipeline_config() {
+        let mut runtime = create_test_runtime(10);
+        // Configure pipeline with only Input and Observation stages
+        runtime.settings.active_pipeline_stages = Some(vec!["input".to_string(), "observation".to_string()]);
+
+        // Execute tick
+        runtime.tick(&vec![0; 10]);
+
+        // Propagation stage was skipped, so current spikes should still be false (from initialization)
+        assert!(!runtime.engine.state.current_spikes_buffer[0]);
+    }
+
+    #[test]
     fn test_stress_recovery() {
         let mut runtime = create_test_runtime(10);
         // Step 1: Normal tick

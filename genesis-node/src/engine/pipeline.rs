@@ -1,8 +1,8 @@
-use crate::SimulationEngine;
-use genesis_core::SpikeData;
+use crate::{SimulationEngine, SimulationEvent};
+use genesis_core::{SpikeData, SCALE};
 use std::time::Instant;
 
-pub trait PipelineStage {
+pub trait PipelineStage: Send + Sync {
     fn name(&self) -> &str;
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext);
 }
@@ -33,6 +33,23 @@ impl SimulationPipeline {
                 Box::new(AnomalyDetectionStage),
             ],
         }
+    }
+
+    pub fn from_config(active_stages: &[String]) -> Self {
+        let mut stages: Vec<Box<dyn PipelineStage>> = Vec::new();
+        for name in active_stages {
+            match name.as_str() {
+                "input" => stages.push(Box::new(InputStage)),
+                "propagation" => stages.push(Box::new(PropagationStage)),
+                "thinking" => stages.push(Box::new(ThinkingStage)),
+                "observation" => stages.push(Box::new(ObservationStage)),
+                "neuromodulation" => stages.push(Box::new(NeuromodulationStage)),
+                "normalization" => stages.push(Box::new(NormalizationStage)),
+                "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
+                _ => log::warn!("Unknown pipeline stage: {}", name),
+            }
+        }
+        Self { stages }
     }
 
     pub fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
@@ -207,7 +224,7 @@ impl PipelineStage for NormalizationStage {
 pub struct AnomalyDetectionStage;
 impl PipelineStage for AnomalyDetectionStage {
     fn name(&self) -> &str { "anomaly_detection" }
-    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
         let n_count = engine.model.neurons.len();
         if n_count == 0 { return; }
 
