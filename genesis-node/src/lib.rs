@@ -96,12 +96,13 @@ impl Runtime {
             normalized_reward,
             surprise: 0,
             start_time,
+            blackboard: std::collections::HashMap::new(),
         };
 
         let mut pipeline = if let Some(ref stages) = self.settings.active_pipeline_stages {
-            SimulationPipeline::from_config(stages)
+            SimulationPipeline::from_config(stages, &self.settings)
         } else {
-            SimulationPipeline::new()
+            SimulationPipeline::new(&self.settings)
         };
         pipeline.execute(&mut self.engine, &mut context);
 

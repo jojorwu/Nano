@@ -14,6 +14,8 @@ pub struct PipelineContext {
     pub normalized_reward: Option<i32>,
     pub surprise: i32,
     pub start_time: Instant,
+    /// Blackboard for inter-stage communication
+    pub blackboard: std::collections::HashMap<String, f32>,
 }
 
 pub struct SimulationPipeline {
@@ -21,7 +23,7 @@ pub struct SimulationPipeline {
 }
 
 impl SimulationPipeline {
-    pub fn new() -> Self {
+    pub fn new(settings: &crate::SimulationSettings) -> Self {
         Self {
             stages: vec![
                 Box::new(InputStage),
@@ -30,12 +32,13 @@ impl SimulationPipeline {
                 Box::new(ObservationStage),
                 Box::new(NeuromodulationStage),
                 Box::new(NormalizationStage),
+                Box::new(StructuralPlasticityStage::new(settings.night_phase_interval)),
                 Box::new(AnomalyDetectionStage),
             ],
         }
     }
 
-    pub fn from_config(active_stages: &[String]) -> Self {
+    pub fn from_config(active_stages: &[String], settings: &crate::SimulationSettings) -> Self {
         let mut stages: Vec<Box<dyn PipelineStage>> = Vec::new();
         for name in active_stages {
             match name.as_str() {
@@ -45,6 +48,7 @@ impl SimulationPipeline {
                 "observation" => stages.push(Box::new(ObservationStage)),
                 "neuromodulation" => stages.push(Box::new(NeuromodulationStage)),
                 "normalization" => stages.push(Box::new(NormalizationStage)),
+                "structural_plasticity" => stages.push(Box::new(StructuralPlasticityStage::new(settings.night_phase_interval))),
                 "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
                 _ => log::warn!("Unknown pipeline stage: {}", name),
             }
@@ -177,6 +181,8 @@ impl PipelineStage for ObservationStage {
         engine.state.rolling_spike_count = engine.state.rolling_spike_count * 0.9 + current * 0.1;
         let scaled_surprise = (surprise * 1024.0 / (engine.state.rolling_spike_count + 1.0)) as i32;
         context.surprise = scaled_surprise.min(2048);
+
+        context.blackboard.insert("avg_activity".to_string(), engine.state.rolling_spike_count / engine.model.neurons.len() as f32);
     }
 }
 
@@ -221,15 +227,39 @@ impl PipelineStage for NormalizationStage {
     }
 }
 
+pub struct StructuralPlasticityStage {
+    pub interval: u32,
+}
+
+impl StructuralPlasticityStage {
+    pub fn new(interval: u32) -> Self {
+        Self { interval }
+    }
+}
+
+impl PipelineStage for StructuralPlasticityStage {
+    fn name(&self) -> &str { "structural_plasticity" }
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        if context.tick % self.interval != 0 { return; }
+
+        let reward_val = context.reward.map(|r| r as i32);
+        let history = engine.reconstruct_history(16);
+        engine.backend.structural_plasticity(&mut engine.model, reward_val, &history);
+
+        engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
+    }
+}
+
 pub struct AnomalyDetectionStage;
 impl PipelineStage for AnomalyDetectionStage {
     fn name(&self) -> &str { "anomaly_detection" }
-    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
         let n_count = engine.model.neurons.len();
         if n_count == 0 { return; }
 
         let spike_count = engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
-        let activity_ratio = (spike_count as f32) / (n_count as f32);
+        let activity_ratio = context.blackboard.get("avg_activity").cloned()
+            .unwrap_or_else(|| (spike_count as f32) / (n_count as f32));
 
         // Detect "Activity Storms": more than 80% neurons firing at once
         if activity_ratio > 0.8 {

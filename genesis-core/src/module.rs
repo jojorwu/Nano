@@ -43,6 +43,10 @@ pub trait NanoModule: Send + Sync {
     /// Optional downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any { &() }
 
+    /// Declares global signal modulations this module wants to apply.
+    /// Returns a list of (signal_id, delta_value).
+    fn get_global_modulations(&self) -> Vec<(usize, i32)> { Vec::new() }
+
     /// Handles external input directly without serialization overhead.
     fn handle_input(&mut self, _input: &ModuleInput) {}
 
@@ -324,16 +328,20 @@ impl ModuleManager {
     /// Tier 0 is typically for raw input modules, while higher tiers are for fusion and reasoning.
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
+        use std::sync::atomic::Ordering;
 
         for tier_indices in &self.tiered_indices {
-            // Parallel execution within the tier.
-            // We use par_iter() on indices and then access modules.
-            // Since tiered_indices ensures each module belongs to exactly one tier
-            // and we execute tiers sequentially, this is safe.
             self.modules.par_iter_mut().enumerate()
                 .filter(|(idx, _)| tier_indices.contains(idx))
                 .for_each(|(_, m)| {
                     m.on_tick(bus, previous_spikes, tick);
+
+                    // Apply requested global signal modulations
+                    for (sig_id, delta) in m.get_global_modulations() {
+                        if sig_id < bus.global_signals.len() {
+                            InputBus::atomic_saturating_add(&bus.global_signals[sig_id], delta);
+                        }
+                    }
                 });
         }
     }

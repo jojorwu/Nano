@@ -229,6 +229,7 @@ mod tests {
             normalized_reward: None,
             surprise: 0,
             start_time: std::time::Instant::now(),
+            blackboard: HashMap::new(),
         };
 
         let mut stage = crate::engine::pipeline::AnomalyDetectionStage;
