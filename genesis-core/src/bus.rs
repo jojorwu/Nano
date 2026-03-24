@@ -128,6 +128,8 @@ impl InputBus {
             let chan = self.channel(id);
             if index < chan.len() {
                 Self::atomic_saturating_add(&chan[index], val);
+            } else {
+                log::warn!("Modality {} index {} out of bounds (len: {})", name, index, chan.len());
             }
         }
     }

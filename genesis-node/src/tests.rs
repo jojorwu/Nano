@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{Runtime, Observer, Telemetry, SimulationEngine};
+    use crate::engine::pipeline::PipelineStage;
     use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
@@ -213,6 +214,48 @@ mod tests {
 
         // Fusion neuron (index 5) should have received combined signals
         assert!(runtime.engine.input_bus.proximal()[5].load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_anomaly_detection_storm() {
+        let mut runtime = create_test_runtime(10);
+        // Force an activity storm by setting all potentials very high
+        runtime.engine.state.current_spikes_buffer.fill(true);
+
+        let mut context = crate::engine::pipeline::PipelineContext {
+            tick: 1,
+            external_inputs: vec![0; 10],
+            reward: None,
+            normalized_reward: None,
+            surprise: 0,
+            start_time: std::time::Instant::now(),
+        };
+
+        let mut stage = crate::engine::pipeline::AnomalyDetectionStage;
+        stage.execute(&mut runtime.engine, &mut context);
+
+        // Should have detected storm and increased serotonin and thresholds
+        assert!(runtime.engine.state.global_modulators.serotonin > 1000);
+        assert!(runtime.engine.model.neurons.base_threshold[0] > 1024);
+    }
+
+    #[test]
+    fn test_stress_recovery() {
+        let mut runtime = create_test_runtime(10);
+        // Step 1: Normal tick
+        runtime.tick(&vec![0; 10]);
+
+        // Step 2: Inject extreme input to trigger activity storm
+        runtime.tick(&vec![20000; 10]);
+
+        // Step 3: Run for several ticks to see if it recovers
+        for _ in 0..10 {
+            runtime.tick(&vec![0; 10]);
+        }
+
+        // Step 4: Verify network didn't stay locked in storm
+        let spike_count = runtime.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+        assert!(spike_count < 10, "Network should have recovered from storm");
     }
 
     #[test]

@@ -232,10 +232,15 @@ impl CpuBackend {
                     *adaptation = (*adaptation * 95) / 100; // Recovery
                 }
 
-                let homeo_rate = if *activity > target_activity * 2 { 2 } else { 1 };
-                if *activity > target_activity {
+                // Refined Homeostatic Activity Control (HAC) with integral/dampening logic
+                let error = *activity - target_activity;
+                let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
+
+                if error > 0 {
+                    // Overactive: increase base threshold proportional to error
                     *b_thresh = b_thresh.saturating_add(homeo_rate);
-                } else if *activity < target_activity && *b_thresh > 512 {
+                } else if error < 0 && *b_thresh > 512 {
+                    // Underactive: decrease base threshold
                     *b_thresh = b_thresh.saturating_sub(1);
                 }
                 *next_upd = current_tick + *upd_int;

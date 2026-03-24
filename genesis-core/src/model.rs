@@ -266,6 +266,7 @@ pub struct SimulationState {
     pub tick_counter: u32,
     pub global_modulators: crate::NeuromodulationState,
     pub rolling_spike_count: f32,
+    pub dead_ticks: u32,
 }
 
 impl SimulationState {
@@ -279,6 +280,7 @@ impl SimulationState {
             tick_counter: 0,
             global_modulators: crate::NeuromodulationState::default(),
             rolling_spike_count: 0.0,
+            dead_ticks: 0,
         }
     }
 }

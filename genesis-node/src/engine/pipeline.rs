@@ -29,6 +29,8 @@ impl SimulationPipeline {
                 Box::new(ThinkingStage),
                 Box::new(ObservationStage),
                 Box::new(NeuromodulationStage),
+                Box::new(NormalizationStage),
+                Box::new(AnomalyDetectionStage),
             ],
         }
     }
@@ -166,5 +168,77 @@ impl PipelineStage for NeuromodulationStage {
     fn name(&self) -> &str { "neuromodulation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
         crate::engine::neuromodulation::NeuromodulationEngine::update(engine, context.surprise, context.normalized_reward);
+    }
+}
+
+pub struct NormalizationStage;
+impl PipelineStage for NormalizationStage {
+    fn name(&self) -> &str { "normalization" }
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        if context.tick % 100 != 0 { return; }
+
+        // Metabolic Homeostasis: Normalize synaptic weights to prevent metabolic explosion
+        use rayon::prelude::*;
+        let n_count = engine.model.neurons.len();
+        let s_count = engine.model.synapses.len();
+        if s_count == 0 { return; }
+
+        let mut sum_weights = vec![0i64; n_count];
+        for i in 0..s_count {
+            let target = engine.model.synapses.target_index[i] as usize;
+            if target < n_count {
+                sum_weights[target] += engine.model.synapses.weight[i].abs() as i64;
+            }
+        }
+
+        let max_neuron_sum = 1024 * 32; // Limit total incoming weight to 32.0 units
+        let synapses = &mut engine.model.synapses;
+
+        synapses.weight.par_iter_mut().enumerate().for_each(|(i, w)| {
+            let target = synapses.target_index[i] as usize;
+            if target < n_count && sum_weights[target] > max_neuron_sum {
+                let scale_factor = (max_neuron_sum << 10) / sum_weights[target];
+                *w = ((*w as i64 * scale_factor) >> 10) as i32;
+            }
+        });
+    }
+}
+
+pub struct AnomalyDetectionStage;
+impl PipelineStage for AnomalyDetectionStage {
+    fn name(&self) -> &str { "anomaly_detection" }
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        let n_count = engine.model.neurons.len();
+        if n_count == 0 { return; }
+
+        let spike_count = engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+        let activity_ratio = (spike_count as f32) / (n_count as f32);
+
+        // Detect "Activity Storms": more than 80% neurons firing at once
+        if activity_ratio > 0.8 {
+            log::warn!("Anomaly detected: Activity Storm ({}%)! Triggering emergency dampening.", (activity_ratio * 100.0) as u32);
+            // Emergency Dampening: Massive boost to Serotonin (stability)
+            engine.state.global_modulators.serotonin = (engine.state.global_modulators.serotonin + 1024).min(2048);
+
+            // Temporary global inhibition by raising all base thresholds
+            for b_thresh in &mut engine.model.neurons.base_threshold {
+                *b_thresh = b_thresh.saturating_add(512);
+            }
+        }
+
+        // Detect "Dead Network": zero activity for long period
+        if activity_ratio < 0.001 {
+            engine.state.dead_ticks = engine.state.dead_ticks.saturating_add(1);
+            if engine.state.dead_ticks > 100 {
+                log::warn!("Anomaly detected: Stagnant Network! Injecting metabolic noise.");
+                engine.state.dead_ticks = 0;
+                // Metabolic Reset: lowering thresholds to encourage firing
+                for b_thresh in &mut engine.model.neurons.base_threshold {
+                    if *b_thresh > 512 { *b_thresh -= 256; }
+                }
+            }
+        } else {
+            engine.state.dead_ticks = 0;
+        }
     }
 }
