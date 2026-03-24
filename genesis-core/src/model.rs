@@ -67,6 +67,8 @@ impl Default for Compartment {
 pub struct NeuronsSoA {
     /// Optional identifier for neural functional columns/layers.
     pub layer_id: Vec<u16>,
+    /// Identifier for grouping neurons into blocks (mini-columns) for shared attention.
+    pub block_id: Vec<u32>,
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
@@ -116,6 +118,7 @@ pub struct NeuronsFFI {
     pub base_threshold: *mut IValue,
     pub liquid_current: *mut IValue,
     pub is_excitatory: *mut u8,
+    pub block_id: *mut u32,
     pub len: u32,
 }
 
@@ -142,6 +145,7 @@ impl NeuronsSoA {
             base_threshold: self.base_threshold.as_mut_ptr(),
             liquid_current: self.liquid_current.as_mut_ptr(),
             is_excitatory: self.is_excitatory.as_mut_ptr(),
+            block_id: self.block_id.as_mut_ptr(),
             len: self.len() as u32,
         }
     }
@@ -155,6 +159,7 @@ impl NeuronsSoA {
     pub fn with_capacity(size: usize, capacity: usize) -> Self {
         let mut neurons = Self {
             layer_id: Vec::with_capacity(capacity),
+            block_id: Vec::with_capacity(capacity),
             potential: Vec::with_capacity(capacity),
             distal_potential: Vec::with_capacity(capacity),
             proximal_potential: Vec::with_capacity(capacity),
@@ -190,6 +195,7 @@ impl NeuronsSoA {
     pub fn validate(&self) -> Result<(), String> {
         let l = self.len();
         if self.layer_id.len() != l { return Err("layer_id length mismatch".into()); }
+        if self.block_id.len() != l { return Err("block_id length mismatch".into()); }
         if self.threshold.len() != l { return Err("threshold length mismatch".into()); }
         if self.base_threshold.len() != l { return Err("base_threshold length mismatch".into()); }
         if self.decay.len() != l { return Err("decay length mismatch".into()); }
@@ -206,6 +212,7 @@ impl NeuronsSoA {
     pub fn grow(&mut self, additional: usize) {
         let new_size = self.len() + additional;
         self.layer_id.resize(new_size, 0);
+        self.block_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
         self.proximal_potential.resize(new_size, 0);
@@ -234,6 +241,7 @@ impl NeuronsSoA {
 
     pub fn shrink_to_fit(&mut self) {
         self.layer_id.shrink_to_fit();
+        self.block_id.shrink_to_fit();
         self.potential.shrink_to_fit();
         self.distal_potential.shrink_to_fit();
         self.proximal_potential.shrink_to_fit();
@@ -396,6 +404,10 @@ pub struct SimulationState {
     pub global_modulators: crate::NeuromodulationState,
     pub rolling_spike_count: f32,
     pub dead_ticks: u32,
+    /// L2 Hierarchical History: stores block-level activity summaries over long windows.
+    /// Each entry is a Vec of activity counts (one per block_id).
+    pub l2_history: Vec<Vec<u16>>,
+    pub l2_ptr: usize,
 }
 
 impl SimulationState {
@@ -411,6 +423,8 @@ impl SimulationState {
             global_modulators: crate::NeuromodulationState::default(),
             rolling_spike_count: 0.0,
             dead_ticks: 0,
+            l2_history: vec![Vec::new(); 16], // L2 window
+            l2_ptr: 0,
         }
     }
 }

@@ -18,7 +18,7 @@ pub struct GpuNeuronState {
     pub distal_gate: i32,
     pub apical_gate: i32,
     pub basal_gate: i32,
-    pub _pad: i32,
+    pub block_id: u32,
 }
 
 pub struct GpuResources {
@@ -56,6 +56,8 @@ pub struct GpuResources {
     pub stp_resources_buffer: Option<wgpu::Buffer>,
     pub stp_calcium_buffer: Option<wgpu::Buffer>,
     pub modulation_buffer: Option<wgpu::Buffer>,
+    pub block_id_buffer: Option<wgpu::Buffer>,
+    pub block_attn_buffer: Option<wgpu::Buffer>,
 }
 
 pub struct WgpuBackend {
@@ -162,7 +164,8 @@ impl WgpuBackend {
                 Self::storage_entry(0, true), Self::storage_entry(1, true), Self::storage_entry(2, true),
                 Self::storage_entry(3, true), Self::storage_entry(4, true), Self::storage_entry(5, false),
                 Self::storage_entry(6, false), Self::storage_entry(7, false), Self::storage_entry(8, false),
-                Self::storage_entry(9, true), Self::storage_entry(10, true),
+                Self::storage_entry(9, true), Self::storage_entry(10, true), Self::storage_entry(11, true),
+                Self::storage_entry(12, true),
             ],
         });
 
@@ -187,6 +190,8 @@ impl WgpuBackend {
             staging_spikes: None, staging_counter: None, staging_state: None, is_excitatory_buffer: None,
             spike_history_buffer: None, delay_buffer: None, stp_resources_buffer: None, stp_calcium_buffer: None,
             modulation_buffer: None,
+            block_id_buffer: None,
+            block_attn_buffer: None,
         };
 
         Ok(Self {
@@ -308,7 +313,7 @@ impl ComputeBackend for WgpuBackend {
                 distal_gate: model.neurons.distal_gate[i],
                 apical_gate: model.neurons.apical_gate[i],
                 basal_gate: model.neurons.basal_gate[i],
-                _pad: 0,
+                block_id: model.neurons.block_id[i],
             });
         }
         Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
@@ -367,6 +372,22 @@ impl ComputeBackend for WgpuBackend {
         // 2. Dispatch Propagation
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Day Phase Encoder") });
         if s_count > 0 {
+            // Prepare Block IDs and Block Attention Gates for Propagation
+            Self::ensure_buffer(&self.device, &mut res.block_id_buffer, "Block ID", &model.neurons.block_id, wgpu::BufferUsages::STORAGE, false);
+
+            let mut block_attn_vec = Vec::new();
+            for m in model.module_states.values() {
+                 if let Ok(attn_mod) = bincode::deserialize::<genesis_core::AttnResModule>(m) {
+                     for q in &attn_mod.block_queries {
+                         block_attn_vec.push([q[0], q[1], q[2], q[3]]);
+                     }
+                 }
+            }
+            if block_attn_vec.is_empty() {
+                block_attn_vec.push([1024, 1024, 1024, 1024]);
+            }
+            Self::ensure_buffer(&self.device, &mut res.block_attn_buffer, "Block Attn", &block_attn_vec, wgpu::BufferUsages::STORAGE, false);
+
             let prop_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Prop BG"),
                 layout: &self.propagation_layout,
@@ -382,6 +403,8 @@ impl ComputeBackend for WgpuBackend {
                     wgpu::BindGroupEntry { binding: 8, resource: res.basal_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 9, resource: res.dendritic_gate_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 10, resource: res.spike_history_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 11, resource: res.block_id_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: res.block_attn_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
             });
             let tick_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -533,7 +556,7 @@ impl ComputeBackend for WgpuBackend {
                 distal_gate: model.neurons.distal_gate[i],
                 apical_gate: model.neurons.apical_gate[i],
                 basal_gate: model.neurons.basal_gate[i],
-                _pad: 0,
+                block_id: model.neurons.block_id[i],
             });
         }
 

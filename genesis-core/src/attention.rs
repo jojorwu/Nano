@@ -3,16 +3,16 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AttnResModule {
-    /// Learned pseudo-query vectors for each layer.
-    /// In this SNN implementation, we use them to modulate compartment gains.
-    pub layer_queries: Vec<[IValue; 4]>, // [Proximal, Distal, Apical, Basal] weights per layer
+    /// Learned pseudo-query vectors for each functional block (mini-column).
+    /// Groups of neurons (block_id) share these weights for efficiency.
+    pub block_queries: Vec<[IValue; 4]>, // [Proximal, Distal, Apical, Basal] weights per block
     pub learning_rate: IValue,
 }
 
 impl AttnResModule {
-    pub fn new(num_layers: usize) -> Self {
+    pub fn new(num_blocks: usize) -> Self {
         Self {
-            layer_queries: vec![[SCALE; 4]; num_layers],
+            block_queries: vec![[SCALE; 4]; num_blocks],
             learning_rate: 10,
         }
     }
@@ -33,10 +33,10 @@ impl NanoModule for AttnResModule {
         if n_count == 0 { return; }
 
         // Dynamic Attention Update:
-        // If surprise is high, we adjust the layer queries to favor compartments that might
+        // If surprise is high, we adjust the block queries to favor compartments that might
         // reduce surprise in the future (e.g., more attention to Context/Distal).
         if let Some(s) = surprise {
-            for (_layer_id, queries) in self.layer_queries.iter_mut().enumerate() {
+            for (_block_id, queries) in self.block_queries.iter_mut().enumerate() {
                 // Simple heuristic: high surprise increases attention to Apical (feedback) and Distal (context)
                 if s > 512 {
                     queries[1] = (queries[1] * 105) / 100; // Distal
@@ -52,15 +52,13 @@ impl NanoModule for AttnResModule {
             }
         }
 
-        // Apply these queries to the neurons' dendritic gates
+        // Apply these queries to the neurons' dendritic gates based on block_id
         for i in 0..n_count {
-            let lid = neurons.layer_id[i] as usize;
-            if lid < self.layer_queries.len() {
-                // In a true AttnRes, this would be input-dependent.
-                // Here we use the layer-wide pseudo-query as a first approximation.
-                let q = self.layer_queries[lid];
+            let bid = neurons.block_id[i] as usize;
+            if bid < self.block_queries.len() {
+                // Shared attention within the block
+                let q = self.block_queries[bid];
 
-                // We use the Proximal query to set the base dendritic gate
                 neurons.dendritic_gate[i] = q[0];
                 neurons.distal_gate[i] = q[1];
                 neurons.apical_gate[i] = q[2];

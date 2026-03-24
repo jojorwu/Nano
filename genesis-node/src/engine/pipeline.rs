@@ -183,7 +183,29 @@ pub struct ObservationStage;
 impl PipelineStage for ObservationStage {
     fn name(&self) -> &str { "observation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        let n_count = engine.model.neurons.len();
         let spike_count = engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+
+        // Hierarchical L2 History Update (every 16 ticks for long-term context)
+        if context.tick % 16 == 0 {
+            let mut block_activity = std::collections::HashMap::new();
+            for i in 0..n_count {
+                if engine.state.current_spikes_buffer[i] {
+                    let bid = engine.model.neurons.block_id[i];
+                    *block_activity.entry(bid).or_insert(0u16) += 1;
+                }
+            }
+
+            let max_bid = engine.model.neurons.block_id.iter().max().copied().unwrap_or(0);
+            let mut summary = vec![0u16; (max_bid + 1) as usize];
+            for (bid, count) in block_activity {
+                summary[bid as usize] = count;
+            }
+
+            let l2_len = engine.state.l2_history.len();
+            engine.state.l2_history[engine.state.l2_ptr] = summary;
+            engine.state.l2_ptr = (engine.state.l2_ptr + 1) % l2_len;
+        }
 
         // Calculate surprise logic
         let current = spike_count as f32;

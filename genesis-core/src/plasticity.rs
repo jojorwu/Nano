@@ -51,6 +51,28 @@ impl SparseStdpRule {
         let delta = (self.a_plus * ltp_count as i32) - (self.a_minus * ltd_count as i32);
         *weight = weight.saturating_add(delta / 10);
     }
+
+    /// Update weights based on long-term temporal context (L2 History)
+    pub fn apply_l2_context(&self, weight: &mut IValue, src_bid: usize, tgt_bid: usize, l2_history: &[Vec<u16>]) {
+        if l2_history.is_empty() { return; }
+
+        // Sum activity over L2 window
+        let mut src_activity = 0u32;
+        let mut tgt_activity = 0u32;
+
+        for step in l2_history {
+            if src_bid < step.len() { src_activity += step[src_bid] as u32; }
+            if tgt_bid < step.len() { tgt_activity += step[tgt_bid] as u32; }
+        }
+
+        // Correlational learning on long timescales:
+        // if both blocks are consistently active, strengthen connection.
+        if src_activity > 10 && tgt_activity > 10 {
+            let correlation = (src_activity * tgt_activity) / 100;
+            let delta = (self.a_plus * correlation as i32) / 100;
+            *weight = weight.saturating_add(delta);
+        }
+    }
 }
 
 impl crate::PlasticityRule for StdpRule {
