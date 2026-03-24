@@ -36,6 +36,7 @@ pub mod commands;
 pub mod persistence;
 pub mod events;
 pub mod settings;
+pub mod ffi;
 pub mod network;
 pub mod builder;
 

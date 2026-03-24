@@ -87,4 +87,13 @@ extern "C" {
             neurons.basal_potential[i] = 0;
         }
     }
+
+    void cpp_plugin_tick(int32_t* bus_ptr, uint32_t bus_size, uint32_t tick) {
+        // Example plugin logic: inject a periodic signal into the first 10 neurons
+        if (tick % 5 == 0) {
+            for (uint32_t i = 0; i < 10 && i < bus_size; ++i) {
+                bus_ptr[i] += 500;
+            }
+        }
+    }
 }

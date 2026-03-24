@@ -36,6 +36,9 @@ class NanoRuntime:
     def get_thresholds(self) -> list[int]:
         return self._inner.get_thresholds()
 
+    def add_module(self, name: str, callback: callable):
+        self._inner.add_python_module(name, callback)
+
 class BrainBuilder:
     """Helper class for building TOML blueprints from Python."""
     def __init__(self, name: str):

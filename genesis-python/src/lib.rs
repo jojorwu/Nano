@@ -43,6 +43,16 @@ impl PyRuntime {
         self.inner.engine.model.neurons.len()
     }
 
+    fn add_python_module(&mut self, name: String, callback: PyObject) {
+        let n_count = self.inner.engine.model.neurons.len();
+        let module = PythonModuleProxy {
+            name,
+            callback,
+            n_count,
+        };
+        self.inner.engine.modules.add_module(Box::new(module));
+    }
+
     fn get_potentials(&self) -> Vec<i32> {
         self.inner.engine.model.neurons.potential.clone()
     }
@@ -56,6 +66,27 @@ impl PyRuntime {
     fn get_thresholds(&self) -> Vec<i32> {
         self.inner.engine.model.neurons.threshold.clone()
     }
+}
+
+#[derive(Clone)]
+struct PythonModuleProxy {
+    name: String,
+    callback: PyObject,
+    n_count: usize,
+}
+
+impl genesis_core::NanoModule for PythonModuleProxy {
+    fn name(&self) -> &str { &self.name }
+    fn box_clone(&self) -> Box<dyn genesis_core::NanoModule> { Box::new(self.clone()) }
+    fn on_tick(&mut self, bus: &genesis_core::InputBus, _previous_spikes: &[bool], tick: u32) {
+        Python::with_gil(|py| {
+            let _ = self.callback.call1(py, (tick,));
+            // In a real implementation, we would pass the bus to the callback
+            // but that requires wrapping InputBus in a PyClass
+        });
+    }
+    fn on_update_weights(&mut self, _: &mut genesis_core::NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<genesis_core::IValue>) {}
+    fn on_night_phase(&mut self, _: &mut genesis_core::NeuronsSoA, _: &mut genesis_core::SynapsesSoA, _: Option<genesis_core::IValue>) {}
 }
 
 #[pymodule]

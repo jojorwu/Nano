@@ -71,6 +71,31 @@ pub trait NanoModule: Send + Sync {
     fn box_clone(&self) -> Box<dyn NanoModule>;
 }
 
+/// FFI callback type for external modules (C/C++/Python bridge).
+pub type ForeignTickFn = unsafe extern "C" fn(bus_ptr: *mut i32, bus_size: usize, tick: u32);
+
+/// A module that executes logic in a foreign language (C++, CUDA, or Python callback).
+#[derive(Clone)]
+pub struct ForeignModule {
+    pub name: String,
+    pub tick_fn: Option<ForeignTickFn>,
+}
+
+impl NanoModule for ForeignModule {
+    fn name(&self) -> &str { &self.name }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
+        if let Some(f) = self.tick_fn {
+            // Simplified bus pointer pass for Zero-Copy FFI.
+            let bus_ptr = bus.proximal().as_ptr() as *mut i32;
+            unsafe { f(bus_ptr, bus.size, tick); }
+        }
+    }
+    fn on_update_weights(&mut self, _: &mut NeuronsSoA, _: &[bool], _: &[bool], _: u32, _: Option<IValue>) {}
+    fn on_night_phase(&mut self, _: &mut NeuronsSoA, _: &mut SynapsesSoA, _: Option<IValue>) {}
+    fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
+}
+
 impl Clone for Box<dyn NanoModule> {
     fn clone(&self) -> Box<dyn NanoModule> {
         self.box_clone()

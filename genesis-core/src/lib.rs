@@ -24,7 +24,7 @@ pub mod plasticity;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
-pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput};
+pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput, ForeignModule, ForeignTickFn};
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI};
 pub use config::NetworkConfig;
 
@@ -55,6 +55,7 @@ pub struct NeuromodulationState {
 /// Thinking Mode Module: Enables "Chain of Thought" reasoning by performing
 /// extra simulation sub-ticks for each external input tick.
 /// This allows the network to iterate internally without new modality data.
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThinkModule {
     pub extra_ticks: usize,
