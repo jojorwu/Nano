@@ -22,21 +22,68 @@ extern "C" {
 
 pub struct CppBackend {
     pub name: &'static str,
+    pub synapse_offsets: Vec<u32>,
+    pub synapse_indices_flat: Vec<usize>,
 }
 
 impl Default for CppBackend {
     fn default() -> Self {
-        Self { name: "CppBackend" }
+        Self {
+            name: "CppBackend",
+            synapse_offsets: Vec::new(),
+            synapse_indices_flat: Vec::new(),
+        }
+    }
+}
+
+impl CppBackend {
+    fn rebuild_index_internal(&mut self, model: &BakedModel) {
+        let n_count = model.neurons.len();
+        let s_count = model.synapses.len();
+
+        let mut forward_counts = vec![0u32; n_count * 16];
+        for (&src, &delay) in model.synapses.source_index.iter().zip(&model.synapses.delay) {
+            let src = src as usize;
+            if src < n_count {
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                forward_counts[src * 16 + d_idx] += 1;
+            }
+        }
+
+        self.synapse_offsets = vec![0u32; n_count * 16 + 1];
+        for i in 0..(n_count * 16) {
+            self.synapse_offsets[i + 1] = self.synapse_offsets[i] + forward_counts[i];
+        }
+
+        self.synapse_indices_flat = vec![0; s_count];
+        let mut current_forward_offsets = self.synapse_offsets.clone();
+        for (i, (&src, &delay)) in model.synapses.source_index.iter().zip(&model.synapses.delay).enumerate() {
+            let src = src as usize;
+            if src < n_count {
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                let pos = &mut current_forward_offsets[src * 16 + d_idx];
+                self.synapse_indices_flat[*pos as usize] = i;
+                *pos += 1;
+            }
+        }
     }
 }
 
 impl ComputeBackend for CppBackend {
     fn name(&self) -> &'static str { self.name }
 
+    fn rebuild_index(&mut self, model: &BakedModel) {
+        self.rebuild_index_internal(model);
+    }
+
     fn execute_kernel(&mut self, kernel: SimulationKernel, model: &mut BakedModel, ctx: &KernelContext) -> Option<SpikeData> {
         match kernel {
             SimulationKernel::PropagateSynapses => {
                 let n_count = model.neurons.len();
+                if self.synapse_offsets.is_empty() {
+                    self.rebuild_index_internal(model);
+                }
+
                 // Apply external inputs directly to proximal potential with dendritic gating
                 for (i, &val) in ctx.external_inputs.iter().enumerate() {
                     if i < n_count {
@@ -47,12 +94,13 @@ impl ComputeBackend for CppBackend {
                 }
 
                 unsafe {
+                    let syn_ffi = model.synapses.as_ffi(self.synapse_offsets.as_ptr(), self.synapse_indices_flat.as_ptr());
                     cpp_propagate_spikes(
-                        model.synapses.as_ffi(),
+                        syn_ffi,
                         ctx.previous_spikes.as_ptr(),
                         model.neurons.as_ffi()
                     );
-                    cpp_recover_stp(model.synapses.as_ffi());
+                    cpp_recover_stp(syn_ffi);
                 }
                 None
             }

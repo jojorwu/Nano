@@ -1,4 +1,4 @@
-use genesis_core::{BakedModel, IValue, SpikeData, NeuromodulationState, NeuronsFFI};
+use genesis_core::{BakedModel, IValue, SpikeData, NeuromodulationState, NeuronsFFI, SynapsesFFI};
 use crate::{ComputeBackend, SimulationKernel, KernelContext};
 
 // Opaque type for CUDA stream
@@ -7,11 +7,7 @@ pub struct CudaStream(std::ffi::c_void);
 
 extern "C" {
     fn cuda_propagate_spikes(
-        source_indices: *const u32,
-        target_indices: *const u32,
-        weights: *const IValue,
-        compartments: *const u8,
-        synapse_count: u32,
+        synapses: SynapsesFFI,
         previous_spikes: *const bool,
         neurons: NeuronsFFI,
         stream: *mut CudaStream
@@ -30,6 +26,8 @@ extern "C" {
 pub struct CudaBackend {
     pub name: &'static str,
     stream: *mut CudaStream,
+    pub synapse_offsets: Vec<u32>,
+    pub synapse_indices_flat: Vec<usize>,
 }
 
 // SAFETY: CudaStream is an opaque pointer that can be moved between threads in typical CUDA usage
@@ -40,7 +38,42 @@ impl Default for CudaBackend {
     fn default() -> Self {
         Self {
             name: "CudaBackend",
-            stream: std::ptr::null_mut(), // In real implementation, create a stream here
+            stream: std::ptr::null_mut(),
+            synapse_offsets: Vec::new(),
+            synapse_indices_flat: Vec::new(),
+        }
+    }
+}
+
+impl CudaBackend {
+    fn rebuild_index_internal(&mut self, model: &BakedModel) {
+        let n_count = model.neurons.len();
+        let s_count = model.synapses.len();
+
+        let mut forward_counts = vec![0u32; n_count * 16];
+        for (&src, &delay) in model.synapses.source_index.iter().zip(&model.synapses.delay) {
+            let src = src as usize;
+            if src < n_count {
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                forward_counts[src * 16 + d_idx] += 1;
+            }
+        }
+
+        self.synapse_offsets = vec![0u32; n_count * 16 + 1];
+        for i in 0..(n_count * 16) {
+            self.synapse_offsets[i + 1] = self.synapse_offsets[i] + forward_counts[i];
+        }
+
+        self.synapse_indices_flat = vec![0; s_count];
+        let mut current_forward_offsets = self.synapse_offsets.clone();
+        for (i, (&src, &delay)) in model.synapses.source_index.iter().zip(&model.synapses.delay).enumerate() {
+            let src = src as usize;
+            if src < n_count {
+                let d_idx = (delay.clamp(1, 16) - 1) as usize;
+                let pos = &mut current_forward_offsets[src * 16 + d_idx];
+                self.synapse_indices_flat[*pos as usize] = i;
+                *pos += 1;
+            }
         }
     }
 }
@@ -48,16 +81,19 @@ impl Default for CudaBackend {
 impl ComputeBackend for CudaBackend {
     fn name(&self) -> &'static str { self.name }
 
+    fn rebuild_index(&mut self, model: &BakedModel) {
+        self.rebuild_index_internal(model);
+    }
+
     fn execute_kernel(&mut self, kernel: SimulationKernel, model: &mut BakedModel, ctx: &KernelContext) -> Option<SpikeData> {
         match kernel {
             SimulationKernel::PropagateSynapses => {
+                if self.synapse_offsets.is_empty() {
+                    self.rebuild_index_internal(model);
+                }
                 unsafe {
                     cuda_propagate_spikes(
-                        model.synapses.source_index.as_ptr(),
-                        model.synapses.target_index.as_ptr(),
-                        model.synapses.weight.as_ptr(),
-                        model.synapses.compartment.as_ptr() as *const u8,
-                        model.synapses.len() as u32,
+                        model.synapses.as_ffi(self.synapse_offsets.as_ptr(), self.synapse_indices_flat.as_ptr()),
                         ctx.previous_spikes.as_ptr(),
                         model.neurons.as_ffi(),
                         self.stream

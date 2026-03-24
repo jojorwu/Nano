@@ -227,6 +227,7 @@ pub struct SynapsesSoA {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SynapsesFFI {
     pub source_index: *const u32,
     pub target_index: *const u32,
@@ -236,10 +237,14 @@ pub struct SynapsesFFI {
     pub stp_calcium: *mut IValue,
     pub compartment: *const u8,
     pub len: u32,
+
+    // CSR Index support
+    pub offsets: *const u32,       // size: (n_count * 16) + 1
+    pub indices_flat: *const usize, // size: len
 }
 
 impl SynapsesSoA {
-    pub fn as_ffi(&mut self) -> SynapsesFFI {
+    pub fn as_ffi(&mut self, offsets: *const u32, indices: *const usize) -> SynapsesFFI {
         SynapsesFFI {
             source_index: self.source_index.as_ptr(),
             target_index: self.target_index.as_ptr(),
@@ -249,6 +254,8 @@ impl SynapsesSoA {
             stp_calcium: self.stp_calcium.as_mut_ptr(),
             compartment: self.compartment.as_ptr() as *const u8,
             len: self.len() as u32,
+            offsets,
+            indices_flat: indices,
         }
     }
 }

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <immintrin.h> // SIMD
 
 extern "C" {
     // Structure equivalent to NeuronsSoA pointers for Zero-Copy FFI
@@ -36,6 +37,10 @@ extern "C" {
         int32_t* stp_calcium;
         const uint8_t* compartment;
         uint32_t len;
+
+        // CSR support
+        const uint32_t* offsets;
+        const size_t* indices_flat;
     };
 
     // Physics Helpers (must match physics.rs exactly)
@@ -82,48 +87,54 @@ extern "C" {
         const bool* previous_spikes,
         NeuronsFFI neurons
     ) {
+        // Optimized CSR traversal
         #pragma omp parallel for
-        for (uint32_t i = 0; i < synapses.len; ++i) {
-            uint32_t src = synapses.source_index[i];
+        for (uint32_t src = 0; src < neurons.len; ++src) {
             if (previous_spikes[src]) {
-                uint32_t target = synapses.target_index[i];
-                int32_t gate = neurons.dendritic_gate[target];
-                if (gate < 8) continue; // Match Rust CpuBackend check
+                uint32_t start = synapses.offsets[src * 16];
+                uint32_t end = synapses.offsets[src * 16 + 1];
 
-                int32_t weight = synapses.weight[i];
-                uint8_t comp = synapses.compartment[i];
+                for (uint32_t i = start; i < end; ++i) {
+                    size_t syn_idx = synapses.indices_flat[i];
+                    uint32_t target = synapses.target_index[syn_idx];
 
-                // STP Implementation
-                int32_t u_facilitation = synapses.stp_calcium[i];
-                int32_t r_depression = synapses.stp_resources[i];
+                    int32_t gate = neurons.dendritic_gate[target];
+                    if (gate < 8) continue;
 
-                int32_t stp_weight = (int64_t(weight) * r_depression) >> 10;
-                stp_weight = (int64_t(stp_weight) * (1024 + u_facilitation)) >> 10;
+                    int32_t weight = synapses.weight[syn_idx];
+                    uint8_t comp = synapses.compartment[syn_idx];
 
-                // Consumption
-                synapses.stp_resources[i] = (int64_t(synapses.stp_resources[i]) * 800) >> 10;
-                int32_t new_calcium = synapses.stp_calcium[i] + 200;
-                synapses.stp_calcium[i] = (new_calcium > 1024) ? 1024 : new_calcium;
+                    int32_t u_facilitation = synapses.stp_calcium[syn_idx];
+                    int32_t r_depression = synapses.stp_resources[syn_idx];
 
-                int32_t gated_weight = (int64_t(stp_weight) * gate) >> 10;
+                    int32_t stp_weight = (int64_t(weight) * r_depression) >> 10;
+                    stp_weight = (int64_t(stp_weight) * (1024 + u_facilitation)) >> 10;
 
-                switch (comp) {
-                    case 0:
-                        #pragma omp atomic update
-                        neurons.proximal_potential[target] += gated_weight;
-                        break;
-                    case 1:
-                        #pragma omp atomic update
-                        neurons.distal_potential[target] += gated_weight;
-                        break;
-                    case 2:
-                        #pragma omp atomic update
-                        neurons.apical_potential[target] += gated_weight;
-                        break;
-                    case 3:
-                        #pragma omp atomic update
-                        neurons.basal_potential[target] += gated_weight;
-                        break;
+                    // Consumption
+                    synapses.stp_resources[syn_idx] = (int64_t(synapses.stp_resources[syn_idx]) * 800) >> 10;
+                    int32_t new_calcium = synapses.stp_calcium[syn_idx] + 200;
+                    synapses.stp_calcium[syn_idx] = (new_calcium > 1024) ? 1024 : new_calcium;
+
+                    int32_t gated_weight = (int64_t(stp_weight) * gate) >> 10;
+
+                    switch (comp) {
+                        case 0:
+                            #pragma omp atomic update
+                            neurons.proximal_potential[target] += gated_weight;
+                            break;
+                        case 1:
+                            #pragma omp atomic update
+                            neurons.distal_potential[target] += gated_weight;
+                            break;
+                        case 2:
+                            #pragma omp atomic update
+                            neurons.apical_potential[target] += gated_weight;
+                            break;
+                        case 3:
+                            #pragma omp atomic update
+                            neurons.basal_potential[target] += gated_weight;
+                            break;
+                    }
                 }
             }
         }
@@ -145,6 +156,8 @@ extern "C" {
         int32_t ip_dec,
         int32_t noise_amp
     ) {
+        // High-speed pass using SIMD for potential aggregation where possible.
+        // For the full LIF logic with branching, we use auto-vectorization friendly loops.
         #pragma omp parallel for
         for (uint32_t i = 0; i < neurons.len; ++i) {
             int32_t pot = neurons.potential[i];

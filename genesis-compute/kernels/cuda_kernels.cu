@@ -12,37 +12,92 @@ struct NeuronsFFI {
     int32_t* threshold;
     int32_t* decay;
     int32_t* dendritic_gate;
+    int32_t* gate_threshold;
+    int32_t* adaptation_current;
+    int32_t* refractory_timer;
+    uint32_t* last_spike_tick;
+    int32_t* backprop_signal;
+    int32_t* activity_ema;
+    int32_t* base_threshold;
+    int32_t* liquid_current;
+    uint8_t* is_excitatory;
     uint32_t len;
 };
 
+struct SynapsesFFI {
+    const uint32_t* source_index;
+    const uint32_t* target_index;
+    int32_t* weight;
+    const uint8_t* delay;
+    int32_t* stp_resources;
+    int32_t* stp_calcium;
+    const uint8_t* compartment;
+    uint32_t len;
+    const uint32_t* offsets;
+    const size_t* indices_flat;
+};
+
+// Physics Helpers (Device only)
+__device__ inline int32_t sigmoid_gate_approx_gpu(int32_t input, int32_t theta) {
+    int32_t diff = input - theta;
+    if (diff > 512) return 1024;
+    int32_t val = diff + 512;
+    if (val < 64) return 64;
+    return val;
+}
+
+__device__ inline int32_t calculate_dynamic_decay_gpu(int32_t base_decay, int32_t proximal, int32_t distal) {
+    int32_t liquid_mod = ((abs(proximal) + abs(distal)) * 10) >> 10;
+    int32_t res = base_decay - liquid_mod;
+    return res > 1 ? res : 1;
+}
+
 __global__ void propagate_spikes_kernel(
-    const uint32_t* source_indices,
-    const uint32_t* target_indices,
-    const int32_t* weights,
-    const uint8_t* compartments,
-    uint32_t synapse_count,
+    SynapsesFFI synapses,
     const bool* previous_spikes,
     NeuronsFFI neurons
 ) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < synapse_count) {
-        if (previous_spikes[source_indices[idx]]) {
-            uint32_t target = target_indices[idx];
-            int32_t weight = weights[idx];
-            uint8_t comp = compartments[idx];
+    uint32_t src = blockIdx.x * blockDim.x + threadIdx.x;
+    if (src < neurons.len) {
+        if (previous_spikes[src]) {
+            uint32_t start = synapses.offsets[src * 16];
+            uint32_t end = synapses.offsets[src * 16 + 1];
 
-            // Use atomic addition for thread-safe potential updates
-            switch (comp) {
-                case 0: atomicAdd(&neurons.proximal_potential[target], weight); break;
-                case 1: atomicAdd(&neurons.distal_potential[target], weight); break;
-                case 2: atomicAdd(&neurons.apical_potential[target], weight); break;
-                case 3: atomicAdd(&neurons.basal_potential[target], weight); break;
+            for (uint32_t i = start; i < end; ++i) {
+                size_t syn_idx = synapses.indices_flat[i];
+                uint32_t target = synapses.target_index[syn_idx];
+
+                int32_t gate = neurons.dendritic_gate[target];
+                if (gate < 8) continue;
+
+                int32_t weight = synapses.weight[syn_idx];
+                uint8_t comp = synapses.compartment[syn_idx];
+
+                int32_t u_facilitation = synapses.stp_calcium[syn_idx];
+                int32_t r_depression = synapses.stp_resources[syn_idx];
+
+                int32_t stp_weight = (int64_t(weight) * r_depression) >> 10;
+                stp_weight = (int64_t(stp_weight) * (1024 + u_facilitation)) >> 10;
+
+                // Consumption (Atomic not strictly needed here if single thread per src,
+                // but multiple threads might target same neuron)
+                atomicExch(&synapses.stp_resources[syn_idx], (int32_t)((int64_t(synapses.stp_resources[syn_idx]) * 800) >> 10));
+                int32_t new_calcium = synapses.stp_calcium[syn_idx] + 200;
+                atomicExch(&synapses.stp_calcium[syn_idx], (new_calcium > 1024) ? 1024 : new_calcium);
+
+                int32_t gated_weight = (int64_t(stp_weight) * gate) >> 10;
+
+                switch (comp) {
+                    case 0: atomicAdd(&neurons.proximal_potential[target], gated_weight); break;
+                    case 1: atomicAdd(&neurons.distal_potential[target], gated_weight); break;
+                    case 2: atomicAdd(&neurons.apical_potential[target], gated_weight); break;
+                    case 3: atomicAdd(&neurons.basal_potential[target], gated_weight); break;
+                }
             }
         }
     }
 }
 
-// Grid-stride loop for spike propagation on CUDA
 __global__ void cuda_update_neurons_kernel(
     NeuronsFFI neurons,
     uint32_t current_tick,
@@ -52,43 +107,86 @@ __global__ void cuda_update_neurons_kernel(
 ) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < neurons.len) {
-        // Leaky Integrate-and-Fire with Integer Physics on GPU
-        int32_t pot = neurons.proximal_potential[i] + neurons.distal_potential[i];
+        int32_t pot = neurons.potential[i];
+        int32_t prox = neurons.proximal_potential[i];
+        int32_t dist = neurons.distal_potential[i];
+        int32_t apical = neurons.apical_potential[i];
+        int32_t basal = neurons.basal_potential[i];
+        int32_t g_thresh = neurons.gate_threshold[i];
+        int32_t liquid = neurons.liquid_current[i];
+        int32_t adaptation = neurons.adaptation_current[i];
+        int32_t refr = neurons.refractory_timer[i];
 
-        // Apply decay
-        pot = (int64_t(pot) * (1024 - neurons.decay[i])) >> 10;
+        int32_t dist_gain = sigmoid_gate_approx_gpu(prox, g_thresh);
+        int32_t dist_gated = (int64_t(dist) * dist_gain) >> 10;
 
-        if (pot >= neurons.threshold[i]) {
-            new_spikes[i] = true;
+        int32_t apical_gain = sigmoid_gate_approx_gpu(dist_gated, g_thresh);
+        int32_t apical_gated = (int64_t(apical) * apical_gain) >> 10;
+
+        int32_t mod_factor = (basal < 0) ? 800 : ((basal > 512) ? 1200 : 1024);
+
+        int32_t current_pot = pot;
+        current_pot += prox;
+        current_pot += dist_gated;
+        current_pot += apical_gated;
+        current_pot += liquid;
+        current_pot -= adaptation;
+
+        current_pot = (int64_t(current_pot) * mod_factor) >> 10;
+
+        int32_t d_val = calculate_dynamic_decay_gpu(neurons.decay[i], prox, dist);
+        int32_t final_pot = (int64_t(current_pot) * (1024 - d_val)) >> 10;
+
+        int32_t refr_mult = (refr > 0) ? (1 + (1 << refr)) : 1;
+        int64_t effective_threshold = (int64_t)neurons.threshold[i] * refr_mult;
+
+        bool fired = final_pot >= effective_threshold;
+        new_spikes[i] = fired;
+
+        if (fired) {
             neurons.potential[i] = 0;
             neurons.threshold[i] += ip_inc;
+            neurons.adaptation_current[i] += 100;
+            neurons.refractory_timer[i] = 4;
+            neurons.last_spike_tick[i] = current_tick;
+            neurons.backprop_signal[i] = 1024;
         } else {
-            new_spikes[i] = false;
-            neurons.potential[i] = pot;
-            if (neurons.threshold[i] > 1024) neurons.threshold[i] -= ip_dec;
+            neurons.potential[i] = final_pot;
+            if (neurons.threshold[i] > neurons.base_threshold[i]) {
+                neurons.threshold[i] -= ip_dec;
+            }
+            neurons.adaptation_current[i] = (int64_t(neurons.adaptation_current[i]) * 95) / 100;
+            if (refr > 0) neurons.refractory_timer[i]--;
+            neurons.backprop_signal[i] = (int64_t(neurons.backprop_signal[i]) * 800) >> 10;
         }
 
-        // Reset buffers
+        neurons.activity_ema[i] = (int64_t(neurons.activity_ema[i]) * 990 + (fired ? 1000 : 0)) / 1000;
+        int32_t error = neurons.activity_ema[i] - 100;
+        if (error > 0) {
+            int32_t rate = (abs(error) > 100) ? 2 : 1;
+            neurons.base_threshold[i] += rate;
+        } else if (error < 0 && neurons.base_threshold[i] > 512) {
+            neurons.base_threshold[i] -= 1;
+        }
+
         neurons.proximal_potential[i] = 0;
         neurons.distal_potential[i] = 0;
+        neurons.apical_potential[i] = 0;
+        neurons.basal_potential[i] = 0;
     }
 }
 
 extern "C" {
     void cuda_propagate_spikes(
-        const uint32_t* source_indices,
-        const uint32_t* target_indices,
-        const int32_t* weights,
-        const uint8_t* compartments,
-        uint32_t synapse_count,
+        SynapsesFFI synapses,
         const bool* previous_spikes,
         NeuronsFFI neurons,
         cudaStream_t stream
     ) {
         uint32_t threadsPerBlock = 256;
-        uint32_t blocksPerGrid = (synapse_count + threadsPerBlock - 1) / threadsPerBlock;
+        uint32_t blocksPerGrid = (neurons.len + threadsPerBlock - 1) / threadsPerBlock;
         propagate_spikes_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
-            source_indices, target_indices, weights, compartments, synapse_count, previous_spikes, neurons
+            synapses, previous_spikes, neurons
         );
     }
 
