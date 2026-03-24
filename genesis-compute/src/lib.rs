@@ -141,6 +141,57 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_parity() {
+        #[cfg(feature = "wgpu")]
+        use crate::wgpu::GpuNeuronState;
+        let mut model = BakedModel {
+            version: "4.2".to_string(),
+            config: genesis_core::NetworkConfig { learning_rate: 100, ..Default::default() },
+            node_id: 0,
+            local_range: (0, 2),
+            neurons: {
+                let mut n = NeuronsSoA::new(2);
+                n.last_spike_tick[0] = 5;
+                n.last_spike_tick[1] = 8;
+                n
+            },
+            synapses: {
+                let mut s = SynapsesSoA::with_capacity(1);
+                s.push(0, 1, 1000);
+                s
+            },
+            module_states: std::collections::HashMap::new(),
+            #[cfg(feature = "titan")]
+            titan_memory: None,
+            has_text: false,
+            has_vision: false,
+            has_audio: false,
+            has_robotics: false,
+            has_fusion: false,
+            vocabulary: std::collections::HashMap::new(),
+        };
+
+        let mut cpu = CpuBackend::default();
+        let mut model_cpu = model.clone();
+        cpu.update_weights_modulated(&mut model_cpu, &[true, false], &[false, true], 10, None, Default::default(), &[]);
+
+        #[cfg(feature = "wgpu")]
+        {
+            match crate::wgpu::WgpuBackend::new() {
+                Ok(mut wgpu) => {
+                    let mut model_gpu = model.clone();
+                    wgpu.update_weights_modulated(&mut model_gpu, &[true, false], &[false, true], 10, None, Default::default(), &[]);
+                    wgpu.sync_state(&mut model_gpu);
+                    assert_eq!(model_cpu.synapses.weight[0], model_gpu.synapses.weight[0], "CPU/GPU Weight parity failed");
+                }
+                Err(e) => {
+                    log::warn!("WGPU Backend not available for parity test: {}", e);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_cpu_dendritic_gating() {
         let mut model = BakedModel {
             version: "4.0".to_string(),

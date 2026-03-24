@@ -56,8 +56,21 @@ impl CpuBackend {
 
             let d_idx = (d - 1) as usize;
 
-            for (src, &fired) in spikes.iter().enumerate() {
-                if !fired { continue; }
+            // Find active source neurons
+            let active_sources: Vec<usize> = spikes.iter().enumerate()
+                .filter(|&(_, &fired)| fired)
+                .map(|(i, _)| i)
+                .collect();
+
+            if active_sources.is_empty() { continue; }
+
+            // To parallelize without atomics, we'd need to group by target.
+            // Instead, let's process source neurons in parallel chunks
+            // and use raw pointers for potential additions (safe if we accept
+            // minor jitter or use a more complex grouping).
+            // For now, let's optimize the inner loop processing.
+
+            for &src in &active_sources {
                 if src >= self.synapse_index.len() { continue; }
 
                 for &syn_idx in &self.synapse_index[src][d_idx] {
@@ -130,21 +143,17 @@ impl CpuBackend {
 
         let neurons = &mut model.neurons;
 
-        let (pot, next_upd, refr, last_spk, bprop, thresh, activity, b_thresh, adaptation) = (
-            &mut neurons.potential, &mut neurons.next_update_tick, &mut neurons.refractory_timer,
-            &mut neurons.last_spike_tick, &mut neurons.backprop_signal, &mut neurons.threshold,
-            &mut neurons.activity_ema, &mut neurons.base_threshold, &mut neurons.adaptation_current
-        );
-
-        let spike_results: Vec<bool> = pot.par_iter_mut()
-            .zip(next_upd.par_iter_mut())
-            .zip(refr.par_iter_mut())
-            .zip(last_spk.par_iter_mut())
-            .zip(bprop.par_iter_mut())
-            .zip(thresh.par_iter_mut())
-            .zip(activity.par_iter_mut())
-            .zip(b_thresh.par_iter_mut())
-            .zip(adaptation.par_iter_mut())
+        // Optimization: Use a single parallel pass over the SoA structures.
+        // We ensure Rayon parallelizes efficiently.
+        let spike_results: Vec<bool> = neurons.potential.par_iter_mut()
+            .zip(neurons.next_update_tick.par_iter_mut())
+            .zip(neurons.refractory_timer.par_iter_mut())
+            .zip(neurons.last_spike_tick.par_iter_mut())
+            .zip(neurons.backprop_signal.par_iter_mut())
+            .zip(neurons.threshold.par_iter_mut())
+            .zip(neurons.activity_ema.par_iter_mut())
+            .zip(neurons.base_threshold.par_iter_mut())
+            .zip(neurons.adaptation_current.par_iter_mut())
             .zip(&neurons.proximal_potential)
             .zip(&neurons.distal_potential)
             .zip(&neurons.apical_potential)
@@ -213,11 +222,14 @@ impl ComputeBackend for CpuBackend {
         self.propagate_sparse_delayed_spikes(model, previous_spikes, history);
         self.propagate_latent_spikes(model, previous_spikes);
 
-        // STP Recovery: gradual return to baseline for all synapses
-        for i in 0..model.synapses.len() {
-            model.synapses.stp_resources[i] = (model.synapses.stp_resources[i] * 99 + SCALE) / 100;
-            model.synapses.stp_calcium[i] = (model.synapses.stp_calcium[i] * 95) / 100;
-        }
+        // Parallelized STP Recovery
+        let synapses = &mut model.synapses;
+        synapses.stp_resources.par_iter_mut()
+            .zip(synapses.stp_calcium.par_iter_mut())
+            .for_each(|(r, c)| {
+                *r = (*r * 99 + SCALE) / 100;
+                *c = (*c * 95) / 100;
+            });
 
         let mut new_spikes = vec![false; n_count];
         self.update_neuron_states(model, current_tick, &mut new_spikes);
@@ -232,6 +244,9 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: genesis_core::NeuromodulationState, _history: &[Vec<bool>]) {
+        // Apply learning rate from model config
+        self.plasticity_rule = Box::new(GsopRule { learning_rate: model.config.learning_rate });
+
         for i in 0..model.synapses.len() {
             let src = model.synapses.source_index[i] as usize;
             let target = model.synapses.target_index[i] as usize;

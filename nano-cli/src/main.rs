@@ -68,13 +68,13 @@ impl SimulationSession {
         if let Ok(content) = fs::read_to_string("nano.toml") {
              if let Ok(global) = toml::from_str::<GlobalConfig>(&content) {
                  if let Some(net_cfg) = global.network {
-                     runtime.model.config = net_cfg;
+                     runtime.engine.model.config = net_cfg;
                  }
              }
         }
 
         if let Some(lr) = lr_override {
-            runtime.model.config.learning_rate = lr;
+            runtime.engine.model.config.learning_rate = lr;
         }
         Self { runtime }
     }
@@ -95,11 +95,11 @@ impl SimulationSession {
 
         // Execution loop: run until all transient inputs are processed
         loop {
-            let spikes = self.runtime.tick(&vec![0; self.runtime.model.neurons.len()]);
+            let spikes = self.runtime.tick(&vec![0; self.runtime.engine.model.neurons.len()]);
             let count = spikes.iter().filter(|&&s| s).count();
 
             let mut transient_active = false;
-            for m in &self.runtime.modules.modules {
+            for m in &self.runtime.engine.modules.modules {
                 if m.name() == "text_processor" {
                     let state: genesis_core::text::TextProcessorModule = bincode::deserialize(&m.get_state()).unwrap();
                     if !state.last_tokens.is_empty() { transient_active = true; }
@@ -114,7 +114,7 @@ impl SimulationSession {
 
     fn finish(&mut self, path: &str) {
         self.runtime.sync_state();
-        self.runtime.model.save(path).expect("Failed to save model");
+        self.runtime.engine.model.save(path).expect("Failed to save model");
         println!("✨ Simulation finished. State saved.");
     }
 }
@@ -175,7 +175,7 @@ vocab_size = 1000
             {
                 run_gym_commands(&mut runtime, env_name, *episodes);
             }
-            runtime.model.save(model).expect("Failed to save");
+            runtime.engine.model.save(model).expect("Failed to save");
         }
         Commands::Export { model, name } => {
             let dir = format!("models/{}", name);
@@ -201,7 +201,7 @@ vocab_size = 1000
         }
         Commands::Shell { model, backend } => {
             let mut session = SimulationSession::new(model, None, backend.clone());
-            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.backend.name());
+            println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.engine.backend.name());
             println!("Type 'help' for a list of commands.");
 
             use std::io::{Write, BufRead};
@@ -247,20 +247,20 @@ fn run_gym_commands(runtime: &mut Runtime, env_name: &str, episodes: usize) {
 #[cfg(feature = "rl")]
 fn run_gym_loop(runtime: &mut Runtime, env: &mut dyn genesis_core::rl::Environment, episodes: usize, history: &mut Vec<i32>) {
     use genesis_core::rl::RLAgent;
-    let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.model.neurons.len());
+    let agent = RLAgent::new(env.observation_space(), env.action_space(), runtime.engine.model.neurons.len());
 
     for ep in 0..episodes {
         let mut obs = env.reset();
         let mut total_reward = 0;
         let mut done = false;
         while !done {
-            let inputs = agent.encode_observation(&obs, runtime.model.neurons.len());
+            let inputs = agent.encode_observation(&obs, runtime.engine.model.neurons.len());
             let spikes = runtime.tick_with_reward(&inputs, None);
             let actions = agent.decode_action(&spikes);
             let (next_obs, reward, is_done) = env.step(&actions);
 
             let mean = if history.is_empty() { 0 } else { history.iter().sum::<i32>() / history.len() as i32 };
-            runtime.tick_with_reward(&vec![0; runtime.model.neurons.len()], Some(reward - mean));
+            runtime.tick_with_reward(&vec![0; runtime.engine.model.neurons.len()], Some(reward - mean));
 
             total_reward += reward;
             obs = next_obs;

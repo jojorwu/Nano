@@ -135,19 +135,21 @@ impl PlasticityRule for GsopRule {
         };
 
         let smbp_mod = if ctx.compartment != Compartment::Proximal {
-            (SCALE + ctx.backprop_signal) >> 10
+            SCALE as i64 + ctx.backprop_signal as i64
         } else {
-            1
+            SCALE as i64
         };
 
-        let neuromod_gain = (SCALE + ctx.neuromodulation.noradrenaline) as i64;
-        let dopamine_gain = (SCALE + ctx.neuromodulation.dopamine.abs()) as i64;
+        let neuromod_gain = SCALE as i64 + ctx.neuromodulation.noradrenaline as i64;
+        let dopamine_gain = SCALE as i64 + ctx.neuromodulation.dopamine.abs() as i64;
 
-        let lr = (lr as i64 * neuromod_gain * dopamine_gain) >> 20;
-        let lr = lr as i32;
+        let lr_f = (lr as i64 * neuromod_gain) >> 10;
+        let lr_f = (lr_f * dopamine_gain) >> 10;
+        let lr_f = (lr_f * smbp_mod) >> 10;
+        let lr_final = lr_f as i32;
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
-        let lr_mod = lr * reward_mod * smbp_mod;
+        let lr_mod = lr_final * reward_mod;
 
         let old_weight = *weight;
         if ctx.pre_spiked && ctx.post_spiked {
