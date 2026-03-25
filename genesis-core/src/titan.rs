@@ -13,8 +13,8 @@ pub struct BitWiseTitan {
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
-    /// L3 Buffer: most recent episodic patterns for cross-referencing
-    pub l3_buffer: Vec<Vec<u32>>,
+    /// L3 Buffer: most recent episodic patterns for consolidation
+    pub l3_buffer: Vec<EpisodicEvent>,
     /// Context Hashes: maps 64-bit pattern hash to a list of associated block_ids
     pub context_hashes: std::collections::HashMap<u64, Vec<u32>>,
     /// LSH (Locality Sensitive Hashing) tables for fuzzy retrieval
@@ -29,6 +29,12 @@ pub struct BitWiseTitan {
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EpisodicEvent {
+    pub context_hash: u64,
+    pub active_blocks: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -97,8 +103,10 @@ impl BitWiseTitan {
     }
 
     fn ensure_capacity(&mut self, max_bid: u32) {
+        // Limit max_bid to prevent excessive memory allocation (e.g. 1M blocks)
+        let max_bid = max_bid.min(1_000_000);
         if (max_bid as usize) >= self.block_offsets.len() {
-            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2);
+            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2).min(1_000_000);
             self.block_offsets.resize(new_size, 0);
             self.block_counts.resize(new_size, 0);
             self.block_utility.resize(new_size, 0.0);
@@ -114,6 +122,7 @@ impl BitWiseTitan {
     }
 
     pub fn update_block(&mut self, bid: u32, new_assocs: Vec<Association>) {
+        if (bid as usize) >= self.block_offsets.len() { return; }
         // High-efficiency update: use a simple append-only strategy with fragmentation
         // Defragmentation happens during night_phase.
         let current_count = self.block_counts[bid as usize] as usize;
@@ -155,7 +164,8 @@ impl BitWiseTitan {
                 }
             }
             if !active_blocks.is_empty() {
-                self.l3_buffer.push(active_blocks);
+                let context_hash = Self::compute_context_hash(&now);
+                self.l3_buffer.push(EpisodicEvent { context_hash, active_blocks });
             }
         }
 
@@ -221,7 +231,10 @@ impl BitWiseTitan {
                         if changed {
                             self.update_block(src_bid, entries);
                             // Associate this block with the current contextual hash
-                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            let hash_entry = self.context_hashes.entry(current_hash).or_default();
+                            if !hash_entry.contains(&src_bid) {
+                                hash_entry.push(src_bid);
+                            }
                             for (table_idx, &sig) in current_sigs.iter().enumerate() {
                                 let table = &mut self.lsh_tables[table_idx];
                                 let entry = table.entry(sig).or_default();
@@ -297,6 +310,9 @@ impl NanoModule for BitWiseTitan {
 
         // Memory-Mapped Interface: Read/Write from byte_memory
         if let Some((start, end)) = self.memory_mapped_range {
+            if start >= previous_spikes.len() || end > previous_spikes.len() || start >= end {
+                return;
+            }
             let mut addr = 0usize;
             let mut val = 0u8;
             let addr_bits = 16; // Fixed 16 bits for address
@@ -380,20 +396,6 @@ impl NanoModule for BitWiseTitan {
             }
         }
 
-
-        // L3 Retrieval: if we have very long-term patterns, inject them with low weight
-        if !self.l3_buffer.is_empty() {
-             for pattern in &self.l3_buffer {
-                 for (_bid, &count) in pattern.iter().enumerate() {
-                     if count > 5 {
-                         // Find representative neuron in block or apply to all?
-                         // Simplified: boost all neurons in block if L3 pattern matches
-                         // (Implementation omitted for performance in on_tick)
-                     }
-                 }
-             }
-        }
-
         // Optimized Sparse Retrieval: Map-reduce triggered blocks without O(N) loop if possible.
         // For now, we utilize the fact that previous_spikes is often sparse.
         let mut triggered_blocks = std::collections::HashSet::new();
@@ -445,7 +447,7 @@ impl NanoModule for BitWiseTitan {
         }
     }
 
-    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+    fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
         let r_val = reward.unwrap_or(0);
         log::debug!("Titan Night Phase with reward: {}", r_val);
 
@@ -486,15 +488,8 @@ impl NanoModule for BitWiseTitan {
         // This simulates the consolidation of memories from the hippocampus to the cortex.
         if !self.l3_buffer.is_empty() {
              log::debug!("Titan Deep Replay: consolidating {} episodic patterns", self.l3_buffer.len());
-             for pattern in self.l3_buffer.clone() {
-                 // Convert pattern (block activity) to consistent contextual hash
-                 let mut packed = vec![0u64; 64];
-                 for &bid in &pattern {
-                     if (bid as usize) < 64 * 64 {
-                         packed[bid as usize / 64] |= 1 << (bid % 64);
-                     }
-                 }
-                 let replay_hash = Self::compute_context_hash(&packed);
+             for event in self.l3_buffer.clone() {
+                 let replay_hash = event.context_hash;
 
                  // Strengthen associations for blocks triggered by this hash
                  let blocks = self.context_hashes.get(&replay_hash).cloned();
@@ -502,19 +497,19 @@ impl NanoModule for BitWiseTitan {
                      for &bid in &blocks {
                          let mut entries = self.get_block_mut(bid);
                          for a in &mut entries {
-                             a.weight = a.weight.saturating_add(1);
+                             a.weight = a.weight.saturating_add(5); // Consolidation boost
                          }
                          self.update_block(bid, entries);
                      }
                  }
 
-                 // If the replayed pattern exists in memory, boost all its associations
-                 for &bid in &pattern {
-                     let mut entries = self.get_block_mut(bid as u32);
+                 // Boost associations within the replayed active blocks
+                 for &bid in &event.active_blocks {
+                     let mut entries = self.get_block_mut(bid);
                      for a in &mut entries {
-                         a.weight = a.weight.saturating_add(1); // Consolidate
+                         a.weight = a.weight.saturating_add(1); // Small auxiliary boost
                      }
-                     self.update_block(bid as u32, entries);
+                     self.update_block(bid, entries);
                  }
              }
              // L3 buffer clears partially after replay (gradual transfer to long-term)
@@ -569,42 +564,30 @@ mod tests {
 
     #[test]
     fn test_memory_mapped_neurons() {
-        println!("Starting test_memory_mapped_neurons");
         let mut titan = BitWiseTitan::new(100);
         titan.byte_memory = vec![0; 256];
         titan.memory_mapped_range = Some((0, 48));
-
-        // 0..4: address bits (4 bits = 16 addresses)
-        // 4..12: value bits (8 bits)
-        // 12: write enable
-        // 13..21: read output bits
 
         let bus = crate::InputBus::new(100);
         let mut spikes = vec![false; 100];
 
         // Write value 0xAA to address 5
-        // Address 5 = 1010 binary (bits 0 and 2 set)
         spikes[0] = true;
         spikes[2] = true;
-
-        // Value 0xAA = 10101010 binary
         spikes[16 + 1] = true;
         spikes[16 + 3] = true;
         spikes[16 + 5] = true;
         spikes[16 + 7] = true;
-
-        // Write enable (addr_bits + 8 = 16 + 8 = 24)
         spikes[24] = true;
 
         titan.on_tick(&bus, &spikes, 0);
         assert_eq!(titan.byte_memory[5], 0xAA);
 
-        // Read from address 5 (without write enable)
+        // Read from address 5
         spikes[24] = false;
         bus.clear();
         titan.on_tick(&bus, &spikes, 1);
 
-        // Check if output bits (addr_bits + 9 .. = 16 + 9 = 25) got boosted
         let prox = bus.proximal();
         use std::sync::atomic::Ordering;
         assert!(prox[25 + 1].load(Ordering::Relaxed) > 0);
@@ -612,5 +595,30 @@ mod tests {
         assert!(prox[25 + 5].load(Ordering::Relaxed) > 0);
         assert!(prox[25 + 7].load(Ordering::Relaxed) > 0);
         assert_eq!(prox[25 + 0].load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_titan_deep_replay() {
+        let mut titan = BitWiseTitan::new(100);
+        let mut neurons = NeuronsSoA::new(100);
+        for i in 0..100 { neurons.block_id[i] = (i / 10) as u32; }
+
+        titan.ensure_capacity(9);
+        titan.update_block(0, vec![Association { target: 50, weight: 5 }]);
+
+        let h1 = crate::SpikeData::Sparse((0..10).collect());
+        let h2 = crate::SpikeData::Sparse((50..60).collect());
+
+        let history = vec![h2, h1];
+        titan.learn_from_history(&history, 0, &neurons, 2000);
+
+        assert!(!titan.l3_buffer.is_empty());
+        let initial_weight = titan.get_block_mut(0).iter().find(|a| a.target == 50).unwrap().weight;
+
+        let mut synapses = SynapsesSoA::with_capacity(0);
+        titan.on_night_phase(&mut neurons, &mut synapses, None);
+
+        let consolidated_weight = titan.get_block_mut(0).iter().find(|a| a.target == 50).unwrap().weight;
+        assert!(consolidated_weight > initial_weight);
     }
 }
