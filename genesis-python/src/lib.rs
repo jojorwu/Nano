@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
 use genesis_node::{Runtime, SimulationSettings};
-use genesis_core::{InputBus, Modality};
 
 #[pyclass]
 struct PyRuntime {
@@ -45,11 +44,9 @@ impl PyRuntime {
     }
 
     fn add_python_module(&mut self, name: String, callback: PyObject) {
-        let n_count = self.inner.engine.model.neurons.len();
         let module = PythonModuleProxy {
             name,
             callback,
-            n_count,
         };
         self.inner.engine.modules.add_module(Box::new(module));
     }
@@ -90,7 +87,6 @@ impl PyRuntime {
 struct PythonModuleProxy {
     name: String,
     callback: PyObject,
-    n_count: usize,
 }
 
 impl genesis_core::NanoModule for PythonModuleProxy {

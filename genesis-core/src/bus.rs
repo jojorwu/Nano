@@ -169,7 +169,7 @@ impl InputBus {
                     if suppression > 0 {
                         // Use a simple gating mechanism: if suppression is high, value is reduced.
                         // SCALE = 1024. If suppression = 1024, val = 0.
-                        return (val as i64 * (1024 - suppression).max(0) as i64 >> 10) as i32;
+                        return (val as i64 * (crate::SCALE - suppression).max(0) as i64 >> 10) as i32;
                     }
                 }
                 return val;

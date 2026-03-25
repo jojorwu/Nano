@@ -14,7 +14,7 @@ pub struct BitWiseTitan {
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
     /// L3 Buffer: most recent episodic patterns for cross-referencing
-    pub l3_buffer: Vec<Vec<u16>>,
+    pub l3_buffer: Vec<Vec<u32>>,
     /// Context Hashes: maps 64-bit pattern hash to a list of associated block_ids
     pub context_hashes: std::collections::HashMap<u64, Vec<u32>>,
     /// LSH (Locality Sensitive Hashing) tables for fuzzy retrieval
@@ -69,26 +69,7 @@ impl BitWiseTitan {
     }
 
     pub fn new(lr: IValue) -> Self {
-        let mut lsh_tables = Vec::with_capacity(4);
-        for _ in 0..4 {
-            lsh_tables.push(std::collections::HashMap::new());
-        }
-        Self {
-            associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
-            block_offsets: vec![0; 64],
-            block_counts: vec![0; 64],
-            learning_rate: lr,
-            surprise_threshold: 100,
-            decay_rate: 1,
-            l3_buffer: Vec::new(),
-            context_hashes: std::collections::HashMap::new(),
-            lsh_tables,
-            byte_memory: vec![0; 1024 * 1024], // 1MB initial byte memory
-            memory_mapped_range: None,
-            block_utility: vec![0.0; 64],
-            last_access: vec![0; 64],
-            script_sequences: Vec::new(),
-        }
+        Self::new_with_size(64, lr)
     }
 
     /// Semantic Hashing: maps block activity pattern to a context hash
@@ -174,7 +155,7 @@ impl BitWiseTitan {
                 }
             }
             if !active_blocks.is_empty() {
-                self.l3_buffer.push(active_blocks.iter().map(|&b| b as u16).collect());
+                self.l3_buffer.push(active_blocks);
             }
         }
 
@@ -221,6 +202,7 @@ impl BitWiseTitan {
                             for now_bit in 0..64 {
                                 if (now_word >> now_bit) & 1 == 1 {
                                     let tgt_idx = (j * 64 + now_bit) as u32;
+                                    if tgt_idx as usize >= n_count { continue; }
                                     let tgt_modality = neurons.layer_id[tgt_idx as usize] >> 12;
                                     let synesthesia_bonus = if src_modality != tgt_modality { 2 } else { 0 };
 
@@ -286,10 +268,14 @@ impl NanoModule for BitWiseTitan {
 
         for script in &self.script_sequences {
             let mut matched = true;
-            for (i, &pattern_word) in script.trigger_pattern.iter().enumerate() {
-                if i < packed_len && (current_packed[i] & pattern_word) != pattern_word {
-                    matched = false;
-                    break;
+            if script.trigger_pattern.is_empty() || script.trigger_pattern.len() > packed_len {
+                 matched = false;
+            } else {
+                for (i, &pattern_word) in script.trigger_pattern.iter().enumerate() {
+                    if (current_packed[i] & pattern_word) != pattern_word {
+                        matched = false;
+                        break;
+                    }
                 }
             }
 
@@ -412,11 +398,12 @@ impl NanoModule for BitWiseTitan {
         // For now, we utilize the fact that previous_spikes is often sparse.
         let mut triggered_blocks = std::collections::HashSet::new();
 
-        // Heuristic: iterate only over active indices if provided via a sparse hint or similar.
-        // Since we only have [bool], we can optimize with bitmask-style iteration if it was bitpacked.
+        // Heuristic: trigger blocks based on individual neuron firing.
+        // The block_id information is ideally stored in NeuronsSoA, but on_tick only receives spikes.
+        // We assume a default block size of 16 for triggered retrieval if no better info is available.
         for (i, &fired) in previous_spikes.iter().enumerate() {
             if fired {
-                let bid = (i / 4) as u32;
+                let bid = (i / 16) as u32; // Updated heuristic: block size 16
                 triggered_blocks.insert(bid);
             }
         }
@@ -500,6 +487,27 @@ impl NanoModule for BitWiseTitan {
         if !self.l3_buffer.is_empty() {
              log::debug!("Titan Deep Replay: consolidating {} episodic patterns", self.l3_buffer.len());
              for pattern in self.l3_buffer.clone() {
+                 // Convert pattern (block activity) to consistent contextual hash
+                 let mut packed = vec![0u64; 64];
+                 for &bid in &pattern {
+                     if (bid as usize) < 64 * 64 {
+                         packed[bid as usize / 64] |= 1 << (bid % 64);
+                     }
+                 }
+                 let replay_hash = Self::compute_context_hash(&packed);
+
+                 // Strengthen associations for blocks triggered by this hash
+                 let blocks = self.context_hashes.get(&replay_hash).cloned();
+                 if let Some(blocks) = blocks {
+                     for &bid in &blocks {
+                         let mut entries = self.get_block_mut(bid);
+                         for a in &mut entries {
+                             a.weight = a.weight.saturating_add(1);
+                         }
+                         self.update_block(bid, entries);
+                     }
+                 }
+
                  // If the replayed pattern exists in memory, boost all its associations
                  for &bid in &pattern {
                      let mut entries = self.get_block_mut(bid as u32);
@@ -531,6 +539,7 @@ impl NanoModule for BitWiseTitan {
             }
         }
         self.associations_flat = new_flat;
+        self.associations_flat.shrink_to_fit();
     }
 
     fn get_state(&self) -> Vec<u8> {
