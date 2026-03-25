@@ -33,6 +33,10 @@ pub struct BitWiseTitan {
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
+    // Configurable Limits
+    pub max_associations: usize,
+    pub max_blocks: u32,
+    pub max_entries_per_block: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -65,7 +69,7 @@ impl BitWiseTitan {
             lsh_tables_l2.push(std::collections::HashMap::new());
         }
         Self {
-            associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
+            associations_flat: Vec::with_capacity(1_000_000), // Pre-allocate for scale
             block_offsets: vec![0; size.max(64)],
             block_counts: vec![0; size.max(64)],
             learning_rate: lr,
@@ -81,6 +85,9 @@ impl BitWiseTitan {
             last_access: vec![0; size.max(64)],
             script_sequences: Vec::new(),
             active_scripts: Vec::new(),
+            max_associations: 1_000_000,
+            max_blocks: 1_000_000,
+            max_entries_per_block: 256,
         }
     }
 
@@ -130,9 +137,9 @@ impl BitWiseTitan {
 
     fn ensure_capacity(&mut self, max_bid: u32) {
         // Limit max_bid to prevent excessive memory allocation (e.g. 1M blocks)
-        let max_bid = max_bid.min(1_000_000);
+        let max_bid = max_bid.min(self.max_blocks);
         if (max_bid as usize) >= self.block_offsets.len() {
-            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2).min(1_000_000);
+            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2).min(self.max_blocks as usize);
             self.block_offsets.resize(new_size, 0);
             self.block_counts.resize(new_size, 0);
             self.block_utility.resize(new_size, 0.0);
@@ -162,6 +169,10 @@ impl BitWiseTitan {
             }
             self.block_counts[bid as usize] = new_count as u32;
         } else {
+            // Respect total association limit
+            if self.associations_flat.len() + new_count > self.max_associations {
+                return;
+            }
             // Grow: move to end of buffer
             let new_start = self.associations_flat.len();
             self.block_offsets[bid as usize] = new_start as u32;
@@ -184,7 +195,7 @@ impl BitWiseTitan {
             for oa in other_entries {
                 if let Some(ma) = my_entries.iter_mut().find(|a| a.target == oa.target) {
                     ma.weight = ma.weight.max(oa.weight);
-                } else if my_entries.len() < 256 {
+                } else if my_entries.len() < self.max_entries_per_block {
                     my_entries.push(oa);
                     changed = true;
                 }
@@ -311,7 +322,7 @@ impl BitWiseTitan {
                                         let boost = if surprise > 1500 { 5 } else { 0 };
                                         assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
                                         changed = true;
-                                    } else if entries.len() < 256 { // Increased capacity per block
+                                    } else if entries.len() < self.max_entries_per_block { // Increased capacity per block
                                         let boost = if surprise > 1500 { 10 } else { 0 };
                                         entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
                                         changed = true;

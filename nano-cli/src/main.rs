@@ -80,6 +80,13 @@ enum Commands {
         #[arg(short, long)] peer: String,
         #[arg(long)] backend: Option<String>,
     },
+    /// Manage configuration in nano.toml
+    Config {
+        /// Key to get or set (e.g., 'network.learning_rate')
+        key: String,
+        /// Value to set (if omitted, will get the current value)
+        value: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -469,6 +476,51 @@ vocab_size = 1000
 
             session.finish(model)?;
             println!("✅ Training complete.");
+        }
+        Commands::Config { key, value } => {
+            let mut table: toml::Value = if let Ok(content) = fs::read_to_string("nano.toml") {
+                toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()))
+            } else {
+                toml::Value::Table(toml::map::Map::new())
+            };
+
+            if let Some(v) = value {
+                // Set value
+                let mut current = table.as_table_mut().unwrap();
+                let parts: Vec<&str> = key.split('.').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == parts.len() - 1 {
+                        // Parse value to appropriate type
+                        let toml_val = if let Ok(i) = v.parse::<i64>() {
+                            toml::Value::Integer(i)
+                        } else if let Ok(f) = v.parse::<f64>() {
+                            toml::Value::Float(f)
+                        } else if let Ok(b) = v.parse::<bool>() {
+                            toml::Value::Boolean(b)
+                        } else {
+                            toml::Value::String(v.clone())
+                        };
+                        current.insert(part.to_string(), toml_val);
+                    } else {
+                        current = current.entry(part.to_string())
+                            .or_insert(toml::Value::Table(toml::map::Map::new()))
+                            .as_table_mut()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?;
+                    }
+                }
+                fs::write("nano.toml", toml::to_string_pretty(&table)?)?;
+                println!("✅ Config set: {} = {}", key, v);
+            } else {
+                // Get value
+                let mut current = Some(&table);
+                for part in key.split('.') {
+                    current = current.and_then(|v| v.get(part));
+                }
+                match current {
+                    Some(v) => println!("{}: {}", key, v),
+                    None => println!("❌ Key '{}' not found", key),
+                }
+            }
         }
         Commands::Remote { model, peer, backend } => {
             println!("🌐 Connecting to remote node: {}...", peer);

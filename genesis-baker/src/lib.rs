@@ -92,6 +92,10 @@ impl ModelBlueprint {
                         if let Some(dr) = decay_rate { tm.decay_rate = *dr; }
                         if let Some(ref cfg) = self.config {
                             tm.byte_memory.resize(cfg.titan_byte_memory_size, 0);
+                            tm.max_associations = cfg.titan_max_associations;
+                            tm.max_blocks = cfg.titan_max_blocks;
+                            tm.max_entries_per_block = cfg.titan_max_entries_per_block;
+                            tm.surprise_threshold = cfg.titan_surprise_threshold;
                         }
                         module_states.insert("titan".to_string(), bincode::serialize(&tm).unwrap());
                         titan_memory = Some(tm);

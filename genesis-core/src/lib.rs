@@ -33,7 +33,7 @@ pub use config::NetworkConfig;
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
-// --- Physics Constants ---
+// --- Physics Constants (Legacy/Defaults - prefer config fields) ---
 pub const DEFAULT_REFRACTORY_TICKS: i32 = 4;
 pub const SMBP_DECAY: i64 = 800; // Multiplier out of SCALE
 pub const ACTIVITY_EMA_ALPHA: i64 = 99; // Alpha out of 100
@@ -118,6 +118,7 @@ pub struct PlasticityContext<'a> {
     pub current_tick: u32,
     pub post_index: usize,
     pub neurons: &'a NeuronsSoA,
+    pub config: &'a crate::config::NetworkConfig,
 }
 
 impl<'a> PlasticityContext<'a> {
@@ -181,7 +182,7 @@ impl PlasticityRule for GsopRule {
             *weight = weight.saturating_sub(lr_mod / 2);
         }
 
-        crate::plasticity::clamp_and_preserve_sign(weight, old_weight);
+        crate::plasticity::clamp_and_preserve_sign_with_limit(weight, old_weight, ctx.config.weight_clamp_limit);
     }
 }
 

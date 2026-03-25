@@ -1,10 +1,14 @@
 use crate::{SynapsesSoA, IValue, WEIGHT_CLAMP_LIMIT};
 
 pub fn clamp_and_preserve_sign(weight: &mut IValue, old_weight: IValue) {
+    clamp_and_preserve_sign_with_limit(weight, old_weight, WEIGHT_CLAMP_LIMIT);
+}
+
+pub fn clamp_and_preserve_sign_with_limit(weight: &mut IValue, old_weight: IValue, limit: IValue) {
     if old_weight > 0 && *weight < 0 { *weight = 1; }
     if old_weight < 0 && *weight > 0 { *weight = -1; }
-    if *weight > WEIGHT_CLAMP_LIMIT { *weight = WEIGHT_CLAMP_LIMIT; }
-    if *weight < -WEIGHT_CLAMP_LIMIT { *weight = -WEIGHT_CLAMP_LIMIT; }
+    if *weight > limit { *weight = limit; }
+    if *weight < -limit { *weight = -limit; }
 }
 
 pub struct StdpRule {
@@ -139,7 +143,7 @@ impl crate::PlasticityRule for StdpRule {
             *weight = weight.saturating_sub(delta);
         }
 
-        clamp_and_preserve_sign(weight, weight_before);
+        clamp_and_preserve_sign_with_limit(weight, weight_before, ctx.config.weight_clamp_limit);
     }
 }
 
@@ -410,6 +414,7 @@ mod tests {
         let mut weight = 1024;
         let neurons = NeuronsSoA::new(1);
 
+        let config = crate::NetworkConfig::default();
         // LTP: pre=5, post=8 (diff=3)
         let ctx = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
@@ -419,6 +424,7 @@ mod tests {
             pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight, &ctx);
         assert!(weight > 1024);
@@ -433,6 +439,7 @@ mod tests {
             pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight2, &ctx2);
         assert!(weight2 < 1024);

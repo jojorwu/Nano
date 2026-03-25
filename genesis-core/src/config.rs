@@ -36,6 +36,17 @@ pub struct NetworkConfig {
 
     // Titan Memory Configuration
     pub titan_byte_memory_size: usize,
+    pub titan_max_associations: usize,
+    pub titan_max_blocks: u32,
+    pub titan_max_entries_per_block: usize,
+    pub titan_surprise_threshold: IValue,
+
+    // Global Physics & Plasticity
+    pub default_refractory_ticks: i32,
+    pub weight_clamp_limit: IValue,
+    pub smbp_decay: i64,
+    pub activity_ema_alpha: i64,
+    pub target_activity_level: IValue,
 }
 
 impl Default for NetworkConfig {
@@ -58,6 +69,15 @@ impl Default for NetworkConfig {
             noise_amplitude: 50, // 5% noise by default
             preferred_backend: "cpu".to_string(),
             titan_byte_memory_size: 1024 * 1024, // 1MB default
+            titan_max_associations: 1_000_000,
+            titan_max_blocks: 1_000_000,
+            titan_max_entries_per_block: 256,
+            titan_surprise_threshold: 100,
+            default_refractory_ticks: 4,
+            weight_clamp_limit: SCALE * 5,
+            smbp_decay: 800,
+            activity_ema_alpha: 990, // Alpha out of 1000 (0.99)
+            target_activity_level: 100,
         }
     }
 }

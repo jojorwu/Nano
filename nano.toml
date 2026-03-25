@@ -1,9 +1,14 @@
+[network]
+default_threshold = 1024
+learning_rate = 42
+metaplasticity_enabled = true
+neurogenesis_reward_threshold = 200
+titan_decay_rate = 1
+titan_max_associations = 2000000
+titan_surprise_threshold = 100
+
 [simulation]
 checkpoint_interval = 1000
 night_phase_interval = 100
+preferred_backend = "cpu"
 save_on_exit = true
-
-[network]
-default_threshold = 1024
-learning_rate = 10
-neurogenesis_reward_threshold = 200

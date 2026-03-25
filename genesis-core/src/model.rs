@@ -513,13 +513,17 @@ impl BakedModel {
              log::warn!("Loading model version {} into v4.2 engine. Physics scaling (1024) may differ from older versions.", model.version);
         }
 
-        // Dynamic RAM migration: ensure titan_memory.byte_memory matches config size
+        // Dynamic RAM migration: ensure titan_memory matches config
         if let Some(ref mut titan) = model.titan_memory {
              let cfg_size = model.config.titan_byte_memory_size;
              if titan.byte_memory.len() != cfg_size {
                   log::info!("Migrating Titan byte_memory from {} to {} bytes", titan.byte_memory.len(), cfg_size);
                   titan.byte_memory.resize(cfg_size, 0);
              }
+             titan.max_associations = model.config.titan_max_associations;
+             titan.max_blocks = model.config.titan_max_blocks;
+             titan.max_entries_per_block = model.config.titan_max_entries_per_block;
+             titan.surprise_threshold = model.config.titan_surprise_threshold;
         }
 
         model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

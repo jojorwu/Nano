@@ -192,7 +192,7 @@ impl CpuBackend {
         let ip_inc = model.config.ip_increment;
         let ip_dec = model.config.ip_decay;
         let noise_amp = model.config.noise_amplitude;
-        let target_activity = 100; // 10% of SCALE=1000 base
+        let target_activity = model.config.target_activity_level;
         let expert_masks = &self.expert_masks;
 
         let neurons = &mut model.neurons;
@@ -238,20 +238,22 @@ impl CpuBackend {
 
                 if fired {
                     *pot = 0;
-                    *refr = 4;
+                    *refr = model.config.default_refractory_ticks;
                     *last_spk = current_tick;
                     *bprop = SCALE;
                     *action = SCALE; // Signal to action bus
                     *thresh = thresh.saturating_add(ip_inc);
-                    *activity = (*activity * 990 + 1000) / 1000;
+                    let alpha = model.config.activity_ema_alpha as i32;
+                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 10) / 1000) as i32; // Scaled to 1000
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
                 } else {
                     *pot = current_pot;
                     if *refr > 0 { *refr -= 1; }
                     if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
-                    *bprop = ((*bprop as i64 * 800) >> 10) as i32;
-                    *action = ((*action as i64 * 800) >> 10) as i32;
-                    *activity = (*activity * 990) / 1000;
+                    *bprop = ((*bprop as i64 * model.config.smbp_decay) >> 10) as i32;
+                    *action = ((*action as i64 * model.config.smbp_decay) >> 10) as i32;
+                    let alpha = model.config.activity_ema_alpha as i32;
+                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 0) / 1000) as i32; // Simplified EMA update for no spike
                     *adaptation = (*adaptation * 95) / 100; // Recovery
                 }
 
@@ -396,6 +398,7 @@ impl ComputeBackend for CpuBackend {
                 current_tick,
                 post_index: target,
                 neurons,
+                config: &model.config,
             };
 
             // SAFETY: HashSet ensures unique indices, so no data races on weights[i].
