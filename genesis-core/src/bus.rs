@@ -31,6 +31,7 @@ pub struct InputBus {
     pub distal_idx: usize,
     pub apical_idx: usize,
     pub basal_idx: usize,
+    pub action_idx: usize,
     /// Global broadcast signals (Hormones/Neuromodulators)
     pub global_signals: Vec<AtomicI32>,
 }
@@ -53,6 +54,7 @@ impl InputBus {
         let distal_idx = add_chan("distal");
         let apical_idx = add_chan("apical");
         let basal_idx = add_chan("basal");
+        let action_idx = add_chan("action");
 
         add_chan("modality:vision");
         add_chan("modality:text");
@@ -70,6 +72,7 @@ impl InputBus {
             distal_idx,
             apical_idx,
             basal_idx,
+            action_idx,
         }
     }
 
@@ -105,6 +108,7 @@ impl InputBus {
     pub fn distal(&self) -> &Vec<AtomicI32> { &self.channels[self.distal_idx] }
     pub fn apical(&self) -> &Vec<AtomicI32> { &self.channels[self.apical_idx] }
     pub fn basal(&self) -> &Vec<AtomicI32> { &self.channels[self.basal_idx] }
+    pub fn action(&self) -> &Vec<AtomicI32> { &self.channels[self.action_idx] }
 
     /// Thread-safe parallel clear of all InputBus buffers.
     pub fn clear(&self) {

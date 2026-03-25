@@ -49,6 +49,9 @@ impl SimulationEngine {
                 SpikeData::Dense(mask) => {
                     for i in 0..n_count { if (mask[i / 8] >> (i % 8)) & 1 == 1 { vec[i] = true; } }
                 }
+                SpikeData::BitPacked(packed) => {
+                    for i in 0..n_count { if (packed[i / 64] >> (i % 64)) & 1 == 1 { vec[i] = true; } }
+                }
                 _ => {}
             }
             vec
@@ -77,6 +80,11 @@ impl SimulationEngine {
         self.model.neurons.basal_potential.par_iter_mut()
             .zip(self.input_bus.basal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+
+        // Action Bus logic: move somatic action potentials to action bus
+        self.model.neurons.action_potential.par_iter()
+            .zip(self.input_bus.action())
+            .for_each(|(p, b)| b.store(*p, Ordering::Relaxed));
     }
 
 }

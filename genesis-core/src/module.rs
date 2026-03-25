@@ -158,7 +158,7 @@ impl ModuleRegistry {
 
     pub fn register_defaults(&mut self) {
         #[cfg(feature = "titan")]
-        self.register_factory("titan", || Box::new(crate::titan::TitanMemory::new(64, 100)));
+        self.register_factory("titan", || Box::new(crate::titan::BitWiseTitan::new(100)));
         #[cfg(feature = "text")]
         self.register_factory("text_processor", || Box::new(crate::text::TextProcessorModule::new(64)));
         #[cfg(feature = "vision")]

@@ -14,7 +14,7 @@ fn test_module_persistence_and_restoration() {
         synapses: SynapsesSoA::default(),
         module_states: HashMap::new(),
         #[cfg(feature = "titan")]
-        titan_memory: Some(genesis_core::titan::TitanMemory::new(10, 500)),
+        titan_memory: Some(genesis_core::titan::BitWiseTitan::new(500)),
         has_text: false,
         has_vision: false,
         has_audio: false,
@@ -29,7 +29,7 @@ fn test_module_persistence_and_restoration() {
             {
                 let mut mm = genesis_core::ModuleManager::new();
                 #[cfg(feature = "titan")]
-                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
+                mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
                 mm
             },
             Box::new(CpuBackend::default()),
@@ -67,7 +67,7 @@ fn test_module_persistence_and_restoration() {
             {
                 let mut mm = genesis_core::ModuleManager::new();
                 #[cfg(feature = "titan")]
-                mm.register_factory("titan", || Box::new(genesis_core::titan::TitanMemory::new(10, 500)));
+                mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
                 mm
             },
             Box::new(CpuBackend::default()),

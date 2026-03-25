@@ -89,6 +89,8 @@ impl CpuBackend {
     }
 
     fn propagate_sparse_delayed_spikes(&mut self, model: &mut BakedModel, previous_spikes: &[bool], history: &[Vec<bool>]) {
+        // Pack spikes for SIMD-like processing if possible
+        // (Note: full SIMD requires specialized crates, but we can optimize the loops)
         if self.synapse_offsets.is_empty() {
             self.rebuild_index_internal(model);
         }
@@ -132,10 +134,21 @@ impl CpuBackend {
 
                     let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
                     match model.synapses.compartment[syn_idx] {
-                        Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
-                        Compartment::Distal => { model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(gated_weight); }
-                        Compartment::Apical => { model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(gated_weight); }
-                        Compartment::Basal => { model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(gated_weight); }
+                        Compartment::Proximal => {
+                            model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
+                        }
+                        Compartment::Distal => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.distal_gate[target] as i64) >> 10) as i32;
+                            model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(attn_gated);
+                        }
+                        Compartment::Apical => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.apical_gate[target] as i64) >> 10) as i32;
+                            model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(attn_gated);
+                        }
+                        Compartment::Basal => {
+                            let attn_gated = ((gated_weight as i64 * model.neurons.basal_gate[target] as i64) >> 10) as i32;
+                            model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(attn_gated);
+                        }
                     }
                 }
             }
@@ -184,9 +197,9 @@ impl CpuBackend {
 
         let neurons = &mut model.neurons;
 
-        // Optimization: Use a single parallel pass over the SoA structures.
-        // We ensure Rayon parallelizes efficiently.
+        // Optimization: Use a single parallel pass over the SoA structures with chunks for better cache locality.
         let spike_results: Vec<bool> = neurons.potential.par_iter_mut()
+            .with_min_len(64) // Encourage larger chunks for SIMD optimization
             .zip(neurons.next_update_tick.par_iter_mut())
             .zip(neurons.refractory_timer.par_iter_mut())
             .zip(neurons.last_spike_tick.par_iter_mut())
@@ -199,16 +212,24 @@ impl CpuBackend {
             .zip(&neurons.distal_potential)
             .zip(&neurons.apical_potential)
             .zip(&neurons.basal_potential)
+            .zip(&neurons.distal_gate)
+            .zip(&neurons.apical_gate)
+            .zip(&neurons.basal_gate)
             .zip(&neurons.gate_threshold)
             .zip(&neurons.liquid_current)
             .zip(&neurons.decay)
             .zip(&neurons.update_interval)
+            .zip(neurons.action_potential.par_iter_mut())
             .zip(0..n_count)
-            .map(|(((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), g_thresh), liquid), decay), upd_int), i)| {
+            .map(|(((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), action), i)| {
                 if current_tick < *next_upd { return false; }
                 if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
-                let current_pot = calculate_membrane_potential(*pot, *prox, *dist, *apical, *basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation);
+                let attn_dist = ((*dist as i64 * *d_gate as i64) >> 10) as i32;
+                let attn_apical = ((*apical as i64 * *a_gate as i64) >> 10) as i32;
+                let attn_basal = ((*basal as i64 * *b_gate as i64) >> 10) as i32;
+
+                let current_pot = calculate_membrane_potential(*pot, *prox, attn_dist, attn_apical, attn_basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation);
 
                 // Relative Refractory: Exponentially decaying threshold multiplier
                 let refr_mult = if *refr > 0 { 1 + (1 << *refr) } else { 1 };
@@ -220,6 +241,7 @@ impl CpuBackend {
                     *refr = 4;
                     *last_spk = current_tick;
                     *bprop = SCALE;
+                    *action = SCALE; // Signal to action bus
                     *thresh = thresh.saturating_add(ip_inc);
                     *activity = (*activity * 990 + 1000) / 1000;
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
@@ -228,6 +250,7 @@ impl CpuBackend {
                     if *refr > 0 { *refr -= 1; }
                     if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
                     *bprop = ((*bprop as i64 * 800) >> 10) as i32;
+                    *action = ((*action as i64 * 800) >> 10) as i32;
                     *activity = (*activity * 990) / 1000;
                     *adaptation = (*adaptation * 95) / 100; // Recovery
                 }
@@ -386,6 +409,10 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {
+        self.structural_plasticity_with_surprise(model, reward, history, &[])
+    }
+
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
         prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
         model.synapses.shrink_to_fit();
 
@@ -394,7 +421,7 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_activity(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses);
+            self.optimizer.mutate_with_surprise(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses, block_surprise);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
                 let grow_size = (model.neurons.len() / 20).max(1);

@@ -106,6 +106,9 @@ impl Runtime {
         };
         pipeline.execute(&mut self.engine, &mut context);
 
+        // History population is now handled by the Propagation stage (or sub-ticks)
+        // to ensure it's available for Neuromodulation/Observation stages.
+
         let final_spike_data = self.engine.state.spikes_history[self.engine.state.history_ptr].clone();
         let spike_count = self.engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
 
@@ -126,6 +129,9 @@ impl Runtime {
         }
 
         self.engine.state.history_ptr = (self.engine.state.history_ptr + 1) % self.engine.state.spikes_history.len();
+
+        // High resolution sync for testing/real-time
+        self.engine.finalize_potentials_from_bus();
 
         if tick > 0 && tick % self.settings.night_phase_interval == 0 {
             self.emit_event(SimulationEvent::NightPhaseStarted(tick));
@@ -258,7 +264,80 @@ impl Runtime {
     pub fn handle_command(&mut self, cmd: &str) -> String {
         commands::CommandProcessor::handle(&mut self.engine, cmd)
     }
+
+    /// Processes an input burst (event-driven mode).
+    /// Executes ticks automatically until activity stabilizes or a limit is reached.
+    pub fn process_burst(&mut self, external_inputs: &[i32], max_ticks: u32) -> Vec<bool> {
+        let mut total_spikes = vec![false; self.engine.model.neurons.len()];
+        let mut ticks_done = 0;
+        let mut last_spike_count = 0;
+
+        while ticks_done < max_ticks {
+            let current_spikes = self.tick(if ticks_done == 0 { external_inputs } else { &[] });
+            let current_count = current_spikes.iter().filter(|&&s| s).count();
+
+            for (i, &s) in current_spikes.iter().enumerate() {
+                if s { total_spikes[i] = true; }
+            }
+
+            // Stop if activity has settled (no spikes for 2 ticks or very low activity)
+            if current_count == 0 && last_spike_count == 0 {
+                break;
+            }
+
+            last_spike_count = current_count;
+            ticks_done += 1;
+        }
+
+        log::debug!("Burst completed in {} ticks", ticks_done);
+        total_spikes
+    }
+
+    /// High-level API: Process text without worrying about ticks.
+    pub fn process_text(&mut self, text: &str) -> Vec<bool> {
+        self.inject_text(text);
+        self.process_burst(&[], 32) // Allow up to 32 internal ticks for "thinking"
+    }
+
+    /// High-level API: Process image without worrying about ticks.
+    #[cfg(feature = "vision")]
+    pub fn process_image(&mut self, pixels: &[u8]) -> Vec<bool> {
+        self.inject_image(pixels);
+        self.process_burst(&[], 64)
+    }
+
+    /// Enters a memory consolidation phase (Replay Mode).
+    /// The network processes its own history to strengthen permanent associations.
+    pub fn consolidate_memory(&mut self, iterations: u32) {
+        log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
+
+        for _ in 0..iterations {
+            // Memory Replay: Fetch past bitpacked patterns
+            let history = &self.engine.state.spikes_history;
+            if history.len() < 2 { break; }
+
+            // Trigger Titan learning specifically from its own internal history
+            for m in &mut self.engine.modules.modules {
+                if m.name() == "titan" {
+                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                        // Memory Replay: iterate through history and treat each step as "now"
+                        let h_len = history.len();
+                        for i in 0..h_len {
+                            titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
+                        }
+                        m.set_state(&bincode::serialize(&titan).unwrap());
+                    }
+                }
+            }
+
+            // Run a few "thinking" ticks to propagate these internal patterns
+            self.process_burst(&[], 5);
+        }
+        log::info!("Consolidation complete.");
+    }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_advanced;

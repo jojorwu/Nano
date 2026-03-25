@@ -14,6 +14,67 @@ pub struct StdpRule {
     pub reward_scale: IValue, // R-STDP factor
 }
 
+/// Highly efficient STDP implementation using BitPacked history
+pub struct SparseStdpRule {
+    pub tau: u64,
+    pub a_plus: IValue,
+    pub a_minus: IValue,
+}
+
+impl SparseStdpRule {
+    pub fn apply_bitpacked(&self, weight: &mut IValue, src: usize, tgt: usize, history: &[crate::SpikeData]) {
+        let n_count = (src.max(tgt) + 64) / 64 * 64; // Approximate
+        let mut ltp_count = 0;
+        let mut ltd_count = 0;
+
+        // Optimized bitwise coincidence detection across time window
+        for t in 1..self.tau as usize {
+            if t >= history.len() { break; }
+            let now = &history[0].to_bitpacked(n_count);
+            let past = &history[t].to_bitpacked(n_count);
+
+            let src_word = src / 64;
+            let src_bit = src % 64;
+            let tgt_word = tgt / 64;
+            let tgt_bit = tgt % 64;
+
+            // LTP: Pre (past) -> Post (now)
+            if ((past[src_word] >> src_bit) & 1 == 1) && ((now[tgt_word] >> tgt_bit) & 1 == 1) {
+                ltp_count += 1;
+            }
+            // LTD: Post (past) -> Pre (now)
+            if ((past[tgt_word] >> tgt_bit) & 1 == 1) && ((now[src_word] >> src_bit) & 1 == 1) {
+                ltd_count += 1;
+            }
+        }
+
+        let delta = (self.a_plus * ltp_count as i32) - (self.a_minus * ltd_count as i32);
+        *weight = weight.saturating_add(delta / 10);
+    }
+
+    /// Update weights based on long-term temporal context (L2 History)
+    pub fn apply_l2_context(&self, weight: &mut IValue, src_bid: usize, tgt_bid: usize, l2_history: &[Vec<u16>]) {
+        if l2_history.is_empty() { return; }
+
+        // Sum activity over L2 window
+        let mut src_activity = 0u32;
+        let mut tgt_activity = 0u32;
+
+        for step in l2_history {
+            if src_bid < step.len() { src_activity += step[src_bid] as u32; }
+            if tgt_bid < step.len() { tgt_activity += step[tgt_bid] as u32; }
+        }
+
+        // Correlational learning on long timescales:
+        // if both blocks are consistently active, strengthen connection.
+        if src_activity > 10 && tgt_activity > 10 {
+            let correlation = (src_activity * tgt_activity) / 100;
+            let delta = (self.a_plus * correlation as i32) / 100;
+            *weight = weight.saturating_add(delta);
+        }
+    }
+}
+
 impl crate::PlasticityRule for StdpRule {
     fn apply(&self, weight: &mut IValue, ctx: &crate::PlasticityContext) {
         let weight_before = *weight;
@@ -135,6 +196,18 @@ impl EvolutionaryOptimizer {
         activity_history: &[Vec<bool>],
         max_synapses: usize
     ) {
+        self.mutate_with_surprise(synapses, neurons, reward, activity_history, max_synapses, &[]);
+    }
+
+    pub fn mutate_with_surprise(
+        &self,
+        synapses: &mut SynapsesSoA,
+        neurons: &crate::NeuronsSoA,
+        reward: IValue,
+        activity_history: &[Vec<bool>],
+        max_synapses: usize,
+        block_surprise: &[f32],
+    ) {
         let neuron_count = neurons.len();
         if reward < -100 {
             // High negative reward -> Prune weak synapses more aggressively
@@ -178,7 +251,14 @@ impl EvolutionaryOptimizer {
                                     };
 
                                     let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
-                                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, 100, comp, &config) {
+
+                    // Surprise-Targeted Growth: increase initial weight for neurons in surprised blocks
+                    let initial_weight = if !block_surprise.is_empty() {
+                        let bid = neurons.block_id[j] as usize;
+                        if bid < block_surprise.len() && block_surprise[bid] > 0.5 { 200 } else { 100 }
+                    } else { 100 };
+
+                    if grow_synapse_in_compartment(synapses, i as u32, j as u32, initial_weight, comp, &config) {
                                         grown += 1;
                                     }
                                 }

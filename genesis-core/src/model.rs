@@ -7,13 +7,51 @@ use std::io::{BufReader, BufWriter};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SpikeData {
     Sparse(Vec<usize>),
-    Dense(Vec<u8>), // Bitmask
+    Dense(Vec<u8>), // Bitmask (byte-aligned)
+    BitPacked(Vec<u64>), // 64-bit optimized bitmask for SIMD/GPU
     Compressed(Vec<u8>), // Elias-Fano or similar bit-packed format
 }
 
 impl Default for SpikeData {
     fn default() -> Self {
         Self::Sparse(Vec::new())
+    }
+}
+
+impl SpikeData {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            SpikeData::Sparse(v) => v.is_empty(),
+            SpikeData::Dense(v) => v.iter().all(|&b| b == 0),
+            SpikeData::BitPacked(v) => v.iter().all(|&w| w == 0),
+            SpikeData::Compressed(v) => v.is_empty(),
+        }
+    }
+
+    pub fn to_bitpacked(&self, n_count: usize) -> Vec<u64> {
+        let packed_len = (n_count + 63) / 64;
+        let mut packed = vec![0u64; packed_len];
+        match self {
+            SpikeData::BitPacked(p) => return p.clone(),
+            SpikeData::Sparse(indices) => {
+                for &idx in indices {
+                    if idx < n_count {
+                        packed[idx / 64] |= 1 << (idx % 64);
+                    }
+                }
+            }
+            SpikeData::Dense(mask) => {
+                for i in 0..n_count {
+                    if (mask[i / 8] >> (i % 8)) & 1 == 1 {
+                        packed[i / 64] |= 1 << (i % 64);
+                    }
+                }
+            }
+            SpikeData::Compressed(_) => {
+                // Not implemented for now, fallback to empty
+            }
+        }
+        packed
     }
 }
 
@@ -38,6 +76,8 @@ impl Default for Compartment {
 pub struct NeuronsSoA {
     /// Optional identifier for neural functional columns/layers.
     pub layer_id: Vec<u16>,
+    /// Identifier for grouping neurons into blocks (mini-columns) for shared attention.
+    pub block_id: Vec<u32>,
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
@@ -56,9 +96,15 @@ pub struct NeuronsSoA {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
+    pub distal_gate: Vec<IValue>, // Gating scalars per compartment
+    pub apical_gate: Vec<IValue>,
+    pub basal_gate: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
     pub is_excitatory: Vec<u8>,    // 1 = true, 0 = false (FFI compatible)
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
+    pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
+    /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
+    pub packed_params: Vec<u64>,
 }
 
 /// FFI-safe view of the NeuronsSoA for Zero-Copy access from C++ and Python.
@@ -72,6 +118,9 @@ pub struct NeuronsFFI {
     pub threshold: *mut IValue,
     pub decay: *mut IValue,
     pub dendritic_gate: *mut IValue,
+    pub distal_gate: *mut IValue,
+    pub apical_gate: *mut IValue,
+    pub basal_gate: *mut IValue,
     pub gate_threshold: *mut IValue,
     pub adaptation_current: *mut IValue,
     pub refractory_timer: *mut i32,
@@ -81,6 +130,9 @@ pub struct NeuronsFFI {
     pub base_threshold: *mut IValue,
     pub liquid_current: *mut IValue,
     pub is_excitatory: *mut u8,
+    pub block_id: *mut u32,
+    pub action_potential: *mut IValue,
+    pub packed_params: *mut u64,
     pub len: u32,
 }
 
@@ -95,6 +147,9 @@ impl NeuronsSoA {
             threshold: self.threshold.as_mut_ptr(),
             decay: self.decay.as_mut_ptr(),
             dendritic_gate: self.dendritic_gate.as_mut_ptr(),
+            distal_gate: self.distal_gate.as_mut_ptr(),
+            apical_gate: self.apical_gate.as_mut_ptr(),
+            basal_gate: self.basal_gate.as_mut_ptr(),
             gate_threshold: self.gate_threshold.as_mut_ptr(),
             adaptation_current: self.adaptation_current.as_mut_ptr(),
             refractory_timer: self.refractory_timer.as_mut_ptr(),
@@ -104,6 +159,9 @@ impl NeuronsSoA {
             base_threshold: self.base_threshold.as_mut_ptr(),
             liquid_current: self.liquid_current.as_mut_ptr(),
             is_excitatory: self.is_excitatory.as_mut_ptr(),
+            block_id: self.block_id.as_mut_ptr(),
+            action_potential: self.action_potential.as_mut_ptr(),
+            packed_params: self.packed_params.as_mut_ptr(),
             len: self.len() as u32,
         }
     }
@@ -117,6 +175,7 @@ impl NeuronsSoA {
     pub fn with_capacity(size: usize, capacity: usize) -> Self {
         let mut neurons = Self {
             layer_id: Vec::with_capacity(capacity),
+            block_id: Vec::with_capacity(capacity),
             potential: Vec::with_capacity(capacity),
             distal_potential: Vec::with_capacity(capacity),
             proximal_potential: Vec::with_capacity(capacity),
@@ -135,9 +194,14 @@ impl NeuronsSoA {
             x: Vec::with_capacity(capacity),
             y: Vec::with_capacity(capacity),
             gate_threshold: Vec::with_capacity(capacity),
+            distal_gate: Vec::with_capacity(capacity),
+            apical_gate: Vec::with_capacity(capacity),
+            basal_gate: Vec::with_capacity(capacity),
             activity_ema: Vec::with_capacity(capacity),
             is_excitatory: Vec::with_capacity(capacity),
             adaptation_current: Vec::with_capacity(capacity),
+            action_potential: Vec::with_capacity(capacity),
+            packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
         neurons
@@ -149,6 +213,7 @@ impl NeuronsSoA {
     pub fn validate(&self) -> Result<(), String> {
         let l = self.len();
         if self.layer_id.len() != l { return Err("layer_id length mismatch".into()); }
+        if self.block_id.len() != l { return Err("block_id length mismatch".into()); }
         if self.threshold.len() != l { return Err("threshold length mismatch".into()); }
         if self.base_threshold.len() != l { return Err("base_threshold length mismatch".into()); }
         if self.decay.len() != l { return Err("decay length mismatch".into()); }
@@ -165,6 +230,7 @@ impl NeuronsSoA {
     pub fn grow(&mut self, additional: usize) {
         let new_size = self.len() + additional;
         self.layer_id.resize(new_size, 0);
+        self.block_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
         self.proximal_potential.resize(new_size, 0);
@@ -183,13 +249,19 @@ impl NeuronsSoA {
         self.x.resize(new_size, 0);
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
+        self.distal_gate.resize(new_size, SCALE);
+        self.apical_gate.resize(new_size, SCALE);
+        self.basal_gate.resize(new_size, SCALE);
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, 1);
         self.adaptation_current.resize(new_size, 0);
+        self.action_potential.resize(new_size, 0);
+        self.packed_params.resize(new_size, 0);
     }
 
     pub fn shrink_to_fit(&mut self) {
         self.layer_id.shrink_to_fit();
+        self.block_id.shrink_to_fit();
         self.potential.shrink_to_fit();
         self.distal_potential.shrink_to_fit();
         self.proximal_potential.shrink_to_fit();
@@ -208,9 +280,14 @@ impl NeuronsSoA {
         self.x.shrink_to_fit();
         self.y.shrink_to_fit();
         self.gate_threshold.shrink_to_fit();
+        self.distal_gate.shrink_to_fit();
+        self.apical_gate.shrink_to_fit();
+        self.basal_gate.shrink_to_fit();
         self.activity_ema.shrink_to_fit();
         self.is_excitatory.shrink_to_fit();
         self.adaptation_current.shrink_to_fit();
+        self.action_potential.shrink_to_fit();
+        self.packed_params.shrink_to_fit();
     }
 }
 
@@ -349,20 +426,33 @@ pub struct SimulationState {
     pub global_modulators: crate::NeuromodulationState,
     pub rolling_spike_count: f32,
     pub dead_ticks: u32,
+    /// L2 Hierarchical History: stores block-level activity summaries over long windows.
+    /// Each entry is a Vec of activity counts (one per block_id).
+    pub l2_history: Vec<Vec<u16>>,
+    pub l2_ptr: usize,
+    /// Per-block surprise rolling average for targeted neurogenesis
+    pub block_surprise: Vec<f32>,
+    /// L3 Episodic Archive: stores highly compressed block summaries of rare/surprising events
+    pub l3_archive: Vec<Vec<u16>>,
 }
 
 impl SimulationState {
     pub fn new(n_count: usize, history_len: usize) -> Self {
+        let bitpacked_len = (n_count + 63) / 64;
         Self {
             previous_spikes: vec![false; n_count],
             current_spikes_buffer: vec![false; n_count],
             merged_inputs_buffer: vec![0; n_count],
-            spikes_history: vec![SpikeData::Sparse(Vec::new()); history_len.max(16)],
+            spikes_history: vec![SpikeData::BitPacked(vec![0; bitpacked_len]); history_len.max(16)],
             history_ptr: 0,
             tick_counter: 0,
             global_modulators: crate::NeuromodulationState::default(),
             rolling_spike_count: 0.0,
             dead_ticks: 0,
+            l2_history: vec![Vec::new(); 16], // L2 window
+            l2_ptr: 0,
+            block_surprise: Vec::new(),
+            l3_archive: Vec::new(),
         }
     }
 }
@@ -380,7 +470,7 @@ pub struct BakedModel {
     pub module_states: HashMap<String, Vec<u8>>,
 
     #[cfg(feature = "titan")]
-    pub titan_memory: Option<crate::titan::TitanMemory>,
+    pub titan_memory: Option<crate::titan::BitWiseTitan>,
     #[cfg(feature = "text")]
     pub has_text: bool,
     #[cfg(feature = "vision")]

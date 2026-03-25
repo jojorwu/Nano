@@ -115,9 +115,40 @@ impl PipelineStage for PropagationStage {
                     if (mask[i / 8] >> (i % 8)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
                 }
             }
+            SpikeData::BitPacked(packed) => {
+                for i in 0..n_count {
+                    if (packed[i / 64] >> (i % 64)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
+                }
+            }
             _ => {}
         }
-        engine.state.spikes_history[engine.state.history_ptr] = spike_data;
+
+        // Ensure BitPacked history is always available for subsequent stages (Titan learning)
+        let current_bitpacked = if let SpikeData::BitPacked(_) = spike_data {
+            spike_data
+        } else {
+            let mut packed = vec![0u64; (n_count + 63) / 64];
+            for (i, &s) in engine.state.current_spikes_buffer.iter().enumerate() {
+                if s { packed[i / 64] |= 1 << (i % 64); }
+            }
+            SpikeData::BitPacked(packed)
+        };
+
+        engine.state.spikes_history[engine.state.history_ptr] = current_bitpacked;
+
+        // Continuous Synaptic Pruning: every 50 ticks, prune extremely weak synapses
+        if context.tick % 50 == 0 {
+             let mut i = 0;
+             while i < engine.model.synapses.len() {
+                 if engine.model.synapses.weight[i].abs() < 5 {
+                     engine.model.synapses.remove(i);
+                     // Clear index to force rebuild
+                     engine.backend.rebuild_index(&engine.model);
+                 } else {
+                     i += 1;
+                 }
+             }
+        }
     }
 }
 
@@ -163,6 +194,11 @@ impl PipelineStage for ThinkingStage {
                     if (mask[i / 8] >> (i % 8)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
                 }
             }
+            SpikeData::BitPacked(packed) => {
+                for i in 0..n_count {
+                    if (packed[i / 64] >> (i % 64)) & 1 == 1 { engine.state.current_spikes_buffer[i] = true; }
+                }
+            }
             _ => {}
         }
         engine.state.spikes_history[engine.state.history_ptr] = final_spike_data;
@@ -173,11 +209,76 @@ pub struct ObservationStage;
 impl PipelineStage for ObservationStage {
     fn name(&self) -> &str { "observation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        let n_count = engine.model.neurons.len();
         let spike_count = engine.state.current_spikes_buffer.iter().filter(|&&s| s).count();
+
+        // Hierarchical L2 History Update (every 16 ticks for long-term context)
+        if true { // Run always for tests/now, optimize later
+            let mut block_activity = std::collections::HashMap::new();
+            for i in 0..n_count {
+                if engine.state.current_spikes_buffer[i] {
+                    let bid = engine.model.neurons.block_id[i];
+                    *block_activity.entry(bid).or_insert(0u16) += 1;
+                }
+            }
+
+            let max_bid = engine.model.neurons.block_id.iter().max().copied().unwrap_or(0);
+            let mut summary = vec![0u16; (max_bid + 1) as usize];
+            for (bid, count) in block_activity {
+                summary[bid as usize] = count;
+            }
+
+            let l2_len = engine.state.l2_history.len();
+            engine.state.l2_history[engine.state.l2_ptr] = summary.clone();
+            engine.state.l2_ptr = (engine.state.l2_ptr + 1) % l2_len;
+
+            // L3 Episodic Archive Trigger: store if surprise is very high (Rare event)
+            if context.surprise > 1500 {
+                engine.state.l3_archive.push(summary);
+                if engine.state.l3_archive.len() > 1000 { engine.state.l3_archive.remove(0); }
+                log::debug!("L3: Episodic memory stored (Surprise: {})", context.surprise);
+            }
+
+            // Update BitWise Titan Memory if present
+            for m in engine.modules.modules.iter_mut() {
+                if m.name() == "titan" {
+                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                        titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
+                        m.set_state(&bincode::serialize(&titan).unwrap());
+                    }
+                }
+            }
+        }
 
         // Calculate surprise logic
         let current = spike_count as f32;
         let surprise = (current - engine.state.rolling_spike_count).abs();
+
+        // Update Block Surprise Map
+        let max_bid = engine.model.neurons.block_id.iter().max().copied().unwrap_or(0) as usize;
+        if engine.state.block_surprise.len() <= max_bid {
+            engine.state.block_surprise.resize(max_bid + 1, 0.0);
+        }
+
+        // Simple heuristic: surprise is higher for blocks whose activity deviated from history
+        let l2_ptr = if engine.state.l2_ptr == 0 { engine.state.l2_history.len() - 1 } else { engine.state.l2_ptr - 1 };
+        let prev_summary = &engine.state.l2_history[l2_ptr];
+
+        for i in 0..n_count {
+            let bid = engine.model.neurons.block_id[i] as usize;
+            if bid < prev_summary.len() {
+                let fired = engine.state.current_spikes_buffer[i];
+                let block_avg = prev_summary[bid] as f32;
+
+                // If a neuron fires in a block that was expected to be quiet, or vice versa
+                if fired && block_avg < 1.0 {
+                    engine.state.block_surprise[bid] = engine.state.block_surprise[bid] * 0.95 + 1.0 * 0.05;
+                } else {
+                    engine.state.block_surprise[bid] *= 0.99;
+                }
+            }
+        }
+
         engine.state.rolling_spike_count = engine.state.rolling_spike_count * 0.9 + current * 0.1;
         let scaled_surprise = (surprise * 1024.0 / (engine.state.rolling_spike_count + 1.0)) as i32;
         context.surprise = scaled_surprise.min(2048);
@@ -244,7 +345,18 @@ impl PipelineStage for StructuralPlasticityStage {
 
         let reward_val = context.reward.map(|r| r as i32);
         let history = engine.reconstruct_history(16);
-        engine.backend.structural_plasticity(&mut engine.model, reward_val, &history);
+        engine.backend.structural_plasticity_with_surprise(&mut engine.model, reward_val, &history, &engine.state.block_surprise);
+
+        // DBS: Neuron Migration between blocks
+        for m in engine.modules.modules.iter_mut() {
+            if m.name() == "attn_res" {
+                if let Ok(mut attn) = bincode::deserialize::<genesis_core::AttnResModule>(&m.get_state()) {
+                    let count = attn.migrate_neurons(&mut engine.model.neurons);
+                    if count > 0 { log::debug!("DBS: {} neurons migrated between blocks", count); }
+                    m.set_state(&bincode::serialize(&attn).unwrap());
+                }
+            }
+        }
 
         engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
     }

@@ -233,4 +233,8 @@ impl ComputeBackend for CudaBackend {
     fn structural_plasticity(&mut self, _model: &mut BakedModel, _reward: Option<IValue>, _history: &[Vec<bool>]) {
         // GPU pruning/growth would go here
     }
+
+    fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], _block_surprise: &[f32]) {
+        self.structural_plasticity(model, reward, history);
+    }
 }
