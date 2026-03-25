@@ -148,6 +148,7 @@ impl Runtime {
 
         self.engine.state.previous_spikes.copy_from_slice(&self.engine.state.current_spikes_buffer);
         self.broadcast_ghost_spikes(&self.engine.state.previous_spikes);
+        self.poll_remote_spikes();
         self.poll_remote_titan();
         self.engine.state.previous_spikes.clone()
     }
@@ -229,6 +230,18 @@ impl Runtime {
 
     pub fn tick(&mut self, external_inputs: &[i32]) -> Vec<bool> {
         self.tick_with_reward(external_inputs, None)
+    }
+
+    fn poll_remote_spikes(&mut self) {
+        if let Ok(mut queue) = self.engine.remote_spike_queue.lock() {
+            let n_count = self.engine.model.neurons.len();
+            for &idx in queue.iter() {
+                if idx < n_count && self.engine.model.neurons.is_remote[idx] != 0 {
+                    self.engine.state.current_spikes_buffer[idx] = true;
+                }
+            }
+            queue.clear();
+        }
     }
 
     pub fn inject_text(&mut self, text: &str) {

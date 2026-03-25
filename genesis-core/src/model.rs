@@ -62,6 +62,7 @@ pub enum Compartment {
     Distal = 1,
     Apical = 2,
     Basal = 3,
+    Custom(u8), // Support for additional dendritic branches
 }
 
 impl Default for Compartment {
@@ -105,6 +106,8 @@ pub struct NeuronsSoA {
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
     pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
     pub astro_calcium: Vec<IValue>,      // Astrocytic Modulation (Slow calcium dynamics)
+    pub is_remote: Vec<u8>,              // Distributed SNN (1 = ghost neuron, 0 = local)
+    pub origin_node_id: Vec<u32>,        // Node ID that owns this neuron
     pub energy_level: Vec<IValue>,       // Metabolic Economy (SCALE = 100% energy)
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
@@ -209,6 +212,8 @@ impl NeuronsSoA {
             plasticity_gate: Vec::with_capacity(capacity),
             astro_calcium: Vec::with_capacity(capacity),
             energy_level: Vec::with_capacity(capacity),
+            is_remote: Vec::with_capacity(capacity),
+            origin_node_id: Vec::with_capacity(capacity),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -266,6 +271,8 @@ impl NeuronsSoA {
         self.action_potential.resize(new_size, 0);
         self.plasticity_gate.resize(new_size, SCALE);
         self.astro_calcium.resize(new_size, 0);
+        self.is_remote.resize(new_size, 0);
+        self.origin_node_id.resize(new_size, 0);
         self.energy_level.resize(new_size, SCALE); // Start fully charged
         self.packed_params.resize(new_size, 0);
     }
@@ -300,6 +307,8 @@ impl NeuronsSoA {
         self.action_potential.shrink_to_fit();
         self.plasticity_gate.shrink_to_fit();
         self.astro_calcium.shrink_to_fit();
+        self.is_remote.shrink_to_fit();
+        self.origin_node_id.shrink_to_fit();
         self.energy_level.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }
@@ -326,9 +335,12 @@ pub struct SynapsesFFI {
     pub source_index: *const u32,
     pub target_index: *const u32,
     pub weight: *mut IValue,
+    pub tag: *mut IValue,
+    pub tag_timer: *mut u16,
     pub delay: *const u8,
     pub stp_resources: *mut IValue,
     pub stp_calcium: *mut IValue,
+    pub volatility: *mut u8,
     pub compartment: *const u8,
     pub len: u32,
 
@@ -343,9 +355,12 @@ impl SynapsesSoA {
             source_index: self.source_index.as_ptr(),
             target_index: self.target_index.as_ptr(),
             weight: self.weight.as_mut_ptr(),
+            tag: self.tag.as_mut_ptr(),
+            tag_timer: self.tag_timer.as_mut_ptr(),
             delay: self.delay.as_ptr(),
             stp_resources: self.stp_resources.as_mut_ptr(),
             stp_calcium: self.stp_calcium.as_mut_ptr(),
+            volatility: self.volatility.as_mut_ptr(),
             compartment: self.compartment.as_ptr() as *const u8,
             len: self.len() as u32,
             offsets,

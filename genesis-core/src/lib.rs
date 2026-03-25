@@ -24,6 +24,7 @@ pub mod plasticity;
 pub mod attention;
 pub mod workspace;
 pub mod hierarchical;
+pub mod episodic;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
@@ -32,6 +33,7 @@ pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, Lat
 pub use attention::AttnResModule;
 pub use workspace::WorkspaceModule;
 pub use hierarchical::HierarchicalModule;
+pub use episodic::EpisodicModule;
 pub use config::NetworkConfig;
 
 pub type IValue = i32;

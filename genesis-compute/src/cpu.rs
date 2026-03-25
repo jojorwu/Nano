@@ -207,6 +207,10 @@ impl CpuBackend {
                             let attn_gated = ((gated_weight as i64 * model.neurons.basal_gate[target] as i64) >> 10) as i32;
                             model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(attn_gated);
                         }
+                        Compartment::Custom(_) => {
+                            // Custom compartments fall back to proximal for now
+                            model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight);
+                        }
                     }
                 }
             }
@@ -279,6 +283,7 @@ impl CpuBackend {
 
                     for i in start_idx..end_idx {
                         if current_tick < n_mut.next_update_tick[i] { continue; }
+                    if n_mut.is_remote[i] != 0 { continue; } // Distributed: skip state update for ghost neurons
                         if !e_masks.is_empty() && !e_masks[i % e_masks.len()] { continue; }
 
                         let fired = self.update_single_neuron(i, n_mut, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
