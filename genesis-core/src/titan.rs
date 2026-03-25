@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
+use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA, SCALE};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BitWiseTitan {
@@ -8,6 +8,8 @@ pub struct BitWiseTitan {
     pub associations_flat: Vec<Association>,
     pub block_offsets: Vec<u32>,
     pub block_counts: Vec<u32>,
+    /// Free slots in the flat table to avoid O(N) shifts on update
+    pub free_slots: Vec<usize>,
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
@@ -15,6 +17,12 @@ pub struct BitWiseTitan {
     pub l3_buffer: Vec<Vec<u16>>,
     /// Context Hashes: maps 64-bit pattern hash to a list of associated block_ids
     pub context_hashes: std::collections::HashMap<u64, Vec<u32>>,
+    /// LSH (Locality Sensitive Hashing) tables for fuzzy retrieval
+    pub lsh_tables: Vec<std::collections::HashMap<u32, Vec<u32>>>,
+    /// Byte-Addressable Memory Buffer
+    pub byte_memory: Vec<u8>,
+    /// Address range of neurons that map to byte_memory (start_idx, end_idx)
+    pub memory_mapped_range: Option<(usize, usize)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -25,25 +33,48 @@ pub struct Association {
 
 impl BitWiseTitan {
     pub fn new(lr: IValue) -> Self {
+        let mut lsh_tables = Vec::with_capacity(4);
+        for _ in 0..4 {
+            lsh_tables.push(std::collections::HashMap::new());
+        }
         Self {
-            associations_flat: Vec::new(),
+            associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
             block_offsets: vec![0; 64],
             block_counts: vec![0; 64],
+            free_slots: Vec::new(),
             learning_rate: lr,
             surprise_threshold: 100,
             decay_rate: 1,
             l3_buffer: Vec::new(),
             context_hashes: std::collections::HashMap::new(),
+            lsh_tables,
+            byte_memory: vec![0; 1024 * 1024], // 1MB initial byte memory
+            memory_mapped_range: None,
         }
     }
 
     /// Semantic Hashing: maps block activity pattern to a context hash
     pub fn compute_context_hash(pattern: &[u64]) -> u64 {
         let mut h = 0u64;
-        for &w in pattern {
-            h ^= w.wrapping_mul(0x517cc1b727220a95);
+        for (i, &w) in pattern.iter().enumerate() {
+            h ^= w.wrapping_mul(0x517cc1b727220a95 ^ (i as u64));
+            h = h.rotate_left(7);
         }
         h
+    }
+
+    /// Compute LSH signatures for fuzzy matching
+    pub fn compute_lsh_signatures(pattern: &[u64]) -> Vec<u32> {
+        let mut sigs = vec![0u32; 4];
+        for (i, sig) in sigs.iter_mut().enumerate() {
+            let mut h = 0u64;
+            for (j, &w) in pattern.iter().enumerate() {
+                // Different projection for each table
+                h ^= w.wrapping_mul(0xbf58476d1ce4e5b9 ^ (i as u64) ^ (j as u64));
+            }
+            *sig = (h ^ (h >> 32)) as u32;
+        }
+        sigs
     }
 
     fn ensure_capacity(&mut self, max_bid: u32) {
@@ -62,31 +93,33 @@ impl BitWiseTitan {
     }
 
     pub fn update_block(&mut self, bid: u32, new_assocs: Vec<Association>) {
-        // This is a simplified implementation. A real high-performance version
-        // would use a fragmented buffer or pre-allocated slots to avoid O(N) shifts.
-        // For now, we perform a naive update for correctness.
+        // High-efficiency update: use a simple append-only strategy with fragmentation
+        // Defragmentation happens during night_phase.
+        let current_count = self.block_counts[bid as usize] as usize;
+        let new_count = new_assocs.len();
         let start = self.block_offsets[bid as usize] as usize;
-        let count = self.block_counts[bid as usize] as usize;
 
-        self.associations_flat.drain(start..start + count);
-        let mut idx = start;
-        for a in new_assocs {
-            self.associations_flat.insert(idx, a);
-            idx += 1;
-        }
-
-        let delta = (idx - start) as i32 - count as i32;
-        self.block_counts[bid as usize] = (idx - start) as u32;
-
-        for i in (bid as usize + 1)..self.block_offsets.len() {
-            self.block_offsets[i] = (self.block_offsets[i] as i32 + delta) as u32;
+        if new_count <= current_count {
+            // Update in-place
+            for (i, a) in new_assocs.into_iter().enumerate() {
+                self.associations_flat[start + i] = a;
+            }
+            self.block_counts[bid as usize] = new_count as u32;
+        } else {
+            // Grow: move to end of buffer
+            let new_start = self.associations_flat.len();
+            self.block_offsets[bid as usize] = new_start as u32;
+            self.block_counts[bid as usize] = new_count as u32;
+            self.associations_flat.extend(new_assocs);
         }
     }
 
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
-        if surprise < self.surprise_threshold { return; }
+        // Test-Time Adaptation: Learn more aggressively if surprise is extreme
+        let effective_threshold = if surprise > 2000 { self.surprise_threshold / 2 } else { self.surprise_threshold };
+        if surprise < effective_threshold { return; }
 
         let n_count = neurons.len();
         if history.len() < 2 { return; }
@@ -98,8 +131,9 @@ impl BitWiseTitan {
         let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
         let search_depth = search_depth.min(history.len());
 
-        // Update Context Hashes
+        // Update Context Hashes and LSH
         let current_hash = Self::compute_context_hash(&now);
+        let current_sigs = Self::compute_lsh_signatures(&now);
 
         for t in 1..search_depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
@@ -130,10 +164,12 @@ impl BitWiseTitan {
                                     let synesthesia_bonus = if src_modality != tgt_modality { 2 } else { 0 };
 
                                     if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
-                                        assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus);
+                                        let boost = if surprise > 1500 { 5 } else { 0 };
+                                        assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
                                         changed = true;
-                                    } else if entries.len() < 100 {
-                                        entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus });
+                                    } else if entries.len() < 256 { // Increased capacity per block
+                                        let boost = if surprise > 1500 { 10 } else { 0 };
+                                        entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
                                         changed = true;
                                     }
                                 }
@@ -143,6 +179,13 @@ impl BitWiseTitan {
                             self.update_block(src_bid, entries);
                             // Associate this block with the current contextual hash
                             self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            for (table_idx, &sig) in current_sigs.iter().enumerate() {
+                                let table = &mut self.lsh_tables[table_idx];
+                                let entry = table.entry(sig).or_default();
+                                if !entry.contains(&src_bid) {
+                                    entry.push(src_bid);
+                                }
+                            }
                         }
                     }
                 }
@@ -171,28 +214,82 @@ impl NanoModule for BitWiseTitan {
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+        // Memory-Mapped Interface: Read/Write from byte_memory
+        if let Some((start, end)) = self.memory_mapped_range {
+            let mut addr = 0usize;
+            let mut val = 0u8;
+            let addr_bits = 16; // Fixed 16 bits for address
+
+            for i in 0..addr_bits {
+                if start + i < previous_spikes.len() && previous_spikes[start + i] {
+                    addr |= 1 << i;
+                }
+            }
+            for i in 0..8 {
+                if start + addr_bits + i < previous_spikes.len() && previous_spikes[start + addr_bits + i] {
+                    val |= 1 << i;
+                }
+            }
+
+            addr %= self.byte_memory.len();
+
+            // Writing to byte memory if a specific "Write Enable" neuron is active
+            let write_enable_idx = start + addr_bits + 8;
+            if write_enable_idx < end && write_enable_idx < previous_spikes.len() && previous_spikes[write_enable_idx] {
+                self.byte_memory[addr] = val;
+            }
+
+            // Reading from byte memory: inject byte value into potentials of memory neurons
+            let read_byte = self.byte_memory[addr];
+            let prox = bus.proximal();
+            for i in 0..8 {
+                let output_idx = start + addr_bits + 9 + i;
+                if output_idx < end && (read_byte >> i) & 1 == 1 {
+                    crate::InputBus::atomic_saturating_add(&prox[output_idx], SCALE / 2);
+                }
+            }
+        }
+
         let dist = bus.distal();
         let n_count = dist.len();
 
-        // Fuzzy Retrieval using Semantic Hashes
         // 1. Pack previous spikes into a pattern
         let mut packed = vec![0u64; (n_count + 63) / 64];
         for (i, &s) in previous_spikes.iter().enumerate() {
             if s { packed[i / 64] |= 1 << (i % 64); }
         }
-        let current_hash = Self::compute_context_hash(&packed);
 
-        // 2. Check for similar contexts (Fuzzy match)
-        if let Some(fuzzy_blocks) = self.context_hashes.get(&current_hash) {
-            for &bid in fuzzy_blocks {
-                if (bid as usize) < self.block_offsets.len() {
-                    let start = self.block_offsets[bid as usize] as usize;
-                    let count = self.block_counts[bid as usize] as usize;
-                    for i in start..start + count {
-                        let a = &self.associations_flat[i];
-                        if (a.target as usize) < dist.len() {
-                            crate::InputBus::atomic_saturating_add(&dist[a.target as usize], a.weight as i32 * 10);
-                        }
+        // Fuzzy Retrieval using LSH and Semantic Hashes
+        let mut candidate_blocks = std::collections::HashSet::new();
+
+        // 2a. Exact Match
+        let current_hash = Self::compute_context_hash(&packed);
+        if let Some(blocks) = self.context_hashes.get(&current_hash) {
+            for &bid in blocks { candidate_blocks.insert(bid); }
+        }
+
+        // 2b. LSH Fuzzy Match (Only if exact match didn't yield enough or always for robustness?)
+        // If we want "everything", we check LSH too.
+        let sigs = Self::compute_lsh_signatures(&packed);
+        for (i, &sig) in sigs.iter().enumerate() {
+            if let Some(blocks) = self.lsh_tables[i].get(&sig) {
+                for &bid in blocks {
+                    candidate_blocks.insert(bid);
+                }
+            }
+        }
+
+        // 3. Inject candidates into distal potential
+        for bid in candidate_blocks {
+            if (bid as usize) < self.block_offsets.len() {
+                let start = self.block_offsets[bid as usize] as usize;
+                let count = self.block_counts[bid as usize] as usize;
+                for i in start..start + count {
+                    let a = &self.associations_flat[i];
+                    if (a.target as usize) < dist.len() {
+                        // Fuzzy matches get slightly less weight than exact (if we could distinguish)
+                        // For now, simple boost.
+                        crate::InputBus::atomic_saturating_add(&dist[a.target as usize], a.weight as i32 * 15);
                     }
                 }
             }
@@ -247,9 +344,25 @@ impl NanoModule for BitWiseTitan {
 
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
         if let Some(r) = reward {
-             // Reward-modulated consolidation or pruning could go here
              log::debug!("Titan Night Phase with reward: {}", r);
         }
+
+        // Defragmentation: Rebuild associations_flat to remove gaps
+        let mut new_flat = Vec::with_capacity(self.associations_flat.len());
+        for bid in 0..self.block_offsets.len() {
+            let start = self.block_offsets[bid] as usize;
+            let count = self.block_counts[bid] as usize;
+            let new_start = new_flat.len();
+
+            if start + count <= self.associations_flat.len() {
+                new_flat.extend_from_slice(&self.associations_flat[start..start+count]);
+                self.block_offsets[bid] = new_start as u32;
+            } else {
+                self.block_counts[bid] = 0;
+                self.block_offsets[bid] = new_start as u32;
+            }
+        }
+        self.associations_flat = new_flat;
     }
 
     fn get_state(&self) -> Vec<u8> {
@@ -275,5 +388,52 @@ mod tests {
     fn test_bitwise_titan_init() {
         let titan = BitWiseTitan::new(100);
         assert_eq!(titan.associations_flat.len(), 0);
+    }
+
+    #[test]
+    fn test_memory_mapped_neurons() {
+        println!("Starting test_memory_mapped_neurons");
+        let mut titan = BitWiseTitan::new(100);
+        titan.byte_memory = vec![0; 256];
+        titan.memory_mapped_range = Some((0, 48));
+
+        // 0..4: address bits (4 bits = 16 addresses)
+        // 4..12: value bits (8 bits)
+        // 12: write enable
+        // 13..21: read output bits
+
+        let bus = crate::InputBus::new(100);
+        let mut spikes = vec![false; 100];
+
+        // Write value 0xAA to address 5
+        // Address 5 = 1010 binary (bits 0 and 2 set)
+        spikes[0] = true;
+        spikes[2] = true;
+
+        // Value 0xAA = 10101010 binary
+        spikes[16 + 1] = true;
+        spikes[16 + 3] = true;
+        spikes[16 + 5] = true;
+        spikes[16 + 7] = true;
+
+        // Write enable (addr_bits + 8 = 16 + 8 = 24)
+        spikes[24] = true;
+
+        titan.on_tick(&bus, &spikes, 0);
+        assert_eq!(titan.byte_memory[5], 0xAA);
+
+        // Read from address 5 (without write enable)
+        spikes[24] = false;
+        bus.clear();
+        titan.on_tick(&bus, &spikes, 1);
+
+        // Check if output bits (addr_bits + 9 .. = 16 + 9 = 25) got boosted
+        let prox = bus.proximal();
+        use std::sync::atomic::Ordering;
+        assert!(prox[25 + 1].load(Ordering::Relaxed) > 0);
+        assert!(prox[25 + 3].load(Ordering::Relaxed) > 0);
+        assert!(prox[25 + 5].load(Ordering::Relaxed) > 0);
+        assert!(prox[25 + 7].load(Ordering::Relaxed) > 0);
+        assert_eq!(prox[25 + 0].load(Ordering::Relaxed), 0);
     }
 }
