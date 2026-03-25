@@ -54,6 +54,8 @@ pub struct Runtime {
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observers: Vec<Box<dyn SimulationObserver>>,
+    pub last_surprise: i32,
+    pub surprise_history: Vec<i32>,
 }
 
 impl Runtime {
@@ -120,6 +122,9 @@ impl Runtime {
         });
 
         self.emit_event(SimulationEvent::SurpriseDetected(context.surprise));
+        self.last_surprise = context.surprise;
+        self.surprise_history.push(context.surprise);
+        if self.surprise_history.len() > 1000 { self.surprise_history.remove(0); }
 
         // Critical sync path for safety
         for obs in &mut self.observers {

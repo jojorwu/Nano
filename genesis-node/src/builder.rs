@@ -109,6 +109,8 @@ impl RuntimeBuilder {
             episode_reward_history: Vec::new(),
             network_manager: nm,
             observers,
+            last_surprise: 0,
+            surprise_history: Vec::new(),
         };
         rt.post_init()?;
         Ok(rt)

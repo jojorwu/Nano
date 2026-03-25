@@ -56,6 +56,17 @@ enum Commands {
     Check {
         #[arg(short, long)] model: String,
     },
+    /// Compare two models to see what was learned
+    Diff {
+        #[arg(short, long)] base: String,
+        #[arg(short, long)] current: String,
+    },
+    /// Auto-tune simulation settings based on surprise
+    Tune {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] input: String,
+        #[arg(short, long, default_value_t = 100)] steps: usize,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -308,6 +319,86 @@ vocab_size = 1000
             println!("  Total Ticks: {}", ticks);
             println!("  Total Time:  {:.2?}", duration);
             println!("  Throughput:  {:.2} ticks/sec (TPS)", tps);
+        }
+        Commands::Diff { base, current } => {
+            println!("⚖️  Comparing base model '{}' with current model '{}'...", base, current);
+            let b_baked = genesis_core::BakedModel::load(base).context("Failed to load base model")?;
+            let c_baked = genesis_core::BakedModel::load(current).context("Failed to load current model")?;
+
+            // 1. Synapse weight changes
+            let mut total_delta = 0i64;
+            let mut changed_count = 0;
+            let s_len = b_baked.synapses.len().min(c_baked.synapses.len());
+            for i in 0..s_len {
+                let delta = (c_baked.synapses.weight[i] - b_baked.synapses.weight[i]).abs() as i64;
+                if delta > 0 {
+                    total_delta += delta;
+                    changed_count += 1;
+                }
+            }
+            println!("  - Synapses: {} changed, total weight delta = {}", changed_count, total_delta);
+
+            // 2. Associative memory changes (Titan)
+            if let (Some(b_titan), Some(c_titan)) = (&b_baked.titan_memory, &c_baked.titan_memory) {
+                let b_count = b_titan.associations_flat.len();
+                let c_count = c_titan.associations_flat.len();
+                println!("  - Titan Associations: {} -> {} (delta: {})", b_count, c_count, c_count as i32 - b_count as i32);
+            }
+
+            // 3. Byte Memory changes
+            if let (Some(b_titan), Some(c_titan)) = (&b_baked.titan_memory, &c_baked.titan_memory) {
+                let mut bytes_changed = 0;
+                let m_len = b_titan.byte_memory.len().min(c_titan.byte_memory.len());
+                for i in 0..m_len {
+                    if b_titan.byte_memory[i] != c_titan.byte_memory[i] {
+                        bytes_changed += 1;
+                    }
+                }
+                println!("  - Byte RAM (1MB): {} bytes modified", bytes_changed);
+            }
+
+            println!("✅ Knowledge comparison complete.");
+        }
+        Commands::Tune { model, input, steps } => {
+            println!("🛠️  Auto-tuning model '{}' with input data...", model);
+            let mut session = SimulationSession::new(model, None, None)?;
+
+            let mut avg_surprise = 0f32;
+            let mut best_lr = session.runtime.engine.model.config.learning_rate;
+            let mut best_interval = session.runtime.settings.night_phase_interval;
+
+            println!("  Initial State: LR={}, SleepInterval={}", best_lr, best_interval);
+
+            // Tuning loop
+            for step in 1..=*steps {
+                session.runtime.inject_text(input);
+                let _spikes = session.runtime.tick(&vec![0; session.runtime.engine.model.neurons.len()]);
+
+                let surprise = session.runtime.last_surprise;
+                avg_surprise = avg_surprise * 0.9 + surprise as f32 * 0.1;
+
+                // Simple auto-tuning heuristic:
+                // If surprise is consistently high (> 500), the model is struggling to learn or too unstable.
+                if avg_surprise > 500.0 {
+                    best_lr = (best_lr - 1).max(1);
+                    best_interval = (best_interval - 5).max(10);
+                } else if avg_surprise < 50.0 {
+                    // If surprise is very low, we can increase LR to speed up learning.
+                    best_lr = (best_lr + 1).min(100);
+                    best_interval = (best_interval + 5).min(1000);
+                }
+
+                if step % 10 == 0 {
+                    println!("    Step {}: AvgSurprise={:.2}, Suggesting LR={}, SleepInterval={}",
+                        step, avg_surprise, best_lr, best_interval);
+                }
+            }
+
+            session.runtime.engine.model.config.learning_rate = best_lr;
+            session.runtime.settings.night_phase_interval = best_interval;
+
+            println!("✅ Auto-tuning complete. Suggested settings applied.");
+            session.finish(model)?;
         }
         Commands::Check { model } => {
             println!("🔍 Performing Health Check on model: {}...", model);
