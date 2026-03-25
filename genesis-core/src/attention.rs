@@ -8,6 +8,8 @@ pub struct AttnResModule {
     pub block_queries: Vec<[IValue; 4]>, // [Proximal, Distal, Apical, Basal] weights per block
     /// Context Fingerprint: weighted moving average of block-level activity.
     pub context_fingerprint: Vec<f32>,
+    /// Block Specialization Score: identifies how 'distinct' this block is
+    pub specialization_score: Vec<f32>,
     pub learning_rate: IValue,
 }
 
@@ -16,8 +18,34 @@ impl AttnResModule {
         Self {
             block_queries: vec![[SCALE; 4]; num_blocks],
             context_fingerprint: vec![0.0; num_blocks],
+            specialization_score: vec![0.0; num_blocks],
             learning_rate: 10,
         }
+    }
+
+    pub fn migrate_neurons(&mut self, neurons: &mut NeuronsSoA) -> usize {
+        let n_count = neurons.len();
+        let mut migrations = 0;
+
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        for i in 0..n_count {
+            if rng.gen_bool(0.01) { // Stochastic migration attempt
+                let current_bid = neurons.block_id[i] as usize;
+                if current_bid >= self.specialization_score.len() { continue; }
+
+                // If current block is not specialized (score low), attempt to join a higher score block
+                if self.specialization_score[current_bid] < 0.3 {
+                    let target_bid = rng.gen_range(0..self.block_queries.len());
+                    if self.specialization_score[target_bid] > self.specialization_score[current_bid] {
+                        neurons.block_id[i] = target_bid as u32;
+                        migrations += 1;
+                    }
+                }
+            }
+        }
+        migrations
     }
 }
 
@@ -43,6 +71,13 @@ impl NanoModule for AttnResModule {
             }
         }
         for f in &mut self.context_fingerprint { *f *= 0.99; } // Slow decay
+
+        // Update Specialization Score: blocks with consistent context are more specialized
+        for (i, &f) in self.context_fingerprint.iter().enumerate() {
+            if i < self.specialization_score.len() {
+                self.specialization_score[i] = self.specialization_score[i] * 0.99 + (f * 0.01);
+            }
+        }
 
         // Dynamic Attention Update:
         // If surprise is high, we adjust the block queries to favor compartments that might

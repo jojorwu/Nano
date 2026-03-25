@@ -80,6 +80,11 @@ impl SimulationEngine {
         self.model.neurons.basal_potential.par_iter_mut()
             .zip(self.input_bus.basal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
+
+        // Action Bus logic: move somatic action potentials to action bus
+        self.model.neurons.action_potential.par_iter()
+            .zip(self.input_bus.action())
+            .for_each(|(p, b)| b.store(*p, Ordering::Relaxed));
     }
 
 }

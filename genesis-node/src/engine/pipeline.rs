@@ -229,8 +229,15 @@ impl PipelineStage for ObservationStage {
             }
 
             let l2_len = engine.state.l2_history.len();
-            engine.state.l2_history[engine.state.l2_ptr] = summary;
+            engine.state.l2_history[engine.state.l2_ptr] = summary.clone();
             engine.state.l2_ptr = (engine.state.l2_ptr + 1) % l2_len;
+
+            // L3 Episodic Archive Trigger: store if surprise is very high (Rare event)
+            if context.surprise > 1500 {
+                engine.state.l3_archive.push(summary);
+                if engine.state.l3_archive.len() > 1000 { engine.state.l3_archive.remove(0); }
+                log::debug!("L3: Episodic memory stored (Surprise: {})", context.surprise);
+            }
 
             // Update BitWise Titan Memory if present
             for m in engine.modules.modules.iter_mut() {
@@ -339,6 +346,17 @@ impl PipelineStage for StructuralPlasticityStage {
         let reward_val = context.reward.map(|r| r as i32);
         let history = engine.reconstruct_history(16);
         engine.backend.structural_plasticity_with_surprise(&mut engine.model, reward_val, &history, &engine.state.block_surprise);
+
+        // DBS: Neuron Migration between blocks
+        for m in engine.modules.modules.iter_mut() {
+            if m.name() == "attn_res" {
+                if let Ok(mut attn) = bincode::deserialize::<genesis_core::AttnResModule>(&m.get_state()) {
+                    let count = attn.migrate_neurons(&mut engine.model.neurons);
+                    if count > 0 { log::debug!("DBS: {} neurons migrated between blocks", count); }
+                    m.set_state(&bincode::serialize(&attn).unwrap());
+                }
+            }
+        }
 
         engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
     }

@@ -219,8 +219,9 @@ impl CpuBackend {
             .zip(&neurons.liquid_current)
             .zip(&neurons.decay)
             .zip(&neurons.update_interval)
+            .zip(neurons.action_potential.par_iter_mut())
             .zip(0..n_count)
-            .map(|((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), i)| {
+            .map(|(((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), action), i)| {
                 if current_tick < *next_upd { return false; }
                 if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
@@ -240,6 +241,7 @@ impl CpuBackend {
                     *refr = 4;
                     *last_spk = current_tick;
                     *bprop = SCALE;
+                    *action = SCALE; // Signal to action bus
                     *thresh = thresh.saturating_add(ip_inc);
                     *activity = (*activity * 990 + 1000) / 1000;
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
@@ -248,6 +250,7 @@ impl CpuBackend {
                     if *refr > 0 { *refr -= 1; }
                     if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
                     *bprop = ((*bprop as i64 * 800) >> 10) as i32;
+                    *action = ((*action as i64 * 800) >> 10) as i32;
                     *activity = (*activity * 990) / 1000;
                     *adaptation = (*adaptation * 95) / 100; // Recovery
                 }

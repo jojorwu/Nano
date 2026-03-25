@@ -19,6 +19,7 @@ pub struct GpuNeuronState {
     pub apical_gate: i32,
     pub basal_gate: i32,
     pub block_id: u32,
+    pub action: i32,
 }
 
 #[repr(C)]
@@ -336,6 +337,7 @@ impl ComputeBackend for WgpuBackend {
                 apical_gate: model.neurons.apical_gate[i],
                 basal_gate: model.neurons.basal_gate[i],
                 block_id: model.neurons.block_id[i],
+                action: model.neurons.action_potential[i],
             });
         }
         Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
@@ -579,6 +581,7 @@ impl ComputeBackend for WgpuBackend {
             model.neurons.activity_ema[i] = out_states[i].activity_ema;
             model.neurons.adaptation_current[i] = out_states[i].adaptation;
             model.neurons.backprop_signal[i] = out_states[i].backprop_signal;
+            model.neurons.action_potential[i] = out_states[i].action;
         }
         drop(state_data);
 

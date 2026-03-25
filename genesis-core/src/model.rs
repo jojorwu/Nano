@@ -102,6 +102,7 @@ pub struct NeuronsSoA {
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
     pub is_excitatory: Vec<u8>,    // 1 = true, 0 = false (FFI compatible)
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
+    pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
 }
 
 /// FFI-safe view of the NeuronsSoA for Zero-Copy access from C++ and Python.
@@ -128,6 +129,7 @@ pub struct NeuronsFFI {
     pub liquid_current: *mut IValue,
     pub is_excitatory: *mut u8,
     pub block_id: *mut u32,
+    pub action_potential: *mut IValue,
     pub len: u32,
 }
 
@@ -155,6 +157,7 @@ impl NeuronsSoA {
             liquid_current: self.liquid_current.as_mut_ptr(),
             is_excitatory: self.is_excitatory.as_mut_ptr(),
             block_id: self.block_id.as_mut_ptr(),
+            action_potential: self.action_potential.as_mut_ptr(),
             len: self.len() as u32,
         }
     }
@@ -193,6 +196,7 @@ impl NeuronsSoA {
             activity_ema: Vec::with_capacity(capacity),
             is_excitatory: Vec::with_capacity(capacity),
             adaptation_current: Vec::with_capacity(capacity),
+            action_potential: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
         neurons
@@ -246,6 +250,7 @@ impl NeuronsSoA {
         self.activity_ema.resize(new_size, 0);
         self.is_excitatory.resize(new_size, 1);
         self.adaptation_current.resize(new_size, 0);
+        self.action_potential.resize(new_size, 0);
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -275,6 +280,7 @@ impl NeuronsSoA {
         self.activity_ema.shrink_to_fit();
         self.is_excitatory.shrink_to_fit();
         self.adaptation_current.shrink_to_fit();
+        self.action_potential.shrink_to_fit();
     }
 }
 
@@ -419,6 +425,8 @@ pub struct SimulationState {
     pub l2_ptr: usize,
     /// Per-block surprise rolling average for targeted neurogenesis
     pub block_surprise: Vec<f32>,
+    /// L3 Episodic Archive: stores highly compressed block summaries of rare/surprising events
+    pub l3_archive: Vec<Vec<u16>>,
 }
 
 impl SimulationState {
@@ -437,6 +445,7 @@ impl SimulationState {
             l2_history: vec![Vec::new(); 16], // L2 window
             l2_ptr: 0,
             block_surprise: Vec::new(),
+            l3_archive: Vec::new(),
         }
     }
 }

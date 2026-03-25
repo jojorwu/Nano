@@ -12,6 +12,8 @@ struct NeuronState {
     distal_gate: i32,
     apical_gate: i32,
     basal_gate: i32,
+    block_id: u32,
+    action: i32,
 }
 
 @group(0) @binding(0) var<storage, read_write> neuron_states: array<NeuronState>;
@@ -127,6 +129,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         neuron_states[i].last_spike_tick = current_tick;
         neuron_states[i].adaptation = neuron_states[i].adaptation + 100;
         neuron_states[i].backprop_signal = 1024;
+        neuron_states[i].action = 1024;
 
         let count = atomicAdd(&spike_counter, 1u);
         if (count < arrayLength(&sparse_spikes)) {
@@ -140,6 +143,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             neuron_states[i].threshold = neuron_states[i].threshold - config.ip_decay;
         }
         neuron_states[i].backprop_signal = (neuron_states[i].backprop_signal * 800) >> 10;
+        neuron_states[i].action = (neuron_states[i].action * 800) >> 10;
         neuron_states[i].adaptation = (neuron_states[i].adaptation * 972) >> 10;
     }
 
