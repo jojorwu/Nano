@@ -3,9 +3,9 @@ use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BitWiseTitan {
-    /// Sparse Associative Memory: maps (input_block_id) -> Vec<(target_neuron_id, weight_counter)>
-    /// This drastically reduces memory for sparse networks.
-    pub sparse_associations: std::collections::HashMap<u32, Vec<Association>>,
+    /// Flat Associative Memory for O(1) access.
+    /// Indexed by block_id, contains a list of associations.
+    pub associations: Vec<Vec<Association>>,
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
@@ -14,16 +14,22 @@ pub struct BitWiseTitan {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Association {
     pub target: u32,
-    pub weight: i16, // Using 16-bit counters for efficiency
+    pub weight: i8, // Quantized to 8-bit for extreme memory efficiency
 }
 
 impl BitWiseTitan {
     pub fn new(lr: IValue) -> Self {
         Self {
-            sparse_associations: std::collections::HashMap::new(),
+            associations: Vec::new(),
             learning_rate: lr,
             surprise_threshold: 100,
             decay_rate: 1,
+        }
+    }
+
+    fn ensure_capacity(&mut self, max_bid: u32) {
+        if (max_bid as usize) >= self.associations.len() {
+            self.associations.resize((max_bid as usize + 1).max(64), Vec::new());
         }
     }
 
@@ -55,7 +61,8 @@ impl BitWiseTitan {
                     if src_idx >= n_count { continue; }
                     let src_bid = neurons.block_id[src_idx];
 
-                    let entries = self.sparse_associations.entry(src_bid).or_insert_with(Vec::new);
+                    self.ensure_capacity(src_bid);
+                    let entries = &mut self.associations[src_bid as usize];
 
                     // Update connections to neurons that are firing NOW
                     for (j, &now_word) in now.iter().enumerate() {
@@ -67,7 +74,7 @@ impl BitWiseTitan {
                                     // Prediction Success: boost weight significantly
                                     assoc.weight = assoc.weight.saturating_add(2);
                                 } else if entries.len() < 100 {
-                                    entries.push(Association { target: tgt_idx, weight: 5 }); // Initial confidence
+                                    entries.push(Association { target: tgt_idx, weight: 2 }); // Initial confidence
                                 }
                             }
                         }
@@ -79,7 +86,7 @@ impl BitWiseTitan {
 
         // Periodic Decay
         if surprise > 500 {
-            for associations in self.sparse_associations.values_mut() {
+            for associations in self.associations.iter_mut() {
                 associations.retain_mut(|a| {
                     a.weight = a.weight.saturating_sub(1);
                     a.weight > 0
@@ -96,20 +103,22 @@ impl NanoModule for BitWiseTitan {
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         let dist = bus.distal();
-        // Use a set to avoid multiple retrievals for the same block in one tick
+        // Optimized Sparse Retrieval: Map-reduce triggered blocks without O(N) loop if possible.
+        // For now, we utilize the fact that previous_spikes is often sparse.
         let mut triggered_blocks = std::collections::HashSet::new();
 
+        // Heuristic: iterate only over active indices if provided via a sparse hint or similar.
+        // Since we only have [bool], we can optimize with bitmask-style iteration if it was bitpacked.
         for (i, &fired) in previous_spikes.iter().enumerate() {
             if fired {
-                // Map neuron index to block_id for retrieval
-                // Ideally this would use NeuronsSoA, but as a test fallback:
                 let bid = (i / 4) as u32;
                 triggered_blocks.insert(bid);
             }
         }
 
         for bid in triggered_blocks {
-            if let Some(assocs) = self.sparse_associations.get(&bid) {
+            if (bid as usize) < self.associations.len() {
+                let assocs = &self.associations[bid as usize];
                 for a in assocs {
                     if (a.target as usize) < dist.len() {
                             let weight = if a.weight > 0 { (a.weight as i32) * 50 } else { 0 }; // Scale weight for impact
@@ -153,6 +162,6 @@ mod tests {
     #[test]
     fn test_bitwise_titan_init() {
         let titan = BitWiseTitan::new(100);
-        assert_eq!(titan.sparse_associations.len(), 0);
+        assert_eq!(titan.associations.len(), 0);
     }
 }

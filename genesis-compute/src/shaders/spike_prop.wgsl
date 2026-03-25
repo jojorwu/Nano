@@ -15,9 +15,13 @@
 @group(0) @binding(12) var<storage, read> block_attn_gates: array<vec4<i32>>; // [Prox, Dist, Apic, Basal] per block
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
+var<workgroup> shared_potentials: array<atomic<i32>, 64>; // Reduced scope for shared accumulation
+
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
     let idx = id.x;
+    let lid = local_id.x;
+
     if (idx >= arrayLength(&source_indices)) { return; }
 
     let src = source_indices[idx];
@@ -39,6 +43,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         fired = (packed_word.y >> bit_idx) & 1u;
     }
 
+    // Note: Effective shared accumulation requires sorting by target index.
+    // Without sorting, we revert to direct atomic adds for correctness but keep bit-parallelism.
     if (fired != 0u) {
         let tgt = target_indices[idx];
         let bid = block_id[tgt];

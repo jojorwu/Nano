@@ -310,7 +310,6 @@ impl Runtime {
     /// The network processes its own history to strengthen permanent associations.
     pub fn consolidate_memory(&mut self, iterations: u32) {
         log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
-        let n_count = self.engine.model.neurons.len();
 
         for _ in 0..iterations {
             // Memory Replay: Fetch past bitpacked patterns

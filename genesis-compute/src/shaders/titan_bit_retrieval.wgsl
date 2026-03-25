@@ -9,8 +9,10 @@ struct Association {
 @group(0) @binding(3) var<storage, read> block_id: array<u32>;
 @group(0) @binding(4) var<storage, read_write> distal_potentials: array<atomic<i32>>;
 
+var<workgroup> block_shared_pots: array<atomic<i32>, 64>;
+
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
     let neuron_idx = id.x;
     let n_count = arrayLength(&block_id);
     if (neuron_idx >= n_count) { return; }

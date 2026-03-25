@@ -131,7 +131,8 @@ mod tests_advanced {
         for m in &mut rt.engine.modules.modules {
             if m.name() == "titan" {
                 let mut titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
-                titan.sparse_associations.insert(0, vec![genesis_core::titan::Association { target: 4, weight: 10 }]);
+                titan.associations.resize(1, Vec::new());
+                titan.associations[0] = vec![genesis_core::titan::Association { target: 4, weight: 10 }];
                 m.set_state(&bincode::serialize(&titan).unwrap());
             }
         }
@@ -164,7 +165,7 @@ mod tests_advanced {
         for m in &rt.engine.modules.modules {
             if m.name() == "titan" {
                 let titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
-                let assoc = titan.sparse_associations.get(&0).unwrap();
+                let assoc = &titan.associations[0];
                 assert!(assoc[0].weight > 10, "Weight was {}, should increase on successful prediction", assoc[0].weight);
             }
         }
@@ -229,7 +230,8 @@ mod tests_advanced {
         for m in &mut rt.engine.modules.modules {
             if m.name() == "titan" {
                 let mut titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
-                titan.sparse_associations.insert(0, vec![genesis_core::titan::Association { target: 8, weight: 1 }]);
+                titan.associations.resize(1, Vec::new());
+                titan.associations[0] = vec![genesis_core::titan::Association { target: 8, weight: 1 }];
                 m.set_state(&bincode::serialize(&titan).unwrap());
             }
         }
@@ -251,9 +253,8 @@ mod tests_advanced {
         for m in &rt.engine.modules.modules {
             if m.name() == "titan" {
                 let titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
-                let assoc_list = titan.sparse_associations.get(&0);
-                assert!(assoc_list.is_some(), "Association list for Block 0 should exist");
-                let assoc = assoc_list.unwrap();
+                assert!(titan.associations.len() > 0, "Association list for Block 0 should exist");
+                let assoc = &titan.associations[0];
                 let match_assoc = assoc.iter().find(|a| a.target == 8).expect("Association 0 -> 8 should exist");
                 assert!(match_assoc.weight > 1, "Consolidation should strengthen associations, got {}", match_assoc.weight);
             }

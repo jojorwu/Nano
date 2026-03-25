@@ -197,9 +197,9 @@ impl CpuBackend {
 
         let neurons = &mut model.neurons;
 
-        // Optimization: Use a single parallel pass over the SoA structures.
-        // We ensure Rayon parallelizes efficiently.
+        // Optimization: Use a single parallel pass over the SoA structures with chunks for better cache locality.
         let spike_results: Vec<bool> = neurons.potential.par_iter_mut()
+            .with_min_len(64) // Encourage larger chunks for SIMD optimization
             .zip(neurons.next_update_tick.par_iter_mut())
             .zip(neurons.refractory_timer.par_iter_mut())
             .zip(neurons.last_spike_tick.par_iter_mut())

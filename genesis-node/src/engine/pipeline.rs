@@ -135,6 +135,20 @@ impl PipelineStage for PropagationStage {
         };
 
         engine.state.spikes_history[engine.state.history_ptr] = current_bitpacked;
+
+        // Continuous Synaptic Pruning: every 50 ticks, prune extremely weak synapses
+        if context.tick % 50 == 0 {
+             let mut i = 0;
+             while i < engine.model.synapses.len() {
+                 if engine.model.synapses.weight[i].abs() < 5 {
+                     engine.model.synapses.remove(i);
+                     // Clear index to force rebuild
+                     engine.backend.rebuild_index(&engine.model);
+                 } else {
+                     i += 1;
+                 }
+             }
+        }
     }
 }
 
