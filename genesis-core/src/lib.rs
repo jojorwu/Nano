@@ -85,8 +85,12 @@ impl NanoModule for ThinkModule {
     }
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         if let Some(s) = surprise {
-            if s > 512 {
-                self.extra_ticks = (self.extra_ticks + 1).min(20);
+            // Adaptive Thought Depth: increase internal iteration depth during high uncertainty (surprise)
+            // SCALE = 1024.
+            if s > 1500 {
+                self.extra_ticks = (self.extra_ticks + 5).min(100); // Deep reasoning
+            } else if s > 512 {
+                self.extra_ticks = (self.extra_ticks + 1).min(50);
             } else if s < 100 {
                 self.extra_ticks = self.extra_ticks.saturating_sub(1);
             }
@@ -153,7 +157,8 @@ impl PlasticityRule for GsopRule {
             _ => self.learning_rate / 2,
         };
 
-        let lr_final = (lr as i64 * ctx.get_modulation_gain()) >> 10;
+        let p_gate = ctx.neurons.plasticity_gate[ctx.post_index];
+        let lr_final = (lr as i64 * ctx.get_modulation_gain() * p_gate as i64) >> 20;
         let lr_final = lr_final as i32;
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };

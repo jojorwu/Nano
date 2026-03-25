@@ -183,7 +183,7 @@ impl EvolutionaryOptimizer {
     }
 
     /// Perform structural mutations based on reward and activity.
-    pub fn mutate(&self, synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, reward: IValue) {
+    pub fn mutate(&self, synapses: &mut SynapsesSoA, neurons: &mut crate::NeuronsSoA, reward: IValue) {
         self.mutate_with_activity(synapses, neurons, reward, &[], 1000000);
     }
 
@@ -191,7 +191,7 @@ impl EvolutionaryOptimizer {
     pub fn mutate_with_activity(
         &self,
         synapses: &mut SynapsesSoA,
-        neurons: &crate::NeuronsSoA,
+        neurons: &mut crate::NeuronsSoA,
         reward: IValue,
         activity_history: &[Vec<bool>],
         max_synapses: usize
@@ -202,7 +202,7 @@ impl EvolutionaryOptimizer {
     pub fn mutate_with_surprise(
         &self,
         synapses: &mut SynapsesSoA,
-        neurons: &crate::NeuronsSoA,
+        neurons: &mut crate::NeuronsSoA,
         reward: IValue,
         activity_history: &[Vec<bool>],
         max_synapses: usize,
@@ -251,6 +251,15 @@ impl EvolutionaryOptimizer {
                                     };
 
                                     let config = StructuralPlasticityConfig { max_synapses, ..Default::default() };
+
+                    // Surprise-Targeted Neurogenesis:
+                    // If surprise in target block is very high, grow NEW neurons first.
+                    if !block_surprise.is_empty() {
+                        let bid = neurons.block_id[j];
+                        if (bid as usize) < block_surprise.len() && block_surprise[bid as usize] > 0.8 {
+                            grow_neurons_in_block(neurons, bid, 1, neurons.layer_id[j as usize]);
+                        }
+                    }
 
                     // Surprise-Targeted Growth: increase initial weight for neurons in surprised blocks
                     let initial_weight = if !block_surprise.is_empty() {
@@ -335,6 +344,26 @@ pub fn grow_synapse(
     config: &StructuralPlasticityConfig
 ) -> bool {
     grow_synapse_in_compartment(synapses, source, target, initial_weight, crate::Compartment::Proximal, config)
+}
+
+pub fn grow_neurons_in_block(
+    neurons: &mut crate::NeuronsSoA,
+    block_id: u32,
+    count: usize,
+    layer_id: u16
+) {
+    let start_idx = neurons.len();
+    neurons.grow(count);
+    for i in 0..count {
+        let idx = start_idx + i;
+        neurons.block_id[idx] = block_id;
+        neurons.layer_id[idx] = layer_id;
+        // Inherit spatial coordinates from an existing neuron in the same block if possible
+        if let Some(ref_idx) = neurons.block_id.iter().take(start_idx).position(|&b| b == block_id) {
+            neurons.x[idx] = neurons.x[ref_idx];
+            neurons.y[idx] = neurons.y[ref_idx];
+        }
+    }
 }
 
 pub fn grow_synapse_in_compartment(

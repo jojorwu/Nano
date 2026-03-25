@@ -21,10 +21,19 @@ pub struct BitWiseTitan {
     pub byte_memory: Vec<u8>,
     /// Address range of neurons that map to byte_memory (start_idx, end_idx)
     pub memory_mapped_range: Option<(usize, usize)>,
+    /// Scripting sequences stored in byte_memory
+    pub script_sequences: Vec<ScriptSequence>,
     /// Memory Utility Tracking: tracks how often each block is successfully retrieved
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScriptSequence {
+    pub start_addr: usize,
+    pub length: usize,
+    pub trigger_pattern: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -53,6 +62,7 @@ impl BitWiseTitan {
             memory_mapped_range: None,
             block_utility: vec![0.0; 64],
             last_access: vec![0; 64],
+            script_sequences: Vec::new(),
         }
     }
 
@@ -240,6 +250,40 @@ impl NanoModule for BitWiseTitan {
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
+        // Script Execution (Hierarchical Planning)
+        // Check if any script is triggered by the previous spikes
+        let n_count_script = previous_spikes.len();
+        let packed_len = (n_count_script + 63) / 64;
+        let mut current_packed = vec![0u64; packed_len];
+        for (i, &s) in previous_spikes.iter().enumerate() {
+            if s { current_packed[i / 64] |= 1 << (i % 64); }
+        }
+
+        for script in &self.script_sequences {
+            let mut matched = true;
+            for (i, &pattern_word) in script.trigger_pattern.iter().enumerate() {
+                if i < packed_len && (current_packed[i] & pattern_word) != pattern_word {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if matched {
+                // Execute script: read bytes and inject as proximal signals over time
+                if script.length > 0 && script.start_addr < self.byte_memory.len() {
+                    let first_byte = self.byte_memory[script.start_addr];
+                    let prox = bus.proximal();
+                    for i in 0..8 {
+                        if (i as usize) < prox.len() {
+                            if (first_byte >> i) & 1 == 1 {
+                                crate::InputBus::atomic_saturating_add(&prox[i], SCALE);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Memory-Mapped Interface: Read/Write from byte_memory
         if let Some((start, end)) = self.memory_mapped_range {
             let mut addr = 0usize;
@@ -372,8 +416,21 @@ impl NanoModule for BitWiseTitan {
         }
     }
 
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _surprise: Option<IValue>) {
-        // We now use the specialized history-based learning in the pipeline.
+    fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
+        // Metaplasticity: Adjust plasticity_gate based on surprise and activity
+        if let Some(s) = surprise {
+            for i in 0..neurons.len() {
+                if current_spikes[i] {
+                    // High surprise increases plasticity (learning)
+                    if s > 800 {
+                        neurons.plasticity_gate[i] = neurons.plasticity_gate[i].saturating_add(50).min(SCALE);
+                    } else if s < 100 {
+                        // Low surprise / stability reduces plasticity (freezing weights)
+                        neurons.plasticity_gate[i] = neurons.plasticity_gate[i].saturating_sub(5);
+                    }
+                }
+            }
+        }
     }
 
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {

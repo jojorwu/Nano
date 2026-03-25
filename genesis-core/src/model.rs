@@ -103,6 +103,7 @@ pub struct NeuronsSoA {
     pub is_excitatory: Vec<u8>,    // 1 = true, 0 = false (FFI compatible)
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
+    pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
 }
@@ -132,6 +133,7 @@ pub struct NeuronsFFI {
     pub is_excitatory: *mut u8,
     pub block_id: *mut u32,
     pub action_potential: *mut IValue,
+    pub plasticity_gate: *mut IValue,
     pub packed_params: *mut u64,
     pub len: u32,
 }
@@ -161,6 +163,7 @@ impl NeuronsSoA {
             is_excitatory: self.is_excitatory.as_mut_ptr(),
             block_id: self.block_id.as_mut_ptr(),
             action_potential: self.action_potential.as_mut_ptr(),
+            plasticity_gate: self.plasticity_gate.as_mut_ptr(),
             packed_params: self.packed_params.as_mut_ptr(),
             len: self.len() as u32,
         }
@@ -201,6 +204,7 @@ impl NeuronsSoA {
             is_excitatory: Vec::with_capacity(capacity),
             adaptation_current: Vec::with_capacity(capacity),
             action_potential: Vec::with_capacity(capacity),
+            plasticity_gate: Vec::with_capacity(capacity),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -256,6 +260,7 @@ impl NeuronsSoA {
         self.is_excitatory.resize(new_size, 1);
         self.adaptation_current.resize(new_size, 0);
         self.action_potential.resize(new_size, 0);
+        self.plasticity_gate.resize(new_size, SCALE);
         self.packed_params.resize(new_size, 0);
     }
 
@@ -287,6 +292,7 @@ impl NeuronsSoA {
         self.is_excitatory.shrink_to_fit();
         self.adaptation_current.shrink_to_fit();
         self.action_potential.shrink_to_fit();
+        self.plasticity_gate.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }
 }

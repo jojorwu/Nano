@@ -160,7 +160,19 @@ impl InputBus {
         if let Some(id) = self.get_channel_id(name) {
             let chan = self.channel(id);
             if index < chan.len() {
-                return chan[index].load(Ordering::Relaxed);
+                let val = chan[index].load(Ordering::Relaxed);
+                // Active Inference: Gated Perception
+                // If the network is suppressing this modality via the 'action' channel, reduce the value.
+                let action_chan = self.action();
+                if index < action_chan.len() {
+                    let suppression = action_chan[index].load(Ordering::Relaxed);
+                    if suppression > 0 {
+                        // Use a simple gating mechanism: if suppression is high, value is reduced.
+                        // SCALE = 1024. If suppression = 1024, val = 0.
+                        return (val as i64 * (1024 - suppression).max(0) as i64 >> 10) as i32;
+                    }
+                }
+                return val;
             }
         }
         0
