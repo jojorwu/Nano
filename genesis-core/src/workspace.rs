@@ -18,6 +18,8 @@ pub struct WorkspaceModule {
     pub broadcast_intensity: IValue,
     /// Minimum activity to trigger ignition
     pub ignition_threshold: f32,
+    /// Neuron to Block mapping
+    pub neuron_to_block: Vec<u32>,
 }
 
 impl WorkspaceModule {
@@ -28,6 +30,7 @@ impl WorkspaceModule {
             block_activity: std::collections::HashMap::new(),
             broadcast_intensity: SCALE / 2, // 0.5 intensity
             ignition_threshold: 10.0,
+            neuron_to_block: Vec::new(),
         }
     }
 }
@@ -37,8 +40,12 @@ impl NanoModule for WorkspaceModule {
     fn tier(&self) -> u32 { 10 } // High tier: runs after sensory processing
     fn outputs(&self) -> Vec<String> { vec!["broadcast".to_string()] }
 
-    fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], _tick: u32) {
-        let n_count = previous_spikes.len();
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
+        self.neuron_to_block = neurons.block_id.clone();
+        Ok(())
+    }
+
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
 
         // 1. Competition: Aggregrate activity per block
         // In a real implementation, we would access block_id from neurons.
@@ -52,11 +59,9 @@ impl NanoModule for WorkspaceModule {
             // For now, we simulate broadcast by boosting specific signals if they belong to workspace
             if let Some(bid) = self.active_block {
                 let prox = bus.proximal();
-                // Simple broadcast: boost activity of all neurons in the ignited block
-                // This creates a self-sustaining loop (re-entrant processing)
-                for i in 0..n_count {
-                    // Heuristic: map neuron index to block (ideally use block_id from state)
-                    if (i / 16) as u32 == bid {
+                // Broadcast using the actual mapping stored during on_init
+                for (i, &mapped_bid) in self.neuron_to_block.iter().enumerate() {
+                    if mapped_bid == bid && i < prox.len() {
                         InputBus::atomic_saturating_add(&prox[i], self.broadcast_intensity);
                     }
                 }

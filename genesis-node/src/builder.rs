@@ -87,7 +87,8 @@ impl RuntimeBuilder {
 
         modules.rebuild_tiers();
 
-        let engine = SimulationEngine::new(model, modules, backend, &self.settings);
+        let engine = SimulationEngine::new(model, modules, backend, &self.settings)
+             .map_err(|e| RuntimeError::StateError("engine_init".into(), e.to_string()))?;
 
         let (nm, titan_rx) = if !self.peers.is_empty() {
              let node_id = self.node_id.clone().unwrap_or_else(|| "node0".to_string());

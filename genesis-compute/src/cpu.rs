@@ -33,6 +33,56 @@ impl Default for CpuBackend {
 }
 
 impl CpuBackend {
+    fn update_single_neuron(&self, i: usize, neurons: &mut genesis_core::NeuronsSoA, model: &BakedModel, current_tick: u32, noise_amp: i32, ip_inc: i32, ip_dec: i32, target_activity: i32) -> bool {
+        let attn_dist = ((neurons.distal_potential[i] as i64 * neurons.distal_gate[i] as i64) >> 10) as i32;
+        let attn_apical = ((neurons.apical_potential[i] as i64 * neurons.apical_gate[i] as i64) >> 10) as i32;
+        let attn_basal = ((neurons.basal_potential[i] as i64 * neurons.basal_gate[i] as i64) >> 10) as i32;
+
+        let astro_mod = ((neurons.astro_calcium[i] as i64 * SCALE as i64) >> 12) as i32;
+        let current_pot = calculate_membrane_potential(
+            neurons.potential[i], neurons.proximal_potential[i], attn_dist, attn_apical, attn_basal,
+            neurons.gate_threshold[i], neurons.liquid_current[i], neurons.decay[i], noise_amp,
+            neurons.adaptation_current[i] + astro_mod
+        );
+
+        let refr_mult = if neurons.refractory_timer[i] > 0 { 1 + (1 << neurons.refractory_timer[i]) } else { 1 };
+        let effective_threshold = neurons.threshold[i] * refr_mult;
+        let fired = current_pot >= effective_threshold;
+
+        if fired {
+            neurons.potential[i] = 0;
+            neurons.refractory_timer[i] = model.config.default_refractory_ticks;
+            neurons.last_spike_tick[i] = current_tick;
+            neurons.backprop_signal[i] = SCALE;
+            neurons.action_potential[i] = SCALE;
+            neurons.threshold[i] = neurons.threshold[i].saturating_add(ip_inc);
+            let alpha = model.config.activity_ema_alpha as i32;
+            neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
+            neurons.adaptation_current[i] = neurons.adaptation_current[i].saturating_add(100);
+            neurons.astro_calcium[i] = neurons.astro_calcium[i].saturating_add(model.config.astro_increment);
+        } else {
+            neurons.potential[i] = current_pot;
+            if neurons.refractory_timer[i] > 0 { neurons.refractory_timer[i] -= 1; }
+            if neurons.threshold[i] > neurons.base_threshold[i] { neurons.threshold[i] = neurons.threshold[i].saturating_sub(ip_dec); }
+            neurons.backprop_signal[i] = ((neurons.backprop_signal[i] as i64 * model.config.smbp_decay) >> 10) as i32;
+            neurons.action_potential[i] = ((neurons.action_potential[i] as i64 * model.config.smbp_decay) >> 10) as i32;
+            let alpha = model.config.activity_ema_alpha as i32;
+            neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64) / 1000) as i32;
+            neurons.adaptation_current[i] = (neurons.adaptation_current[i] * 95) / 100;
+            neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro_decay_rate) / 1000) as i32;
+        }
+
+        let error = neurons.activity_ema[i] - target_activity;
+        let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
+        if error > 0 {
+            neurons.base_threshold[i] = neurons.base_threshold[i].saturating_add(homeo_rate);
+        } else if error < 0 && neurons.base_threshold[i] > model.config.default_threshold / 2 {
+            neurons.base_threshold[i] = neurons.base_threshold[i].saturating_sub(1);
+        }
+        neurons.next_update_tick[i] = current_tick + neurons.update_interval[i];
+        fired
+    }
+
     pub fn rebuild_index_internal(&mut self, model: &BakedModel) {
         let n_count = model.neurons.len();
         let s_count = model.synapses.len();
@@ -197,87 +247,37 @@ impl CpuBackend {
 
         let neurons = &mut model.neurons;
 
-        // Optimization: Use a single parallel pass over the SoA structures with chunks for better cache locality.
-        let spike_results: Vec<bool> = neurons.potential.par_iter_mut()
-            .with_min_len(64) // Encourage larger chunks for SIMD optimization
-            .zip(neurons.next_update_tick.par_iter_mut())
-            .zip(neurons.refractory_timer.par_iter_mut())
-            .zip(neurons.last_spike_tick.par_iter_mut())
-            .zip(neurons.backprop_signal.par_iter_mut())
-            .zip(neurons.threshold.par_iter_mut())
-            .zip(neurons.activity_ema.par_iter_mut())
-            .zip(neurons.base_threshold.par_iter_mut())
-            .zip(neurons.adaptation_current.par_iter_mut())
-            .zip(neurons.astro_calcium.par_iter_mut())
-            .zip(&neurons.proximal_potential)
-            .zip(&neurons.distal_potential)
-            .zip(&neurons.apical_potential)
-            .zip(&neurons.basal_potential)
-            .zip(&neurons.distal_gate)
-            .zip(&neurons.apical_gate)
-            .zip(&neurons.basal_gate)
-            .zip(&neurons.gate_threshold)
-            .zip(&neurons.liquid_current)
-            .zip(&neurons.decay)
-            .zip(&neurons.update_interval)
-            .zip(neurons.action_potential.par_iter_mut())
-            .zip(0..n_count)
-            .map(|((((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), astro), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), action), i)| {
-                if current_tick < *next_upd { return false; }
-                if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
+        // Parallelizing potential updates with a custom worker to avoid deep zip-chain nesting
+        let mut spike_results = vec![false; n_count];
+        let chunk_size = (n_count / rayon::current_num_threads()).max(64);
 
-                let attn_dist = ((*dist as i64 * *d_gate as i64) >> 10) as i32;
-                let attn_apical = ((*apical as i64 * *a_gate as i64) >> 10) as i32;
-                let attn_basal = ((*basal as i64 * *b_gate as i64) >> 10) as i32;
+        let expert_masks_ptr = expert_masks.as_ptr() as usize;
+        let neurons_ptr = neurons as *mut _ as usize;
 
-                // Astrocytic Modulation: astrocytes integrate activity and modulate threshold
-                // High calcium = high local activity -> metabolic suppression (increased threshold)
-                let astro_mod = ((*astro as i64 * SCALE as i64) >> 12) as i32;
+        spike_results.par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let start_idx = chunk_idx * chunk_size;
+                let end_idx = (start_idx + chunk_size).min(n_count);
 
-                let current_pot = calculate_membrane_potential(*pot, *prox, attn_dist, attn_apical, attn_basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation + astro_mod);
+                // SAFETY: We are accessing disjoint chunks of the SoA.
+                // The update_single_neuron method needs &mut NeuronsSoA.
+                // We use a local unsafe pointer to bypass borrow checker for parallel mutation of disjoint elements.
+                unsafe {
+                    let n_mut = &mut *(neurons_ptr as *mut genesis_core::NeuronsSoA);
+                    let e_masks = if expert_masks_ptr == 0 { &[] } else {
+                        std::slice::from_raw_parts(expert_masks_ptr as *const bool, expert_masks.len())
+                    };
 
-                // Relative Refractory: Exponentially decaying threshold multiplier
-                let refr_mult = if *refr > 0 { 1 + (1 << *refr) } else { 1 };
-                let effective_threshold = *thresh * refr_mult;
-                let fired = current_pot >= effective_threshold;
+                    for i in start_idx..end_idx {
+                        if current_tick < n_mut.next_update_tick[i] { continue; }
+                        if !e_masks.is_empty() && !e_masks[i % e_masks.len()] { continue; }
 
-                if fired {
-                    *pot = 0;
-                    *refr = model.config.default_refractory_ticks;
-                    *last_spk = current_tick;
-                    *bprop = SCALE;
-                    *action = SCALE; // Signal to action bus
-                    *thresh = thresh.saturating_add(ip_inc);
-                    let alpha = model.config.activity_ema_alpha as i32;
-                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32; // Scaled to 1000 (100 * 10)
-                    *adaptation = adaptation.saturating_add(100); // Metabolic cost
-                    *astro = astro.saturating_add(model.config.astro_increment); // Astrocyte integrates activity
-                } else {
-                    *pot = current_pot;
-                    if *refr > 0 { *refr -= 1; }
-                    if *thresh > *b_thresh { *thresh = thresh.saturating_sub(ip_dec); }
-                    *bprop = ((*bprop as i64 * model.config.smbp_decay) >> 10) as i32;
-                    *action = ((*action as i64 * model.config.smbp_decay) >> 10) as i32;
-                    let alpha = model.config.activity_ema_alpha as i32;
-                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 0) / 1000) as i32; // Simplified EMA update for no spike
-                    *adaptation = (*adaptation * 95) / 100; // Recovery
-                    *astro = (*astro as i64 * model.config.astro_decay_rate / 1000) as i32; // Slow astrocytic decay
+                        let fired = self.update_single_neuron(i, n_mut, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
+                        chunk[i - start_idx] = fired;
+                    }
                 }
-
-                // Refined Homeostatic Activity Control (HAC) with integral/dampening logic
-                let error = *activity - target_activity;
-                let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
-
-                if error > 0 {
-                    // Overactive: increase base threshold proportional to error
-                    *b_thresh = b_thresh.saturating_add(homeo_rate);
-                } else if error < 0 && *b_thresh > model.config.default_threshold / 2 {
-                    // Underactive: decrease base threshold
-                    *b_thresh = b_thresh.saturating_sub(1);
-                }
-                *next_upd = current_tick + *upd_int;
-                fired
-            }).collect();
+            });
 
         for i in 0..n_count { if spike_results[i] { new_spikes[i] = true; } }
     }

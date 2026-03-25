@@ -118,7 +118,7 @@ impl SimulationSession {
         let mut runtime = Runtime::load_with_settings(model_path, settings)
             .with_context(|| format!("Failed to load model from {}", model_path))?;
 
-        runtime.post_init().map_err(|e| anyhow::anyhow!(e)).context("Failed to initialize modules")?;
+        runtime.post_init().context("Failed to initialize modules")?;
 
         if let Some(net_cfg) = global.network {
             runtime.engine.model.config = net_cfg;
@@ -478,47 +478,40 @@ vocab_size = 1000
             println!("✅ Training complete.");
         }
         Commands::Config { key, value } => {
-            let mut table: toml::Value = if let Ok(content) = fs::read_to_string("nano.toml") {
-                toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()))
-            } else {
-                toml::Value::Table(toml::map::Map::new())
-            };
+            let content = fs::read_to_string("nano.toml").unwrap_or_default();
+            let mut doc = content.parse::<toml_edit::DocumentMut>().context("Failed to parse nano.toml")?;
 
             if let Some(v) = value {
-                // Set value
-                let mut current = table.as_table_mut().unwrap();
                 let parts: Vec<&str> = key.split('.').collect();
+                let mut current = doc.as_table_mut();
+
                 for (i, part) in parts.iter().enumerate() {
                     if i == parts.len() - 1 {
-                        // Parse value to appropriate type
-                        let toml_val = if let Ok(i) = v.parse::<i64>() {
-                            toml::Value::Integer(i)
-                        } else if let Ok(f) = v.parse::<f64>() {
-                            toml::Value::Float(f)
-                        } else if let Ok(b) = v.parse::<bool>() {
-                            toml::Value::Boolean(b)
+                        if let Ok(i_val) = v.parse::<i64>() {
+                            current.insert(part, toml_edit::value(i_val));
+                        } else if let Ok(f_val) = v.parse::<f64>() {
+                            current.insert(part, toml_edit::value(f_val));
+                        } else if let Ok(b_val) = v.parse::<bool>() {
+                            current.insert(part, toml_edit::value(b_val));
                         } else {
-                            toml::Value::String(v.clone())
-                        };
-                        current.insert(part.to_string(), toml_val);
+                            current.insert(part, toml_edit::value(v.clone()));
+                        }
                     } else {
-                        current = current.entry(part.to_string())
-                            .or_insert(toml::Value::Table(toml::map::Map::new()))
-                            .as_table_mut()
-                            .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?;
+                        current = current.entry(part).or_insert(toml_edit::table()).as_table_mut()
+                            .ok_or_else(|| anyhow::anyhow!("Path component '{}' is not a table", part))?;
                     }
                 }
-                fs::write("nano.toml", toml::to_string_pretty(&table)?)?;
-                println!("✅ Config set: {} = {}", key, v);
+                fs::write("nano.toml", doc.to_string())?;
+                println!("✅ Config updated: {} = {} (Formatting preserved)", key, v);
             } else {
-                // Get value
-                let mut current = Some(&table);
+                let mut current = doc.as_item();
                 for part in key.split('.') {
-                    current = current.and_then(|v| v.get(part));
+                    current = &current[part];
                 }
-                match current {
-                    Some(v) => println!("{}: {}", key, v),
-                    None => println!("❌ Key '{}' not found", key),
+                if !current.is_none() {
+                    println!("{}: {}", key, current);
+                } else {
+                    println!("❌ Key '{}' not found", key);
                 }
             }
         }

@@ -139,8 +139,8 @@ impl NanoModule for ThinkModule {
 pub struct PlasticityContext<'a> {
     pub pre_spiked: bool,
     pub post_spiked: bool,
-    pub backprop_signal: IValue, // SMBP: signal from soma to dendrites
-    pub prediction_error: IValue, // Proximal - Distal (for Predictive Coding)
+    pub backprop_signal: IValue,
+    pub prediction_error: IValue,
     pub compartment: Compartment,
     pub reward: Option<IValue>,
     pub neuromodulation: NeuromodulationState,
@@ -163,6 +163,10 @@ impl<'a> PlasticityContext<'a> {
             SCALE as i64
         };
         (neuromod * dopamine * smbp) >> 20
+    }
+
+    pub fn is_rewarded(&self) -> bool {
+        self.reward.is_some()
     }
 }
 

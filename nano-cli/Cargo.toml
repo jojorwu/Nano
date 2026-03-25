@@ -28,3 +28,4 @@ image = { workspace = true, optional = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 indicatif = { workspace = true }
+toml_edit = "0.25.8"
