@@ -3,14 +3,18 @@ use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BitWiseTitan {
-    /// Flat Associative Memory for O(1) access.
-    /// Indexed by block_id, contains a list of associations.
-    pub associations: Vec<Vec<Association>>,
+    /// Contiguous Association Table for maximum cache efficiency and O(1) access.
+    /// Indexed via block_offsets and block_counts.
+    pub associations_flat: Vec<Association>,
+    pub block_offsets: Vec<u32>,
+    pub block_counts: Vec<u32>,
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
     /// L3 Buffer: most recent episodic patterns for cross-referencing
     pub l3_buffer: Vec<Vec<u16>>,
+    /// Context Hashes: maps 64-bit pattern hash to a list of associated block_ids
+    pub context_hashes: std::collections::HashMap<u64, Vec<u32>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -22,17 +26,60 @@ pub struct Association {
 impl BitWiseTitan {
     pub fn new(lr: IValue) -> Self {
         Self {
-            associations: Vec::new(),
+            associations_flat: Vec::new(),
+            block_offsets: vec![0; 64],
+            block_counts: vec![0; 64],
             learning_rate: lr,
             surprise_threshold: 100,
             decay_rate: 1,
             l3_buffer: Vec::new(),
+            context_hashes: std::collections::HashMap::new(),
         }
     }
 
+    /// Semantic Hashing: maps block activity pattern to a context hash
+    pub fn compute_context_hash(pattern: &[u64]) -> u64 {
+        let mut h = 0u64;
+        for &w in pattern {
+            h ^= w.wrapping_mul(0x517cc1b727220a95);
+        }
+        h
+    }
+
     fn ensure_capacity(&mut self, max_bid: u32) {
-        if (max_bid as usize) >= self.associations.len() {
-            self.associations.resize((max_bid as usize + 1).max(64), Vec::new());
+        if (max_bid as usize) >= self.block_offsets.len() {
+            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2);
+            self.block_offsets.resize(new_size, 0);
+            self.block_counts.resize(new_size, 0);
+        }
+    }
+
+    /// Internal helper to get a temporary mutable view of a block's associations
+    fn get_block_mut(&mut self, bid: u32) -> Vec<Association> {
+        let start = self.block_offsets[bid as usize] as usize;
+        let count = self.block_counts[bid as usize] as usize;
+        self.associations_flat[start..start + count].to_vec()
+    }
+
+    pub fn update_block(&mut self, bid: u32, new_assocs: Vec<Association>) {
+        // This is a simplified implementation. A real high-performance version
+        // would use a fragmented buffer or pre-allocated slots to avoid O(N) shifts.
+        // For now, we perform a naive update for correctness.
+        let start = self.block_offsets[bid as usize] as usize;
+        let count = self.block_counts[bid as usize] as usize;
+
+        self.associations_flat.drain(start..start + count);
+        let mut idx = start;
+        for a in new_assocs {
+            self.associations_flat.insert(idx, a);
+            idx += 1;
+        }
+
+        let delta = (idx - start) as i32 - count as i32;
+        self.block_counts[bid as usize] = (idx - start) as u32;
+
+        for i in (bid as usize + 1)..self.block_offsets.len() {
+            self.block_offsets[i] = (self.block_offsets[i] as i32 + delta) as u32;
         }
     }
 
@@ -51,6 +98,9 @@ impl BitWiseTitan {
         let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
         let search_depth = search_depth.min(history.len());
 
+        // Update Context Hashes
+        let current_hash = Self::compute_context_hash(&now);
+
         for t in 1..search_depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
             let past = history[past_idx].to_bitpacked(n_count);
@@ -68,7 +118,8 @@ impl BitWiseTitan {
                         let src_modality = neurons.layer_id[src_idx] >> 12;
 
                         self.ensure_capacity(src_bid);
-                        let entries = &mut self.associations[src_bid as usize];
+                        let mut entries = self.get_block_mut(src_bid);
+                        let mut changed = false;
 
                         for (j, &now_word) in now.iter().enumerate() {
                             if now_word == 0 { continue; }
@@ -80,25 +131,36 @@ impl BitWiseTitan {
 
                                     if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
                                         assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus);
+                                        changed = true;
                                     } else if entries.len() < 100 {
                                         entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus });
+                                        changed = true;
                                     }
                                 }
                             }
+                        }
+                        if changed {
+                            self.update_block(src_bid, entries);
+                            // Associate this block with the current contextual hash
+                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
                         }
                     }
                 }
             }
         }
 
-        // Periodic Decay
+        // Periodic Decay (Simplified for flattened storage)
         if surprise > 500 {
-            for associations in self.associations.iter_mut() {
-                associations.retain_mut(|a| {
-                    a.weight = a.weight.saturating_sub(1);
-                    a.weight > 0
-                });
-            }
+             for bid in 0..self.block_offsets.len() as u32 {
+                 let mut entries = self.get_block_mut(bid);
+                 if !entries.is_empty() {
+                     entries.retain_mut(|a| {
+                         a.weight = a.weight.saturating_sub(1);
+                         a.weight > 0
+                     });
+                     self.update_block(bid, entries);
+                 }
+             }
         }
     }
 }
@@ -110,6 +172,32 @@ impl NanoModule for BitWiseTitan {
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         let dist = bus.distal();
+        let n_count = dist.len();
+
+        // Fuzzy Retrieval using Semantic Hashes
+        // 1. Pack previous spikes into a pattern
+        let mut packed = vec![0u64; (n_count + 63) / 64];
+        for (i, &s) in previous_spikes.iter().enumerate() {
+            if s { packed[i / 64] |= 1 << (i % 64); }
+        }
+        let current_hash = Self::compute_context_hash(&packed);
+
+        // 2. Check for similar contexts (Fuzzy match)
+        if let Some(fuzzy_blocks) = self.context_hashes.get(&current_hash) {
+            for &bid in fuzzy_blocks {
+                if (bid as usize) < self.block_offsets.len() {
+                    let start = self.block_offsets[bid as usize] as usize;
+                    let count = self.block_counts[bid as usize] as usize;
+                    for i in start..start + count {
+                        let a = &self.associations_flat[i];
+                        if (a.target as usize) < dist.len() {
+                            crate::InputBus::atomic_saturating_add(&dist[a.target as usize], a.weight as i32 * 10);
+                        }
+                    }
+                }
+            }
+        }
+
 
         // L3 Retrieval: if we have very long-term patterns, inject them with low weight
         if !self.l3_buffer.is_empty() {
@@ -138,9 +226,12 @@ impl NanoModule for BitWiseTitan {
         }
 
         for bid in triggered_blocks {
-            if (bid as usize) < self.associations.len() {
-                let assocs = &self.associations[bid as usize];
-                for a in assocs {
+            if (bid as usize) < self.block_offsets.len() {
+                let start = self.block_offsets[bid as usize] as usize;
+                let count = self.block_counts[bid as usize] as usize;
+
+                for i in start..start + count {
+                    let a = &self.associations_flat[i];
                     if (a.target as usize) < dist.len() {
                             let weight = if a.weight > 0 { (a.weight as i32) * 50 } else { 0 }; // Scale weight for impact
                             crate::InputBus::atomic_saturating_add(&dist[a.target as usize], weight);
@@ -183,6 +274,6 @@ mod tests {
     #[test]
     fn test_bitwise_titan_init() {
         let titan = BitWiseTitan::new(100);
-        assert_eq!(titan.associations.len(), 0);
+        assert_eq!(titan.associations_flat.len(), 0);
     }
 }

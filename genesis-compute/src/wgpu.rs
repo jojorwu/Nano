@@ -20,6 +20,7 @@ pub struct GpuNeuronState {
     pub basal_gate: i32,
     pub block_id: u32,
     pub action: i32,
+    pub packed: u64,
 }
 
 #[repr(C)]
@@ -66,6 +67,7 @@ pub struct GpuResources {
     pub modulation_buffer: Option<wgpu::Buffer>,
     pub block_id_buffer: Option<wgpu::Buffer>,
     pub block_attn_buffer: Option<wgpu::Buffer>,
+    pub context_hash_buffer: Option<wgpu::Buffer>,
 }
 
 pub struct WgpuBackend {
@@ -198,6 +200,7 @@ impl WgpuBackend {
                 Self::storage_entry(2, true), // spikes
                 Self::storage_entry(3, true), // block_ids
                 Self::storage_entry(4, false), // distal_potentials
+                Self::storage_entry(5, true), // context_hashes
             ],
         });
         let titan_retrieval_pipeline = Self::create_pipeline(&device, "Titan Retrieval", &titan_layout, &tick_layout, &titan_shader);
@@ -338,6 +341,7 @@ impl ComputeBackend for WgpuBackend {
                 basal_gate: model.neurons.basal_gate[i],
                 block_id: model.neurons.block_id[i],
                 action: model.neurons.action_potential[i],
+                packed: model.neurons.packed_params[i],
             });
         }
         Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
@@ -446,6 +450,13 @@ impl ComputeBackend for WgpuBackend {
 
         // 3. Dispatch Titan Retrieval (Sparse Associative Memory)
         if let Some(mut titan_state) = model.module_states.get("titan").and_then(|s| bincode::deserialize::<genesis_core::titan::BitWiseTitan>(s).ok()) {
+
+            // Upload context hashes for fuzzy search
+            let hashes: Vec<u64> = titan_state.context_hashes.keys().copied().collect();
+            if !hashes.is_empty() {
+                Self::ensure_buffer(&self.device, &mut res.context_hash_buffer, "Context Hashes", &hashes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            }
+
             let mut all_assocs = Vec::new();
             let mut offsets = vec![0u32];
             let max_bid = model.neurons.block_id.iter().max().copied().unwrap_or(0);
@@ -474,6 +485,7 @@ impl ComputeBackend for WgpuBackend {
                         wgpu::BindGroupEntry { binding: 2, resource: res.pre_spike_buffer.as_ref().unwrap_or(&res.input_buffer.as_ref().unwrap()).as_entire_binding() }, // Using pre_spikes (previous_spikes)
                         wgpu::BindGroupEntry { binding: 3, resource: res.block_id_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 4, resource: res.distal_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: res.context_hash_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
                     ],
                 });
 

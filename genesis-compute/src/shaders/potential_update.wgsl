@@ -14,6 +14,7 @@ struct NeuronState {
     basal_gate: i32,
     block_id: u32,
     action: i32,
+    packed: vec2<u32>, // u64 mirror
 }
 
 @group(0) @binding(0) var<storage, read_write> neuron_states: array<NeuronState>;
