@@ -104,6 +104,7 @@ pub struct NeuronsSoA {
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
     pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
+    pub astro_calcium: Vec<IValue>,      // Astrocytic Modulation (Slow calcium dynamics)
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
 }
@@ -205,6 +206,7 @@ impl NeuronsSoA {
             adaptation_current: Vec::with_capacity(capacity),
             action_potential: Vec::with_capacity(capacity),
             plasticity_gate: Vec::with_capacity(capacity),
+            astro_calcium: Vec::with_capacity(capacity),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -261,6 +263,7 @@ impl NeuronsSoA {
         self.adaptation_current.resize(new_size, 0);
         self.action_potential.resize(new_size, 0);
         self.plasticity_gate.resize(new_size, SCALE);
+        self.astro_calcium.resize(new_size, 0);
         self.packed_params.resize(new_size, 0);
     }
 
@@ -293,6 +296,7 @@ impl NeuronsSoA {
         self.adaptation_current.shrink_to_fit();
         self.action_potential.shrink_to_fit();
         self.plasticity_gate.shrink_to_fit();
+        self.astro_calcium.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }
 }

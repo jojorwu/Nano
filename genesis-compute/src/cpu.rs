@@ -208,6 +208,7 @@ impl CpuBackend {
             .zip(neurons.activity_ema.par_iter_mut())
             .zip(neurons.base_threshold.par_iter_mut())
             .zip(neurons.adaptation_current.par_iter_mut())
+            .zip(neurons.astro_calcium.par_iter_mut())
             .zip(&neurons.proximal_potential)
             .zip(&neurons.distal_potential)
             .zip(&neurons.apical_potential)
@@ -221,7 +222,7 @@ impl CpuBackend {
             .zip(&neurons.update_interval)
             .zip(neurons.action_potential.par_iter_mut())
             .zip(0..n_count)
-            .map(|(((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), action), i)| {
+            .map(|((((((((((((((((((((((pot, next_upd), refr), last_spk), bprop), thresh), activity), b_thresh), adaptation), astro), prox), dist), apical), basal), d_gate), a_gate), b_gate), g_thresh), liquid), decay), upd_int), action), i)| {
                 if current_tick < *next_upd { return false; }
                 if !expert_masks.is_empty() && !expert_masks[i % expert_masks.len()] { return false; }
 
@@ -229,7 +230,11 @@ impl CpuBackend {
                 let attn_apical = ((*apical as i64 * *a_gate as i64) >> 10) as i32;
                 let attn_basal = ((*basal as i64 * *b_gate as i64) >> 10) as i32;
 
-                let current_pot = calculate_membrane_potential(*pot, *prox, attn_dist, attn_apical, attn_basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation);
+                // Astrocytic Modulation: astrocytes integrate activity and modulate threshold
+                // High calcium = high local activity -> metabolic suppression (increased threshold)
+                let astro_mod = ((*astro as i64 * SCALE as i64) >> 12) as i32;
+
+                let current_pot = calculate_membrane_potential(*pot, *prox, attn_dist, attn_apical, attn_basal, *g_thresh, *liquid, *decay, noise_amp, *adaptation + astro_mod);
 
                 // Relative Refractory: Exponentially decaying threshold multiplier
                 let refr_mult = if *refr > 0 { 1 + (1 << *refr) } else { 1 };
@@ -246,6 +251,7 @@ impl CpuBackend {
                     let alpha = model.config.activity_ema_alpha as i32;
                     *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32; // Scaled to 1000 (100 * 10)
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
+                    *astro = astro.saturating_add(model.config.astro_increment); // Astrocyte integrates activity
                 } else {
                     *pot = current_pot;
                     if *refr > 0 { *refr -= 1; }
@@ -255,6 +261,7 @@ impl CpuBackend {
                     let alpha = model.config.activity_ema_alpha as i32;
                     *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 0) / 1000) as i32; // Simplified EMA update for no spike
                     *adaptation = (*adaptation * 95) / 100; // Recovery
+                    *astro = (*astro as i64 * model.config.astro_decay_rate / 1000) as i32; // Slow astrocytic decay
                 }
 
                 // Refined Homeostatic Activity Control (HAC) with integral/dampening logic

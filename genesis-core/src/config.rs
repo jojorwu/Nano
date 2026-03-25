@@ -62,6 +62,14 @@ pub struct NetworkConfig {
     pub stp_calcium_decay: i64,
     pub stp_resource_recovery: i64,
     pub stp_calcium_recovery: i64,
+
+    // GNW (Global Neuronal Workspace) Parameters
+    pub workspace_broadcast_intensity: IValue,
+    pub workspace_ignition_threshold: f32,
+
+    // Astrocytic Parameters
+    pub astro_increment: IValue,
+    pub astro_decay_rate: i64,
 }
 
 impl Default for NetworkConfig {
@@ -104,6 +112,10 @@ impl Default for NetworkConfig {
             stp_calcium_decay: 95,
             stp_resource_recovery: 99,
             stp_calcium_recovery: 200,
+            workspace_broadcast_intensity: SCALE / 2,
+            workspace_ignition_threshold: 10.0,
+            astro_increment: 50,
+            astro_decay_rate: 990, // Alpha out of 1000
         }
     }
 }

@@ -22,12 +22,14 @@ pub mod graph;
 pub mod robotics;
 pub mod plasticity;
 pub mod attention;
+pub mod workspace;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
 pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput, ForeignModule, ForeignTickFn};
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI, SynapsesFFI};
 pub use attention::AttnResModule;
+pub use workspace::WorkspaceModule;
 pub use config::NetworkConfig;
 
 pub type IValue = i32;
@@ -65,6 +67,8 @@ pub struct ThinkModule {
     pub max_ticks: usize,
     pub surprise_threshold_deep: IValue,
     pub surprise_threshold_low: IValue,
+    /// Active Inference: Generative Replay (Fantasy) mode
+    pub fantasy_mode: bool,
 }
 
 impl ThinkModule {
@@ -75,6 +79,7 @@ impl ThinkModule {
             max_ticks: 100,
             surprise_threshold_deep: 1500,
             surprise_threshold_low: 100,
+            fantasy_mode: false,
         }
     }
 }
@@ -87,10 +92,22 @@ impl NanoModule for ThinkModule {
         if let ModuleInput::Control(name, val) = input {
             if name == "active" { self.active = *val != 0; }
             if name == "ticks" { self.extra_ticks = *val as usize; }
+            if name == "fantasy" { self.fantasy_mode = *val != 0; }
         }
     }
-    fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
-        // Core logic: The Runtime will check for 'think' module and perform extra backend calls
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
+        // Active Inference: Generative Replay logic.
+        // If in fantasy mode, drive proximal inputs using distal predictions from the last tick.
+        if self.fantasy_mode {
+             let prox = bus.proximal();
+             let dist = bus.distal();
+             for i in 0..prox.len() {
+                  let prediction = dist[i].load(std::sync::atomic::Ordering::Relaxed);
+                  if prediction > 100 {
+                       InputBus::atomic_saturating_add(&prox[i], prediction / 2);
+                  }
+             }
+        }
     }
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         if let Some(s) = surprise {
