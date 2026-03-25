@@ -75,7 +75,17 @@ impl NetworkManager {
                                     let mut q = queue.lock().unwrap();
                                     match packet.data {
                                         SpikeData::Sparse(indices) => q.extend(indices),
-                                        _ => {} // Simplified
+                                        SpikeData::BitPacked(packed) => {
+                                            for (i, &word) in packed.iter().enumerate() {
+                                                if word == 0 { continue; }
+                                                for bit in 0..64 {
+                                                    if (word >> bit) & 1 == 1 {
+                                                        q.push(i * 64 + bit);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }

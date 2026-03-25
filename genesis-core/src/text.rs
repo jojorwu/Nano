@@ -8,6 +8,8 @@ pub struct TextProcessorModule {
     pub pattern_length: usize,
     pub last_tokens: Vec<usize>,
     pub mode: TextMode,
+    /// Spiking Auto-Encoder: trainable weights mapping tokens to patterns
+    pub embedding_weights: HashMap<usize, Vec<IValue>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -23,6 +25,7 @@ impl TextProcessorModule {
             pattern_length,
             last_tokens: Vec::new(),
             mode: TextMode::Vocabulary,
+            embedding_weights: HashMap::new(),
         }
     }
 
@@ -43,7 +46,16 @@ impl TextProcessorModule {
         }
     }
 
-    pub fn encode_token(&self, token: usize) -> Vec<bool> {
+    pub fn encode_token(&mut self, token: usize) -> Vec<bool> {
+        // Trainable Embedding: use learned weights if available
+        if let Some(weights) = self.embedding_weights.get(&token) {
+            let mut pattern = vec![false; self.pattern_length];
+            for (i, &w) in weights.iter().enumerate().take(self.pattern_length) {
+                if w > 512 { pattern[i] = true; }
+            }
+            return pattern;
+        }
+
         if self.mode == TextMode::Vocabulary {
             let mut pattern = vec![false; self.pattern_length];
             let mut h = token as u64;
@@ -75,8 +87,8 @@ impl NanoModule for TextProcessorModule {
         // In burst mode, we might process multiple tokens if the bus is cleared between them.
         // For now, we keep the 1-token-per-tick cadence but allow the Runtime's process_burst
         // to handle the sequential extraction.
-        if let Some(token) = self.last_tokens.get(0) {
-            let pattern = self.encode_token(*token);
+        if let Some(&token) = self.last_tokens.get(0) {
+            let pattern = self.encode_token(token);
             let prox = bus.proximal();
             for (i, &spiked) in pattern.iter().enumerate() {
                 if spiked {
@@ -89,7 +101,22 @@ impl NanoModule for TextProcessorModule {
         }
     }
 
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, reward: Option<IValue>) {
+        // Simple Plasticity for Embedding: align token patterns with actual network activity
+        if let Some(&token) = self.last_tokens.get(0) {
+            let weights = self.embedding_weights.entry(token).or_insert_with(|| vec![512; self.pattern_length]);
+            let r = reward.unwrap_or(0);
+
+            for (i, w) in weights.iter_mut().enumerate() {
+                if i < current_spikes.len() && current_spikes[i] {
+                    *w = w.saturating_add(if r >= 0 { 10 } else { -10 });
+                } else {
+                    *w = w.saturating_sub(1);
+                }
+                *w = (*w).clamp(0, SCALE);
+            }
+        }
+    }
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
 
     fn box_clone(&self) -> Box<dyn NanoModule> {

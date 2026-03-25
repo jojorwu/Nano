@@ -52,6 +52,9 @@ impl BitWiseTitan {
             let past_idx = (h_ptr + history.len() - t) % history.len();
             let past = history[past_idx].to_bitpacked(n_count);
 
+            // Temporal Discount: further events have less weight but still form associations
+            let reinforcement = if t == 1 { 2 } else { 1 };
+
         // Find co-active blocks
         for (i, &past_word) in past.iter().enumerate() {
             if past_word == 0 { continue; }
@@ -71,10 +74,10 @@ impl BitWiseTitan {
                             if (now_word >> now_bit) & 1 == 1 {
                                 let tgt_idx = (j * 64 + now_bit) as u32;
                                 if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
-                                    // Prediction Success: boost weight significantly
-                                    assoc.weight = assoc.weight.saturating_add(2);
+                                    // Prediction Success: boost weight based on temporal proximity
+                                    assoc.weight = assoc.weight.saturating_add(reinforcement);
                                 } else if entries.len() < 100 {
-                                    entries.push(Association { target: tgt_idx, weight: 2 }); // Initial confidence
+                                    entries.push(Association { target: tgt_idx, weight: reinforcement });
                                 }
                             }
                         }

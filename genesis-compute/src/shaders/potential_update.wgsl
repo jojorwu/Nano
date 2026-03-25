@@ -56,6 +56,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&neuron_states)) { return; }
 
+    // Dynamic MoE: Expert Freezing
+    // If all dendritic gates for this neuron are very low, skip potential calculation to save power/cycles
+    let st = neuron_states[i];
+    if (st.distal_gate < 16 && st.apical_gate < 16 && st.basal_gate < 16 && dendritic_gate[i] < 16) {
+        spikes[i] = 0u;
+        return;
+    }
+
     if (expert_mask[i] == 0u) { return; }
     if (current_tick < neuron_states[i].next_update) { return; }
 

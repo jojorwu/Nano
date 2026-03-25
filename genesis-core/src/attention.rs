@@ -6,6 +6,8 @@ pub struct AttnResModule {
     /// Learned pseudo-query vectors for each functional block (mini-column).
     /// Groups of neurons (block_id) share these weights for efficiency.
     pub block_queries: Vec<[IValue; 4]>, // [Proximal, Distal, Apical, Basal] weights per block
+    /// Context Fingerprint: weighted moving average of block-level activity.
+    pub context_fingerprint: Vec<f32>,
     pub learning_rate: IValue,
 }
 
@@ -13,6 +15,7 @@ impl AttnResModule {
     pub fn new(num_blocks: usize) -> Self {
         Self {
             block_queries: vec![[SCALE; 4]; num_blocks],
+            context_fingerprint: vec![0.0; num_blocks],
             learning_rate: 10,
         }
     }
@@ -28,9 +31,18 @@ impl NanoModule for AttnResModule {
         // For now, we'll let the backend handle the actual gating based on `dendritic_gate`.
     }
 
-    fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
+    fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         let n_count = neurons.len();
         if n_count == 0 { return; }
+
+        // Update Context Fingerprint
+        for i in 0..n_count {
+            let bid = neurons.block_id[i] as usize;
+            if bid < self.context_fingerprint.len() && current_spikes[i] {
+                self.context_fingerprint[bid] = self.context_fingerprint[bid] * 0.9 + 0.1;
+            }
+        }
+        for f in &mut self.context_fingerprint { *f *= 0.99; } // Slow decay
 
         // Dynamic Attention Update:
         // If surprise is high, we adjust the block queries to favor compartments that might
@@ -52,12 +64,20 @@ impl NanoModule for AttnResModule {
             }
         }
 
-        // Apply these queries to the neurons' dendritic gates based on block_id
+        // Apply these queries to the neurons' dendritic gates based on block_id and context
         for i in 0..n_count {
             let bid = neurons.block_id[i] as usize;
             if bid < self.block_queries.len() {
-                // Shared attention within the block
-                let q = self.block_queries[bid];
+                // Context-Aware Selection:
+                // if the block is already very active in current context,
+                // prioritize memory (Distal) over new input (Proximal).
+                let mut q = self.block_queries[bid];
+                let context_impact = self.context_fingerprint[bid];
+
+                if context_impact > 0.5 {
+                    q[0] = (q[0] * 800) >> 10; // Lower Proximal
+                    q[1] = (q[1] * 1200) >> 10; // Boost Distal (Memory)
+                }
 
                 neurons.dendritic_gate[i] = q[0];
                 neurons.distal_gate[i] = q[1];
