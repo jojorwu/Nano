@@ -421,7 +421,7 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_surprise(&mut model.synapses, &model.neurons, r, history, model.config.max_synapses, block_surprise);
+            self.optimizer.mutate_with_surprise(&mut model.synapses, &mut model.neurons, r, history, model.config.max_synapses, block_surprise);
 
             if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
                 let grow_size = (model.neurons.len() / 20).max(1);

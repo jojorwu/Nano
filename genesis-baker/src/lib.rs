@@ -88,7 +88,7 @@ impl ModelBlueprint {
                 ModuleConfig::TitanMemory { learning_rate, size, decay_rate } => {
                     #[cfg(feature = "titan")]
                     {
-                        let mut tm = TitanMemory::new(*size, *learning_rate);
+                        let mut tm = TitanMemory::new_with_size(*size, *learning_rate);
                         if let Some(dr) = decay_rate { tm.decay_rate = *dr; }
                         module_states.insert("titan".to_string(), bincode::serialize(&tm).unwrap());
                         titan_memory = Some(tm);

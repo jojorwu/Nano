@@ -52,6 +52,10 @@ enum Commands {
         #[arg(short, long, default_value_t = 1000)] ticks: usize,
         #[arg(long)] backend: Option<String>,
     },
+    /// Perform a health check on a model file
+    Check {
+        #[arg(short, long)] model: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +86,8 @@ impl SimulationSession {
 
         let mut runtime = Runtime::load_with_settings(model_path, settings)
             .with_context(|| format!("Failed to load model from {}", model_path))?;
+
+        runtime.post_init().map_err(|e| anyhow::anyhow!(e)).context("Failed to initialize modules")?;
 
         if let Some(net_cfg) = global.network {
             runtime.engine.model.config = net_cfg;
@@ -151,11 +157,17 @@ async fn main() -> Result<()> {
 checkpoint_interval = 1000
 night_phase_interval = 100
 save_on_exit = true
+preferred_backend = "cpu"
 
 [network]
 default_threshold = 1024
 learning_rate = 10
 neurogenesis_reward_threshold = 200
+# Metaplasticity settings
+metaplasticity_enabled = true
+# Titan Memory settings
+titan_surprise_threshold = 100
+titan_decay_rate = 1
 "#;
             fs::write("nano.toml", config).context("Failed to write nano.toml")?;
 
@@ -184,7 +196,11 @@ vocab_size = 1000
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
             let mut session = SimulationSession::new(model, *learning_rate, backend.clone())?;
-            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level)?;
+            if let Err(e) = session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level) {
+                eprintln!("🔥 Runtime Error: {}. Attempting emergency backup...", e);
+                session.finish(&format!("{}.bak", model))?;
+                return Err(e);
+            }
             session.finish(model)?;
         }
         Commands::Gym { model, env: env_name, episodes, backend } => {
@@ -223,7 +239,7 @@ vocab_size = 1000
         Commands::Shell { model, backend } => {
             let mut session = SimulationSession::new(model, None, backend.clone())?;
             println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.engine.backend.name());
-            println!("Commands: help, save, run <text>, load_image <path>, exit");
+            println!("Commands: help, save, run <text>, load_image <path>, reload, consolidate <iters>, exit");
 
             use std::io::{Write, BufRead};
             let stdin = std::io::stdin();
@@ -243,6 +259,20 @@ vocab_size = 1000
                 else if cmd.starts_with("load_image ") {
                     let path = &cmd[11..];
                     session.run_multimodal(None, Some(path), false)?;
+                }
+                else if cmd == "reload" {
+                    if let Err(e) = session.runtime.reload_settings("nano.toml") {
+                        println!("!! Failed to reload config: {}", e);
+                    } else {
+                        println!("++ Settings reloaded from nano.toml");
+                    }
+                }
+                else if cmd.starts_with("consolidate ") {
+                    if let Ok(iters) = cmd[12..].parse::<u32>() {
+                        println!("⏳ Consolidating memory ({} iterations)...", iters);
+                        session.runtime.consolidate_memory(iters);
+                        println!("✅ Consolidation complete.");
+                    }
                 }
                 else {
                     let resp = session.runtime.handle_command(cmd);
@@ -278,6 +308,30 @@ vocab_size = 1000
             println!("  Total Ticks: {}", ticks);
             println!("  Total Time:  {:.2?}", duration);
             println!("  Throughput:  {:.2} ticks/sec (TPS)", tps);
+        }
+        Commands::Check { model } => {
+            println!("🔍 Performing Health Check on model: {}...", model);
+            let baked = genesis_core::BakedModel::load(model).context("Health Check Failed: Could not load model")?;
+
+            println!("  - Neurons: {} (Structure: SoA)", baked.neurons.len());
+            println!("  - Synapses: {}", baked.synapses.len());
+
+            // Basic consistency check
+            baked.neurons.validate().map_err(|e| anyhow::anyhow!(e)).context("Health Check Failed: Neuron state is inconsistent")?;
+
+            // Check for NaN or infinite potentials (if applicable, but IValue is i32)
+
+            // Check modules
+            println!("  - Modules ({}):", baked.module_states.len());
+            for name in baked.module_states.keys() {
+                println!("    * {}", name);
+            }
+
+            if let Some(titan) = &baked.titan_memory {
+                 println!("  - Titan Memory: {} associations, {} bytes buffer", titan.associations_flat.len(), titan.byte_memory.len());
+            }
+
+            println!("✅ Model Health Check PASSED.");
         }
     }
     Ok(())

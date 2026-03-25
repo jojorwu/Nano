@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use crate::{IValue, NanoModule, NeuronsSoA, SynapsesSoA, SCALE};
 
+pub type TitanMemory = BitWiseTitan;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BitWiseTitan {
     /// Contiguous Association Table for maximum cache efficiency and O(1) access.
@@ -43,6 +45,29 @@ pub struct Association {
 }
 
 impl BitWiseTitan {
+    pub fn new_with_size(size: usize, lr: IValue) -> Self {
+        let mut lsh_tables = Vec::with_capacity(4);
+        for _ in 0..4 {
+            lsh_tables.push(std::collections::HashMap::new());
+        }
+        Self {
+            associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
+            block_offsets: vec![0; size.max(64)],
+            block_counts: vec![0; size.max(64)],
+            learning_rate: lr,
+            surprise_threshold: 100,
+            decay_rate: 1,
+            l3_buffer: Vec::new(),
+            context_hashes: std::collections::HashMap::new(),
+            lsh_tables,
+            byte_memory: vec![0; 1024 * 1024], // 1MB initial byte memory
+            memory_mapped_range: None,
+            block_utility: vec![0.0; size.max(64)],
+            last_access: vec![0; size.max(64)],
+            script_sequences: Vec::new(),
+        }
+    }
+
     pub fn new(lr: IValue) -> Self {
         let mut lsh_tables = Vec::with_capacity(4);
         for _ in 0..4 {
