@@ -33,6 +33,9 @@ pub struct NetworkConfig {
 
     // Hardware Backend
     pub preferred_backend: String,
+
+    // Titan Memory Configuration
+    pub titan_byte_memory_size: usize,
 }
 
 impl Default for NetworkConfig {
@@ -54,6 +57,7 @@ impl Default for NetworkConfig {
             metaplasticity_enabled: true,
             noise_amplitude: 50, // 5% noise by default
             preferred_backend: "cpu".to_string(),
+            titan_byte_memory_size: 1024 * 1024, // 1MB default
         }
     }
 }

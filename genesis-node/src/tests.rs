@@ -58,6 +58,7 @@ mod tests {
             observers,
             last_surprise: 0,
             surprise_history: Vec::new(),
+            titan_rx: None,
         }
     }
 

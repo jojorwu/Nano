@@ -56,6 +56,7 @@ pub struct Runtime {
     pub observers: Vec<Box<dyn SimulationObserver>>,
     pub last_surprise: i32,
     pub surprise_history: Vec<i32>,
+    pub titan_rx: Option<tokio::sync::mpsc::Receiver<genesis_core::titan::BitWiseTitan>>,
 }
 
 impl Runtime {
@@ -146,6 +147,7 @@ impl Runtime {
 
         self.engine.state.previous_spikes.copy_from_slice(&self.engine.state.current_spikes_buffer);
         self.broadcast_ghost_spikes(&self.engine.state.previous_spikes);
+        self.poll_remote_titan();
         self.engine.state.previous_spikes.clone()
     }
 
@@ -313,6 +315,37 @@ impl Runtime {
 
     /// Enters a memory consolidation phase (Replay Mode).
     /// The network processes its own history to strengthen permanent associations.
+    fn poll_remote_titan(&mut self) {
+        if let Some(ref mut rx) = self.titan_rx {
+            while let Ok(remote_state) = rx.try_recv() {
+                log::info!("Received remote Titan state, merging...");
+                for m in &mut self.engine.modules.modules {
+                    if m.name() == "titan" {
+                        if let Ok(mut local_state) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                            local_state.merge_state(remote_state.clone());
+                            m.set_state(&bincode::serialize(&local_state).unwrap());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn broadcast_titan_state(&self) {
+        if let Some(ref nm) = self.network_manager {
+            for m in &self.engine.modules.modules {
+                if m.name() == "titan" {
+                    if let Ok(state) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                        let nm_clone = nm.clone();
+                        tokio::spawn(async move {
+                            nm_clone.broadcast_titan(state).await;
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn consolidate_memory(&mut self, iterations: u32) {
         log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
 

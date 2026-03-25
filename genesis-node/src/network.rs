@@ -11,6 +11,13 @@ pub struct SpikePacket {
     pub data: SpikeData,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum NetworkPacket {
+    Spikes(SpikePacket),
+    TitanState(genesis_core::titan::BitWiseTitan),
+    Control(String),
+}
+
 impl SpikePacket {
     pub fn compress_indices(indices: &[usize], universe: usize) -> Vec<u8> {
         let mut bits = Vec::new();
@@ -58,7 +65,7 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
-    pub async fn new(node_id: String, peers: Vec<String>, port: u16, queue: Arc<Mutex<Vec<usize>>>) -> std::io::Result<Self> {
+    pub async fn new(node_id: String, peers: Vec<String>, port: u16, queue: Arc<Mutex<Vec<usize>>>, titan_tx: Option<tokio::sync::mpsc::Sender<genesis_core::titan::BitWiseTitan>>) -> std::io::Result<Self> {
         let (tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(100);
         let tx_clone = tx.clone();
 
@@ -67,22 +74,33 @@ impl NetworkManager {
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let queue = queue.clone();
+                let titan_tx = titan_tx.clone();
                 tokio::spawn(async move {
                     if let Ok(mut ws_stream) = accept_async(stream).await {
                         while let Some(msg) = ws_stream.next().await {
                             if let Ok(Message::Binary(data)) = msg {
-                                if let Ok(packet) = bincode::deserialize::<SpikePacket>(&data) {
-                                    let mut q = queue.lock().unwrap();
-                                    match packet.data {
-                                        SpikeData::Sparse(indices) => q.extend(indices),
-                                        SpikeData::BitPacked(packed) => {
-                                            for (i, &word) in packed.iter().enumerate() {
-                                                if word == 0 { continue; }
-                                                for bit in 0..64 {
-                                                    if (word >> bit) & 1 == 1 {
-                                                        q.push(i * 64 + bit);
+                                if let Ok(net_packet) = bincode::deserialize::<NetworkPacket>(&data) {
+                                    match net_packet {
+                                        NetworkPacket::Spikes(packet) => {
+                                            let mut q = queue.lock().unwrap();
+                                            match packet.data {
+                                                SpikeData::Sparse(indices) => q.extend(indices),
+                                                SpikeData::BitPacked(packed) => {
+                                                    for (i, &word) in packed.iter().enumerate() {
+                                                        if word == 0 { continue; }
+                                                        for bit in 0..64 {
+                                                            if (word >> bit) & 1 == 1 {
+                                                                q.push(i * 64 + bit);
+                                                            }
+                                                        }
                                                     }
                                                 }
+                                                _ => {}
+                                            }
+                                        }
+                                        NetworkPacket::TitanState(state) => {
+                                            if let Some(ref tx) = titan_tx {
+                                                let _ = tx.send(state).await;
                                             }
                                         }
                                         _ => {}
@@ -112,7 +130,15 @@ impl NetworkManager {
     }
 
     pub async fn broadcast_spikes(&self, packet: SpikePacket) {
-        if let Ok(data) = bincode::serialize(&packet) {
+        let net_packet = NetworkPacket::Spikes(packet);
+        if let Ok(data) = bincode::serialize(&net_packet) {
+            let _ = self.spike_sender.send(data);
+        }
+    }
+
+    pub async fn broadcast_titan(&self, state: genesis_core::titan::BitWiseTitan) {
+        let net_packet = NetworkPacket::TitanState(state);
+        if let Ok(data) = bincode::serialize(&net_packet) {
             let _ = self.spike_sender.send(data);
         }
     }

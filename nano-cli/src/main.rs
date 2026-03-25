@@ -67,6 +67,19 @@ enum Commands {
         #[arg(short, long)] input: String,
         #[arg(short, long, default_value_t = 100)] steps: usize,
     },
+    /// Train model on a directory of files with interleaved sleep cycles
+    Train {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] data: String,
+        #[arg(short, long, default_value_t = 1)] epochs: usize,
+        #[arg(long)] backend: Option<String>,
+    },
+    /// Connect to a remote node to sync memory
+    Remote {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] peer: String,
+        #[arg(long)] backend: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -423,6 +436,104 @@ vocab_size = 1000
             }
 
             println!("✅ Model Health Check PASSED.");
+        }
+        Commands::Train { model, data, epochs, backend } => {
+            println!("🎓 Starting Training Session on: {}", data);
+            let mut session = SimulationSession::new(model, None, backend.clone())?;
+
+            let mut files: Vec<_> = fs::read_dir(data)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect();
+            files.sort();
+
+            for epoch in 1..=*epochs {
+                println!("  Epoch {}/{}", epoch, epochs);
+                for file_path in &files {
+                    match fs::read_to_string(file_path) {
+                        Ok(content) => {
+                            println!("    Processing: {:?}", file_path.file_name().unwrap());
+                            session.runtime.process_text(&content);
+
+                            // Force a night phase (sleep) after each file for consolidation
+                            println!("    Consolidating memory...");
+                            session.runtime.consolidate_memory(1);
+                        }
+                        Err(e) => {
+                            eprintln!("    ⚠️  Failed to read {:?}: {}", file_path, e);
+                        }
+                    }
+                }
+            }
+
+            session.finish(model)?;
+            println!("✅ Training complete.");
+        }
+        Commands::Remote { model, peer, backend } => {
+            println!("🌐 Connecting to remote node: {}...", peer);
+
+            let global = SimulationSession::load_global_config();
+            let mut settings = global.simulation.unwrap_or_default();
+            if let Some(b) = backend { settings.preferred_backend = Some(b.clone()); }
+
+            let mut runtime = genesis_node::RuntimeBuilder::new()
+                .from_model(model)
+                .with_settings(settings)
+                .build()
+                .context("Failed to build runtime")?;
+
+            // Add peer manually for this session
+            let nm = if let Some(ref existing_nm) = runtime.network_manager {
+                 let mut peers = existing_nm.peers.clone();
+                 if !peers.contains(peer) { peers.push(peer.clone()); }
+                 let node_id = existing_nm.node_id.clone();
+                 let remote_queue = runtime.engine.remote_spike_queue.clone();
+                 let (tx, rx) = tokio::sync::mpsc::channel(10);
+                 runtime.titan_rx = Some(rx);
+                 let nm = pollster::block_on(genesis_node::NetworkManager::new(
+                    node_id,
+                    peers,
+                    runtime.settings.distributed_port,
+                    remote_queue,
+                    Some(tx)
+                 )).context("Network init failed")?;
+                 Some(std::sync::Arc::new(nm))
+            } else {
+                 let node_id = "cli_node".to_string();
+                 let remote_queue = runtime.engine.remote_spike_queue.clone();
+                 let (tx, rx) = tokio::sync::mpsc::channel(10);
+                 runtime.titan_rx = Some(rx);
+                 let nm = pollster::block_on(genesis_node::NetworkManager::new(
+                    node_id,
+                    vec![peer.clone()],
+                    runtime.settings.distributed_port,
+                    remote_queue,
+                    Some(tx)
+                 )).context("Network init failed")?;
+                 Some(std::sync::Arc::new(nm))
+            };
+            runtime.network_manager = nm;
+
+            println!("🛰️  Broadcasting local Titan memory state...");
+            runtime.broadcast_titan_state();
+
+            println!("⏳ Waiting for incoming memory sync...");
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(ProgressStyle::default_spinner().template("{spinner:.blue} [{elapsed_precise}] {msg}")?);
+
+            // Wait for 5 seconds, polling every 100ms
+            for s in 0..50 {
+                pb.set_message(format!("Syncing... ({}%)", s * 2));
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Run a dummy tick to process network packets
+                runtime.tick(&vec![0; runtime.engine.model.neurons.len()]);
+            }
+            pb.finish_with_message("✅ Sync window closed.");
+
+            runtime.sync_state();
+            runtime.engine.model.save(model).context("Failed to save synced model")?;
+            println!("✅ Remote synchronization complete.");
         }
     }
     Ok(())

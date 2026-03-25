@@ -17,14 +17,18 @@ pub struct BitWiseTitan {
     pub l3_buffer: Vec<EpisodicEvent>,
     /// Context Hashes: maps 64-bit pattern hash to a list of associated block_ids
     pub context_hashes: std::collections::HashMap<u64, Vec<u32>>,
-    /// LSH (Locality Sensitive Hashing) tables for fuzzy retrieval
+    /// LSH (Locality Sensitive Hashing) tables for fuzzy retrieval (L1: Broad)
     pub lsh_tables: Vec<std::collections::HashMap<u32, Vec<u32>>>,
+    /// LSH (Locality Sensitive Hashing) tables for detailed fuzzy retrieval (L2: Detailed)
+    pub lsh_tables_l2: Vec<std::collections::HashMap<u32, Vec<u32>>>,
     /// Byte-Addressable Memory Buffer
     pub byte_memory: Vec<u8>,
     /// Address range of neurons that map to byte_memory (start_idx, end_idx)
     pub memory_mapped_range: Option<(usize, usize)>,
     /// Scripting sequences stored in byte_memory
     pub script_sequences: Vec<ScriptSequence>,
+    /// Active script playback state: (script_idx, current_step)
+    pub active_scripts: Vec<(usize, usize)>,
     /// Memory Utility Tracking: tracks how often each block is successfully retrieved
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
@@ -42,6 +46,8 @@ pub struct ScriptSequence {
     pub start_addr: usize,
     pub length: usize,
     pub trigger_pattern: Vec<u64>,
+    /// Ticks to wait between bytes
+    pub interval: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -53,8 +59,10 @@ pub struct Association {
 impl BitWiseTitan {
     pub fn new_with_size(size: usize, lr: IValue) -> Self {
         let mut lsh_tables = Vec::with_capacity(4);
+        let mut lsh_tables_l2 = Vec::with_capacity(4);
         for _ in 0..4 {
             lsh_tables.push(std::collections::HashMap::new());
+            lsh_tables_l2.push(std::collections::HashMap::new());
         }
         Self {
             associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
@@ -66,11 +74,13 @@ impl BitWiseTitan {
             l3_buffer: Vec::new(),
             context_hashes: std::collections::HashMap::new(),
             lsh_tables,
+            lsh_tables_l2,
             byte_memory: vec![0; 1024 * 1024], // 1MB initial byte memory
             memory_mapped_range: None,
             block_utility: vec![0.0; size.max(64)],
             last_access: vec![0; size.max(64)],
             script_sequences: Vec::new(),
+            active_scripts: Vec::new(),
         }
     }
 
@@ -88,18 +98,34 @@ impl BitWiseTitan {
         h
     }
 
-    /// Compute LSH signatures for fuzzy matching
-    pub fn compute_lsh_signatures(pattern: &[u64]) -> Vec<u32> {
-        let mut sigs = vec![0u32; 4];
-        for (i, sig) in sigs.iter_mut().enumerate() {
+    /// Compute LSH signatures for fuzzy matching (Hierarchical)
+    /// L1: Broad projection for coarse matching
+    /// L2: Detailed projection for fine-grained matching
+    pub fn compute_lsh_signatures_hierarchical(pattern: &[u64]) -> (Vec<u32>, Vec<u32>) {
+        let mut l1 = vec![0u32; 4];
+        let mut l2 = vec![0u32; 4];
+        for (i, sig) in l1.iter_mut().enumerate() {
             let mut h = 0u64;
             for (j, &w) in pattern.iter().enumerate() {
-                // Different projection for each table
-                h ^= w.wrapping_mul(0xbf58476d1ce4e5b9 ^ (i as u64) ^ (j as u64));
+                // Coarse projection (shifts bits to reduce sensitivity)
+                h ^= (w >> 4).wrapping_mul(0xbf58476d1ce4e5b9 ^ (i as u64) ^ (j as u64));
             }
             *sig = (h ^ (h >> 32)) as u32;
         }
-        sigs
+        for (i, sig) in l2.iter_mut().enumerate() {
+            let mut h = 0u64;
+            for (j, &w) in pattern.iter().enumerate() {
+                // Detailed projection
+                h ^= w.wrapping_mul(0x94d049bb133111eb ^ (i as u64) ^ (j as u64));
+            }
+            *sig = (h ^ (h >> 32)) as u32;
+        }
+        (l1, l2)
+    }
+
+    /// Backwards compatibility or default signature
+    pub fn compute_lsh_signatures(pattern: &[u64]) -> Vec<u32> {
+        Self::compute_lsh_signatures_hierarchical(pattern).0
     }
 
     fn ensure_capacity(&mut self, max_bid: u32) {
@@ -144,6 +170,71 @@ impl BitWiseTitan {
         }
     }
 
+    /// Merges state from another Titan instance (used for distributed synchronization)
+    pub fn merge_state(&mut self, mut other: BitWiseTitan) {
+        // Simple merge: append missing associations and update LSH tables
+        for bid in 0..other.block_offsets.len() as u32 {
+            let other_entries = other.get_block_const(bid);
+            if other_entries.is_empty() { continue; }
+
+            self.ensure_capacity(bid);
+            let mut my_entries = self.get_block_mut(bid);
+            let mut changed = false;
+
+            for oa in other_entries {
+                if let Some(ma) = my_entries.iter_mut().find(|a| a.target == oa.target) {
+                    ma.weight = ma.weight.max(oa.weight);
+                } else if my_entries.len() < 256 {
+                    my_entries.push(oa);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.update_block(bid, my_entries);
+            }
+        }
+
+        // Merge LSH Tables
+        let other_lsh = std::mem::take(&mut other.lsh_tables);
+        for (i, table) in other_lsh.into_iter().enumerate() {
+            if i < self.lsh_tables.len() {
+                for (sig, blocks) in table {
+                    let my_entry = self.lsh_tables[i].entry(sig).or_default();
+                    for b in blocks {
+                        if !my_entry.contains(&b) { my_entry.push(b); }
+                    }
+                }
+            }
+        }
+        let other_lsh_l2 = std::mem::take(&mut other.lsh_tables_l2);
+        for (i, table) in other_lsh_l2.into_iter().enumerate() {
+            if i < self.lsh_tables_l2.len() {
+                for (sig, blocks) in table {
+                    let my_entry = self.lsh_tables_l2[i].entry(sig).or_default();
+                    for b in blocks {
+                        if !my_entry.contains(&b) { my_entry.push(b); }
+                    }
+                }
+            }
+        }
+        // Merge Context Hashes
+        for (hash, blocks) in other.context_hashes {
+            let my_entry = self.context_hashes.entry(hash).or_default();
+            for b in blocks {
+                if !my_entry.contains(&b) { my_entry.push(b); }
+            }
+        }
+    }
+
+    /// Constant version of get_block_mut
+    fn get_block_const(&self, bid: u32) -> Vec<Association> {
+        if (bid as usize) >= self.block_offsets.len() { return Vec::new(); }
+        let start = self.block_offsets[bid as usize] as usize;
+        let count = self.block_counts[bid as usize] as usize;
+        if start + count > self.associations_flat.len() { return Vec::new(); }
+        self.associations_flat[start..start + count].to_vec()
+    }
+
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
@@ -185,7 +276,7 @@ impl BitWiseTitan {
 
         // Update Context Hashes and LSH
         let current_hash = Self::compute_context_hash(&now);
-        let current_sigs = Self::compute_lsh_signatures(&now);
+        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(&now);
 
         for t in 1..search_depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
@@ -235,8 +326,15 @@ impl BitWiseTitan {
                             if !hash_entry.contains(&src_bid) {
                                 hash_entry.push(src_bid);
                             }
-                            for (table_idx, &sig) in current_sigs.iter().enumerate() {
+                            for (table_idx, &sig) in sigs_l1.iter().enumerate() {
                                 let table = &mut self.lsh_tables[table_idx];
+                                let entry = table.entry(sig).or_default();
+                                if !entry.contains(&src_bid) {
+                                    entry.push(src_bid);
+                                }
+                            }
+                            for (table_idx, &sig) in sigs_l2.iter().enumerate() {
+                                let table = &mut self.lsh_tables_l2[table_idx];
                                 let entry = table.entry(sig).or_default();
                                 if !entry.contains(&src_bid) {
                                     entry.push(src_bid);
@@ -271,7 +369,6 @@ impl NanoModule for BitWiseTitan {
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Script Execution (Hierarchical Planning)
-        // Check if any script is triggered by the previous spikes
         let n_count_script = previous_spikes.len();
         let packed_len = (n_count_script + 63) / 64;
         let mut current_packed = vec![0u64; packed_len];
@@ -279,7 +376,8 @@ impl NanoModule for BitWiseTitan {
             if s { current_packed[i / 64] |= 1 << (i % 64); }
         }
 
-        for script in &self.script_sequences {
+        // 1. Check for new triggers
+        for (idx, script) in self.script_sequences.iter().enumerate() {
             let mut matched = true;
             if script.trigger_pattern.is_empty() || script.trigger_pattern.len() > packed_len {
                  matched = false;
@@ -293,19 +391,41 @@ impl NanoModule for BitWiseTitan {
             }
 
             if matched {
-                // Execute script: read bytes and inject as proximal signals over time
-                if script.length > 0 && script.start_addr < self.byte_memory.len() {
-                    let first_byte = self.byte_memory[script.start_addr];
+                if !self.active_scripts.iter().any(|(s_idx, _)| *s_idx == idx) {
+                    self.active_scripts.push((idx, 0));
+                }
+            }
+        }
+
+        // 2. Execute active scripts
+        let mut finished_scripts = Vec::new();
+        for i in 0..self.active_scripts.len() {
+            let (script_idx, step) = self.active_scripts[i];
+            let script = &self.script_sequences[script_idx];
+
+            // Interval gating
+            if _tick % script.interval.max(1) != 0 { continue; }
+
+            if step < script.length {
+                let addr = script.start_addr + step;
+                if addr < self.byte_memory.len() {
+                    let byte = self.byte_memory[addr];
                     let prox = bus.proximal();
-                    for i in 0..8 {
-                        if (i as usize) < prox.len() {
-                            if (first_byte >> i) & 1 == 1 {
-                                crate::InputBus::atomic_saturating_add(&prox[i], SCALE);
+                    for b in 0..8 {
+                        if (b as usize) < prox.len() {
+                            if (byte >> b) & 1 == 1 {
+                                crate::InputBus::atomic_saturating_add(&prox[b], SCALE);
                             }
                         }
                     }
                 }
+                self.active_scripts[i].1 += 1;
+            } else {
+                finished_scripts.push(i);
             }
+        }
+        for idx in finished_scripts.into_iter().rev() {
+            self.active_scripts.remove(idx);
         }
 
         // Memory-Mapped Interface: Read/Write from byte_memory
@@ -356,7 +476,7 @@ impl NanoModule for BitWiseTitan {
             if s { packed[i / 64] |= 1 << (i % 64); }
         }
 
-        // Fuzzy Retrieval using LSH and Semantic Hashes
+        // Hierarchical Fuzzy Retrieval using LSH and Semantic Hashes
         let mut candidate_blocks = std::collections::HashSet::new();
 
         // 2a. Exact Match
@@ -365,13 +485,25 @@ impl NanoModule for BitWiseTitan {
             for &bid in blocks { candidate_blocks.insert(bid); }
         }
 
-        // 2b. LSH Fuzzy Match (Only if exact match didn't yield enough or always for robustness?)
-        // If we want "everything", we check LSH too.
-        let sigs = Self::compute_lsh_signatures(&packed);
-        for (i, &sig) in sigs.iter().enumerate() {
-            if let Some(blocks) = self.lsh_tables[i].get(&sig) {
-                for &bid in blocks {
-                    candidate_blocks.insert(bid);
+        // 2b. Hierarchical LSH Fuzzy Match
+        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(&packed);
+
+        // Detailed search (L2) - High precision
+        for (i, &sig) in sigs_l2.iter().enumerate() {
+        if i < self.lsh_tables_l2.len() {
+            if let Some(blocks) = self.lsh_tables_l2[i].get(&sig) {
+                for &bid in blocks { candidate_blocks.insert(bid); }
+            }
+            }
+        }
+
+        // Broad search (L1) - High recall (only if candidates are sparse)
+        if candidate_blocks.len() < 5 {
+            for (i, &sig) in sigs_l1.iter().enumerate() {
+                if i < self.lsh_tables.len() {
+                    if let Some(blocks) = self.lsh_tables[i].get(&sig) {
+                        for &bid in blocks { candidate_blocks.insert(bid); }
+                    }
                 }
             }
         }
@@ -447,7 +579,7 @@ impl NanoModule for BitWiseTitan {
         }
     }
 
-    fn on_night_phase(&mut self, neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
         let r_val = reward.unwrap_or(0);
         log::debug!("Titan Night Phase with reward: {}", r_val);
 
