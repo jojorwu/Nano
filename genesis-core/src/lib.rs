@@ -179,7 +179,7 @@ pub trait PlasticityRule {
     fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
 
     /// STC: Tagging phase. Instead of updating weight, we update the tag trace.
-    fn tag(&self, tag: &mut IValue, timer: &mut u16, volatility: &mut u8, ctx: &PlasticityContext) {
+    fn tag(&self, tag: &mut IValue, timer: &mut u16, volatility: &mut u8, causality: &mut u8, ctx: &PlasticityContext) {
         // Probabilistic Metaplasticity:
         // Probability of update depends on volatility.
         // If volatility is 0, the synapse is stable and very unlikely to change.
@@ -195,6 +195,12 @@ pub trait PlasticityRule {
                        *timer = 100; // Tag duration: 100 ticks
                        // Every successful update slightly reduces volatility (consolidation)
                        *volatility = volatility.saturating_sub(1);
+
+                       // Causal STDP: if this update was triggered by a pre-before-post event (LTP window)
+                       // and it was consistent, increase causality index.
+                       if ctx.pre_spiked && ctx.post_spiked {
+                            *causality = causality.saturating_add(5);
+                       }
                   }
              }
         }

@@ -109,6 +109,7 @@ pub struct NeuronsSoA {
     pub is_remote: Vec<u8>,              // Distributed SNN (1 = ghost neuron, 0 = local)
     pub origin_node_id: Vec<u32>,        // Node ID that owns this neuron
     pub energy_level: Vec<IValue>,       // Metabolic Economy (SCALE = 100% energy)
+    pub specialization_score: Vec<f32>,  // Morphogenesis: tracking neuron utility
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
 }
@@ -214,6 +215,7 @@ impl NeuronsSoA {
             energy_level: Vec::with_capacity(capacity),
             is_remote: Vec::with_capacity(capacity),
             origin_node_id: Vec::with_capacity(capacity),
+            specialization_score: Vec::with_capacity(capacity),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -274,6 +276,7 @@ impl NeuronsSoA {
         self.is_remote.resize(new_size, 0);
         self.origin_node_id.resize(new_size, 0);
         self.energy_level.resize(new_size, SCALE); // Start fully charged
+        self.specialization_score.resize(new_size, 0.0);
         self.packed_params.resize(new_size, 0);
     }
 
@@ -310,6 +313,7 @@ impl NeuronsSoA {
         self.is_remote.shrink_to_fit();
         self.origin_node_id.shrink_to_fit();
         self.energy_level.shrink_to_fit();
+        self.specialization_score.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }
 }
@@ -325,6 +329,7 @@ pub struct SynapsesSoA {
     pub stp_resources: Vec<IValue>, // Short-Term Depression (SCALE = 1.0)
     pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
     pub volatility: Vec<u8>,        // Probabilistic Metaplasticity (0 = stable, 255 = volatile)
+    pub causality_index: Vec<u8>,   // Causal STDP: reliability of temporal relationship
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
@@ -341,6 +346,7 @@ pub struct SynapsesFFI {
     pub stp_resources: *mut IValue,
     pub stp_calcium: *mut IValue,
     pub volatility: *mut u8,
+    pub causality_index: *mut u8,
     pub compartment: *const u8,
     pub len: u32,
 
@@ -361,6 +367,7 @@ impl SynapsesSoA {
             stp_resources: self.stp_resources.as_mut_ptr(),
             stp_calcium: self.stp_calcium.as_mut_ptr(),
             volatility: self.volatility.as_mut_ptr(),
+            causality_index: self.causality_index.as_mut_ptr(),
             compartment: self.compartment.as_ptr() as *const u8,
             len: self.len() as u32,
             offsets,
@@ -388,6 +395,7 @@ impl SynapsesSoA {
             stp_resources: Vec::with_capacity(capacity),
             stp_calcium: Vec::with_capacity(capacity),
             volatility: Vec::with_capacity(capacity),
+            causality_index: Vec::with_capacity(capacity),
             compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
@@ -411,6 +419,7 @@ impl SynapsesSoA {
         self.stp_resources.push(SCALE); // Start fully charged
         self.stp_calcium.push(0);       // Start at baseline
         self.volatility.push(255);      // New synapses are highly volatile
+        self.causality_index.push(0);
         self.compartment.push(compartment);
     }
 
@@ -441,6 +450,7 @@ impl SynapsesSoA {
         self.stp_resources.swap_remove(index);
         self.stp_calcium.swap_remove(index);
         self.volatility.swap_remove(index);
+        self.causality_index.swap_remove(index);
         self.compartment.swap_remove(index);
     }
 
@@ -454,6 +464,7 @@ impl SynapsesSoA {
         self.stp_resources.shrink_to_fit();
         self.stp_calcium.shrink_to_fit();
         self.volatility.shrink_to_fit();
+        self.causality_index.shrink_to_fit();
         self.compartment.shrink_to_fit();
     }
 }

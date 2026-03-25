@@ -80,6 +80,12 @@ impl CpuBackend {
             neurons.energy_level[i] = neurons.energy_level[i].saturating_add(2);
         }
 
+        // Morphogenesis: update specialization score based on metabolic efficiency and firing success
+        if fired {
+             // Reward firing that is metabolically efficient
+             neurons.specialization_score[i] = neurons.specialization_score[i] * 0.99 + 0.1;
+        }
+
         let error = neurons.activity_ema[i] - target_activity;
         let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
         if error > 0 {
@@ -405,6 +411,7 @@ impl ComputeBackend for CpuBackend {
         let tags_ptr = synapses.tag.as_mut_ptr() as usize;
         let timers_ptr = synapses.tag_timer.as_mut_ptr() as usize;
         let volatility_ptr = synapses.volatility.as_mut_ptr() as usize;
+        let causality_ptr = synapses.causality_index.as_mut_ptr() as usize;
 
         active_indices.into_par_iter().for_each(|i| {
             let src = synapses.source_index[i] as usize;
@@ -434,7 +441,8 @@ impl ComputeBackend for CpuBackend {
                 let tag_ref = &mut *(tags_ptr as *mut IValue).add(i);
                 let timer_ref = &mut *(timers_ptr as *mut u16).add(i);
                 let volatility_ref = &mut *(volatility_ptr as *mut u8).add(i);
-                plasticity_rule.tag(tag_ref, timer_ref, volatility_ref, &ctx);
+                let causality_ref = &mut *(causality_ptr as *mut u8).add(i);
+                plasticity_rule.tag(tag_ref, timer_ref, volatility_ref, causality_ref, &ctx);
             }
         });
 
@@ -447,9 +455,12 @@ impl ComputeBackend for CpuBackend {
             synapses.weight.par_iter_mut()
                 .zip(synapses.tag.par_iter_mut())
                 .zip(synapses.tag_timer.par_iter_mut())
-                .for_each(|((w, t), timer)| {
+                .zip(synapses.causality_index.par_iter_mut())
+                .for_each(|(((w, t), timer), causality)| {
                     if *timer > 0 {
-                        let capture_strength = if reward.is_some() { 2 } else { 1 };
+                        // Causal Capture: high causality increases consolidation strength
+                        let causal_boost = if *causality > 128 { 2 } else { 1 };
+                        let capture_strength = if reward.is_some() { 2 * causal_boost } else { 1 * causal_boost };
                         let delta = *t * capture_strength;
                         let old_w = *w;
                         *w = w.saturating_add(delta);
@@ -478,6 +489,32 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
+        // Morphogenesis: Block Migration
+        // Neurons with very low specialization scores may "migrate" to successful blocks
+        let n_count_morpho = model.neurons.len();
+        if reward.unwrap_or(0) > 500 {
+             use rand::Rng;
+             let mut rng = rand::thread_rng();
+
+             // Identify some "successful" blocks (simple heuristic)
+             let mut successful_blocks = Vec::new();
+             for &bid in &model.neurons.block_id {
+                  if !successful_blocks.contains(&bid) && rng.gen_bool(0.1) {
+                       successful_blocks.push(bid);
+                  }
+             }
+
+             if !successful_blocks.is_empty() {
+                  for i in 0..n_count_morpho {
+                       if model.neurons.specialization_score[i] < 0.01 && rng.gen_bool(0.05) {
+                            let new_bid = successful_blocks[rng.gen_range(0..successful_blocks.len())];
+                            model.neurons.block_id[i] = new_bid;
+                            model.neurons.specialization_score[i] = 0.1; // Reset
+                       }
+                  }
+             }
+        }
+
         prune_synapses(&mut model.synapses, &model.neurons, self.structural_config.prune_threshold);
         model.synapses.shrink_to_fit();
 
