@@ -172,6 +172,7 @@ impl ModuleRegistry {
         self.register_factory("adaptive_lr", || Box::new(crate::plasticity::AdaptiveLearningRateModule::new(10)));
         self.register_factory("think", || Box::new(crate::ThinkModule::new(5)));
         self.register_factory("workspace", || Box::new(crate::workspace::WorkspaceModule::new()));
+        self.register_factory("hierarchical", || Box::new(crate::hierarchical::HierarchicalModule::new()));
         self.register_factory("cerebellum", || Box::new(crate::robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
 

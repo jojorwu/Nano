@@ -163,11 +163,19 @@ impl Default for StructuralPlasticityConfig {
     }
 }
 
-pub fn prune_synapses(synapses: &mut SynapsesSoA, threshold: IValue) -> usize {
+pub fn prune_synapses(synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, threshold: IValue) -> usize {
     let mut pruned = 0;
     let mut i = 0;
     while i < synapses.len() {
-        if synapses.weight[i].abs() < threshold {
+        let target = synapses.target_index[i] as usize;
+        let mut should_prune = synapses.weight[i].abs() < threshold;
+
+        // Metabolic Pruning: if target neuron is starving (low energy), prune incoming connections
+        if target < neurons.len() && neurons.energy_level[target] < 100 {
+            should_prune = true;
+        }
+
+        if should_prune {
             synapses.remove(i);
             pruned += 1;
         } else {
@@ -399,10 +407,11 @@ mod tests {
 
     #[test]
     fn test_pruning() {
+        let neurons = NeuronsSoA::new(3);
         let mut synapses = SynapsesSoA::with_capacity(10);
         synapses.push(0, 1, 100);
         synapses.push(1, 2, 5);
-        let pruned = prune_synapses(&mut synapses, 10);
+        let pruned = prune_synapses(&mut synapses, &neurons, 10);
         assert_eq!(pruned, 1);
         assert_eq!(synapses.len(), 1);
     }

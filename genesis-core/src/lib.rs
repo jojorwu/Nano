@@ -23,6 +23,7 @@ pub mod robotics;
 pub mod plasticity;
 pub mod attention;
 pub mod workspace;
+pub mod hierarchical;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
@@ -30,6 +31,7 @@ pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleI
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI, SynapsesFFI};
 pub use attention::AttnResModule;
 pub use workspace::WorkspaceModule;
+pub use hierarchical::HierarchicalModule;
 pub use config::NetworkConfig;
 
 pub type IValue = i32;

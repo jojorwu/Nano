@@ -72,6 +72,14 @@ impl CpuBackend {
             neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro_decay_rate) / 1000) as i32;
         }
 
+        // Metabolic Energy Economy
+        // Firing consumes energy, staying inactive recovers it.
+        if fired {
+            neurons.energy_level[i] = neurons.energy_level[i].saturating_sub(10);
+        } else {
+            neurons.energy_level[i] = neurons.energy_level[i].saturating_add(2);
+        }
+
         let error = neurons.activity_ema[i] - target_activity;
         let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
         if error > 0 {
@@ -465,7 +473,7 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
-        prune_synapses(&mut model.synapses, self.structural_config.prune_threshold);
+        prune_synapses(&mut model.synapses, &model.neurons, self.structural_config.prune_threshold);
         model.synapses.shrink_to_fit();
 
         // Structure changed -> Index must be rebuilt next tick

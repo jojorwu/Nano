@@ -87,8 +87,16 @@ impl RuntimeBuilder {
 
         modules.rebuild_tiers();
 
-        let engine = SimulationEngine::new(model, modules, backend, &self.settings)
+        let mut engine = SimulationEngine::new(model, modules, backend, &self.settings)
              .map_err(|e| RuntimeError::StateError("engine_init".into(), e.to_string()))?;
+
+        // Automatic Heterogeneous setup: if primary is WGPU, set secondary to CPU
+        if engine.backend.name().contains("Wgpu") {
+            if let Some(secondary) = registry.create("cpu") {
+                log::info!("Heterogeneous Engine: primary=GPU, secondary=CPU");
+                engine.secondary_backend = Some(secondary);
+            }
+        }
 
         let (nm, titan_rx) = if !self.peers.is_empty() {
              let node_id = self.node_id.clone().unwrap_or_else(|| "node0".to_string());

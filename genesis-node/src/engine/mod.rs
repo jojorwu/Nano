@@ -12,6 +12,8 @@ pub struct SimulationEngine {
     pub state: SimulationState,
     pub modules: ModuleManager,
     pub backend: Box<dyn ComputeBackend + Send + Sync>,
+    /// Secondary backend for heterogeneous compute (e.g. WGPU + CPU)
+    pub secondary_backend: Option<Box<dyn ComputeBackend + Send + Sync>>,
     pub input_bus: genesis_core::InputBus,
     pub remote_spike_queue: Arc<Mutex<Vec<usize>>>,
 }
@@ -24,6 +26,7 @@ impl SimulationEngine {
             state: SimulationState::new(n_count, settings.night_phase_interval as usize),
             modules,
             backend,
+            secondary_backend: None,
             input_bus: genesis_core::InputBus::new(n_count),
             remote_spike_queue: Arc::new(Mutex::new(Vec::new())),
         })

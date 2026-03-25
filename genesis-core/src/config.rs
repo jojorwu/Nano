@@ -113,6 +113,12 @@ pub struct NetworkConfig {
     pub astro_increment: IValue,
     /// Decay rate of astrocytic calcium (slow dynamics).
     pub astro_decay_rate: i64,
+
+    // --- Hierarchical Control ---
+    /// Enable/Disable top-down hierarchical predictions.
+    pub hierarchical_control_enabled: bool,
+    /// Strength of top-down predictions on lower layers.
+    pub top_down_gain: IValue,
 }
 
 impl Default for NetworkConfig {
@@ -159,6 +165,8 @@ impl Default for NetworkConfig {
             workspace_ignition_threshold: 10.0,
             astro_increment: 50,
             astro_decay_rate: 990, // Alpha out of 1000
+            hierarchical_control_enabled: true,
+            top_down_gain: SCALE / 4, // 0.25 gain
         }
     }
 }
