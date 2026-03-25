@@ -8,8 +8,6 @@ pub struct BitWiseTitan {
     pub associations_flat: Vec<Association>,
     pub block_offsets: Vec<u32>,
     pub block_counts: Vec<u32>,
-    /// Free slots in the flat table to avoid O(N) shifts on update
-    pub free_slots: Vec<usize>,
     pub learning_rate: IValue,
     pub surprise_threshold: IValue,
     pub decay_rate: IValue,
@@ -23,6 +21,10 @@ pub struct BitWiseTitan {
     pub byte_memory: Vec<u8>,
     /// Address range of neurons that map to byte_memory (start_idx, end_idx)
     pub memory_mapped_range: Option<(usize, usize)>,
+    /// Memory Utility Tracking: tracks how often each block is successfully retrieved
+    pub block_utility: Vec<f32>,
+    /// Last access tick per block for age-based decay
+    pub last_access: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -41,7 +43,6 @@ impl BitWiseTitan {
             associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
             block_offsets: vec![0; 64],
             block_counts: vec![0; 64],
-            free_slots: Vec::new(),
             learning_rate: lr,
             surprise_threshold: 100,
             decay_rate: 1,
@@ -50,6 +51,8 @@ impl BitWiseTitan {
             lsh_tables,
             byte_memory: vec![0; 1024 * 1024], // 1MB initial byte memory
             memory_mapped_range: None,
+            block_utility: vec![0.0; 64],
+            last_access: vec![0; 64],
         }
     }
 
@@ -82,6 +85,8 @@ impl BitWiseTitan {
             let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2);
             self.block_offsets.resize(new_size, 0);
             self.block_counts.resize(new_size, 0);
+            self.block_utility.resize(new_size, 0.0);
+            self.last_access.resize(new_size, 0);
         }
     }
 
@@ -117,6 +122,27 @@ impl BitWiseTitan {
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
+        if surprise > 1500 {
+            // Store highly surprising patterns in L3 episodic archive for night replay
+            let now = history[h_ptr].to_bitpacked(neurons.len());
+            let mut active_blocks = Vec::new();
+            for (i, &word) in now.iter().enumerate() {
+                if word == 0 { continue; }
+                for bit in 0..64 {
+                    if (word >> bit) & 1 == 1 {
+                        let idx = i * 64 + bit;
+                        if idx < neurons.len() {
+                            let bid = neurons.block_id[idx];
+                            if !active_blocks.contains(&bid) { active_blocks.push(bid); }
+                        }
+                    }
+                }
+            }
+            if !active_blocks.is_empty() {
+                self.l3_buffer.push(active_blocks.iter().map(|&b| b as u16).collect());
+            }
+        }
+
         // Test-Time Adaptation: Learn more aggressively if surprise is extreme
         let effective_threshold = if surprise > 2000 { self.surprise_threshold / 2 } else { self.surprise_threshold };
         if surprise < effective_threshold { return; }
@@ -282,6 +308,10 @@ impl NanoModule for BitWiseTitan {
         // 3. Inject candidates into distal potential
         for bid in candidate_blocks {
             if (bid as usize) < self.block_offsets.len() {
+                // Update Utility and Last Access
+                self.block_utility[bid as usize] = self.block_utility[bid as usize] * 0.99 + 0.1;
+                self.last_access[bid as usize] = _tick;
+
                 let start = self.block_offsets[bid as usize] as usize;
                 let count = self.block_counts[bid as usize] as usize;
                 for i in start..start + count {
@@ -324,6 +354,10 @@ impl NanoModule for BitWiseTitan {
 
         for bid in triggered_blocks {
             if (bid as usize) < self.block_offsets.len() {
+                // Update Utility and Last Access
+                self.block_utility[bid as usize] = self.block_utility[bid as usize] * 0.99 + 0.05;
+                self.last_access[bid as usize] = _tick;
+
                 let start = self.block_offsets[bid as usize] as usize;
                 let count = self.block_counts[bid as usize] as usize;
 
@@ -343,8 +377,60 @@ impl NanoModule for BitWiseTitan {
     }
 
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
-        if let Some(r) = reward {
-             log::debug!("Titan Night Phase with reward: {}", r);
+        let r_val = reward.unwrap_or(0);
+        log::debug!("Titan Night Phase with reward: {}", r_val);
+
+        // Human-like Forgetting: Decay weights based on utility and age
+        // Memories with low utility or those that haven't been accessed in a long time decay faster.
+        for bid in 0..self.block_offsets.len() as u32 {
+            let utility = self.block_utility[bid as usize];
+            let mut entries = self.get_block_mut(bid);
+            if entries.is_empty() { continue; }
+
+            // Base decay + Utility-based protection
+            // If utility is high (frequently used), decay is slower.
+            let decay_amount: i32 = if utility > 0.5 { 0 } else if utility > 0.1 { 1 } else { 2 };
+
+            // Protection for "important" memories (associated with high reward)
+            let protection: i32 = if r_val > 500 { 1 } else { 0 };
+
+            // Surprise-Modulated Protection: if the block was recently updated (likely due to high surprise), protect it.
+            let surprise_protection = if self.last_access[bid as usize] > 0 { 1 } else { 0 };
+
+            let final_decay = decay_amount.saturating_sub(protection + surprise_protection);
+
+            if final_decay > 0 {
+                entries.retain_mut(|a| {
+                    a.weight = a.weight.saturating_sub(final_decay as i8);
+                    a.weight > 0
+                });
+                self.update_block(bid, entries);
+            }
+
+            // Global Utility Decay (Forgetfulness over time)
+            self.block_utility[bid as usize] *= 0.95;
+            // Reset last_access for next cycle to ensure protection is "recent"
+            self.last_access[bid as usize] = 0;
+        }
+
+        // Deep Replay: Re-process L3 Episodic Archive during sleep
+        // This simulates the consolidation of memories from the hippocampus to the cortex.
+        if !self.l3_buffer.is_empty() {
+             log::debug!("Titan Deep Replay: consolidating {} episodic patterns", self.l3_buffer.len());
+             for pattern in self.l3_buffer.clone() {
+                 // If the replayed pattern exists in memory, boost all its associations
+                 for &bid in &pattern {
+                     let mut entries = self.get_block_mut(bid as u32);
+                     for a in &mut entries {
+                         a.weight = a.weight.saturating_add(1); // Consolidate
+                     }
+                     self.update_block(bid as u32, entries);
+                 }
+             }
+             // L3 buffer clears partially after replay (gradual transfer to long-term)
+             if self.l3_buffer.len() > 10 {
+                 self.l3_buffer.drain(0..5);
+             }
         }
 
         // Defragmentation: Rebuild associations_flat to remove gaps
