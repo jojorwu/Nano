@@ -109,6 +109,43 @@ impl BitWiseTitan {
         h
     }
 
+    /// VSA: Circular Convolution / XOR-binding for structured relationships
+    pub fn vsa_bind(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let len = a.len().min(b.len());
+        let mut result = vec![0u64; len];
+        for i in 0..len {
+            // XOR-binding is the standard for Binary Spatter Codes (BSC)
+            result[i] = a[i] ^ b[i].rotate_left(1);
+        }
+        result
+    }
+
+    /// VSA: Superposition of patterns (bundling)
+    pub fn vsa_bundle(patterns: &[Vec<u64>], n_count: usize) -> Vec<u64> {
+        let packed_len = (n_count + 63) / 64;
+        let mut result = vec![0u64; packed_len];
+        if patterns.is_empty() { return result; }
+
+        for i in 0..packed_len {
+            let mut bit_counts = [0u16; 64];
+            for p in patterns {
+                if i < p.len() {
+                    for bit in 0..64 {
+                        if (p[i] >> bit) & 1 == 1 { bit_counts[bit] += 1; }
+                    }
+                }
+            }
+            // Majority rule for bundling
+            let threshold = (patterns.len() / 2) as u16;
+            for bit in 0..64 {
+                if bit_counts[bit] > threshold {
+                    result[i] |= 1 << bit;
+                }
+            }
+        }
+        result
+    }
+
     /// Compute LSH signatures for fuzzy matching (Hierarchical)
     /// L1: Broad projection for coarse matching
     /// L2: Detailed projection for fine-grained matching
@@ -285,6 +322,9 @@ impl BitWiseTitan {
 
         let now = history[h_ptr].to_bitpacked(n_count);
 
+        // VSA: Use the current context to bind with past events for structured memory
+        let _context_hash = Self::compute_context_hash(&now);
+
         // Elastic Window: high surprise = look further into the past (up to configured max)
         let search_depth = if surprise > 1000 { self.elastic_window_max } else if surprise > 500 { self.elastic_window_max / 2 } else { 2 };
         let search_depth = search_depth.min(history.len());
@@ -296,6 +336,10 @@ impl BitWiseTitan {
         for t in 1..search_depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
             let past = history[past_idx].to_bitpacked(n_count);
+
+            // VSA Binding: current state bound with past state
+            let bound = Self::vsa_bind(&now, &past);
+            let bound_hash = Self::compute_context_hash(&bound);
 
             let reinforcement = if t == 1 { 2 } else { 1 };
             let reduction_bonus = if surprise < 100 { 5 } else { 0 };
@@ -340,6 +384,11 @@ impl BitWiseTitan {
                             let hash_entry = self.context_hashes.entry(current_hash).or_default();
                             if !hash_entry.contains(&src_bid) {
                                 hash_entry.push(src_bid);
+                            }
+                            // Also store the VSA-bound relationship
+                            let vsa_entry = self.context_hashes.entry(bound_hash).or_default();
+                            if !vsa_entry.contains(&src_bid) {
+                                vsa_entry.push(src_bid);
                             }
                             for (table_idx, &sig) in sigs_l1.iter().enumerate() {
                                 let table = &mut self.lsh_tables[table_idx];

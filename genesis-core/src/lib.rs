@@ -123,6 +123,7 @@ pub struct PlasticityContext<'a> {
     pub pre_spiked: bool,
     pub post_spiked: bool,
     pub backprop_signal: IValue, // SMBP: signal from soma to dendrites
+    pub prediction_error: IValue, // Proximal - Distal (for Predictive Coding)
     pub compartment: Compartment,
     pub reward: Option<IValue>,
     pub neuromodulation: NeuromodulationState,
@@ -152,6 +153,28 @@ impl<'a> PlasticityContext<'a> {
 pub trait PlasticityRule {
     fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
 
+    /// STC: Tagging phase. Instead of updating weight, we update the tag trace.
+    fn tag(&self, tag: &mut IValue, timer: &mut u16, volatility: &mut u8, ctx: &PlasticityContext) {
+        // Probabilistic Metaplasticity:
+        // Probability of update depends on volatility.
+        // If volatility is 0, the synapse is stable and very unlikely to change.
+        if *volatility > 0 {
+             use rand::Rng;
+             let mut rng = rand::thread_rng();
+             if rng.gen_range(0..255) <= *volatility {
+                  let mut temp_weight = *tag;
+                  self.apply(&mut temp_weight, ctx);
+
+                  if temp_weight != *tag {
+                       *tag = temp_weight;
+                       *timer = 100; // Tag duration: 100 ticks
+                       // Every successful update slightly reduces volatility (consolidation)
+                       *volatility = volatility.saturating_sub(1);
+                  }
+             }
+        }
+    }
+
     fn update_contrastive(&self, weight: &mut IValue, layer_correlation: IValue) {
         if layer_correlation > 512 {
              *weight = (*weight as i64 * (1024 - (layer_correlation / 10)) as i64 >> 10) as i32;
@@ -165,11 +188,20 @@ pub struct GsopRule {
 
 impl PlasticityRule for GsopRule {
     fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext) {
-        let lr = match ctx.compartment {
+        let mut lr = match ctx.compartment {
             Compartment::Proximal => self.learning_rate,
             Compartment::Distal => self.learning_rate * 8 / 10,
             _ => self.learning_rate / 2,
         };
+
+        // Formalized Predictive Coding Learning
+        // If Distal (Prediction), adjust learning based on prediction error
+        if ctx.compartment == Compartment::Distal {
+             // If prediction error is positive (Reality > Prediction), we need more Distal input (LTP)
+             // If prediction error is negative (Prediction > Reality), we need less Distal input (LTD)
+             let pc_factor = (ctx.prediction_error as i64 * SCALE as i64) >> 10;
+             lr = (lr as i64 * (SCALE as i64 + pc_factor.abs()) >> 10) as i32;
+        }
 
         let p_gate = ctx.neurons.plasticity_gate[ctx.post_index];
         let lr_final = (lr as i64 * ctx.get_modulation_gain() * p_gate as i64) >> 20;
@@ -177,22 +209,25 @@ impl PlasticityRule for GsopRule {
 
         let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
 
-        // Predictive Coding: Reward connections that contributed to a correct prediction.
-        // If the compartment is Distal (Memory), and it matches the somatic spike, boost it.
-        let prediction_gain = if ctx.compartment == Compartment::Distal && ctx.post_spiked {
-            2 // Double reward for memory that correctly predicted firing
-        } else {
-            1
-        };
-
-        let lr_mod = (lr_final * reward_mod * prediction_gain) as i32;
+        let lr_mod = (lr_final * reward_mod) as i32;
 
         let old_weight = *weight;
-        if ctx.pre_spiked && ctx.post_spiked {
-            *weight = weight.saturating_add(lr_mod);
-        } else if ctx.pre_spiked && !ctx.post_spiked {
-            // Error Signal: if memory fired (pre) but no spike occurred (post), reduce weight (LTD)
-            *weight = weight.saturating_sub(lr_mod / 2);
+        if ctx.pre_spiked {
+             if ctx.compartment == Compartment::Distal {
+                  // Predictive Coding Update
+                  if ctx.prediction_error > 100 { // Under-prediction
+                       *weight = weight.saturating_add(lr_mod);
+                  } else if ctx.prediction_error < -100 { // Over-prediction
+                       *weight = weight.saturating_sub(lr_mod);
+                  }
+             } else {
+                  // Standard Hebbian for Proximal
+                  if ctx.post_spiked {
+                       *weight = weight.saturating_add(lr_mod);
+                  } else {
+                       *weight = weight.saturating_sub(lr_mod / 2);
+                  }
+             }
         }
 
         crate::plasticity::clamp_and_preserve_sign_with_limit(weight, old_weight, ctx.config.weight_clamp_limit);

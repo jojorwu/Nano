@@ -418,6 +418,7 @@ mod tests {
         // LTP: pre=5, post=8 (diff=3)
         let ctx = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),
@@ -433,6 +434,7 @@ mod tests {
         let mut weight2 = 1024;
         let ctx2 = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),

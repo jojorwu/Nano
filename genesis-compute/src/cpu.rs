@@ -378,20 +378,26 @@ impl ComputeBackend for CpuBackend {
 
         let active_indices: Vec<usize> = active_synapses.into_iter().collect();
 
-        // Parallel update of active synapses
+        // Parallel update of active synapses (Tagging Phase)
         let plasticity_rule = &self.plasticity_rule;
         let neurons = &model.neurons;
         let synapses = &mut model.synapses;
-        let weights_ptr = synapses.weight.as_mut_ptr() as usize;
+        let tags_ptr = synapses.tag.as_mut_ptr() as usize;
+        let timers_ptr = synapses.tag_timer.as_mut_ptr() as usize;
+        let volatility_ptr = synapses.volatility.as_mut_ptr() as usize;
 
         active_indices.into_par_iter().for_each(|i| {
             let src = synapses.source_index[i] as usize;
             let target = synapses.target_index[i] as usize;
 
+            // Predictive Coding Error calculation for this synapse's target
+            let prediction_error = neurons.proximal_potential[target] - neurons.distal_potential[target];
+
             let ctx = genesis_core::PlasticityContext {
                 pre_spiked: previous_spikes[src],
                 post_spiked: current_spikes[target],
                 backprop_signal: neurons.backprop_signal[target],
+                prediction_error,
                 compartment: synapses.compartment[i],
                 reward,
                 neuromodulation: modulation,
@@ -403,14 +409,48 @@ impl ComputeBackend for CpuBackend {
                 config: &model.config,
             };
 
-            // SAFETY: HashSet ensures unique indices, so no data races on weights[i].
-            // Encapsulating unsafe in a tight block with clear justification.
+            // SAFETY: HashSet ensures unique indices, so no data races.
             unsafe {
-                let weight_ref = &mut *(weights_ptr as *mut IValue).add(i);
-                plasticity_rule.apply(weight_ref, &ctx);
-                plasticity_rule.update_contrastive(weight_ref, 0);
+                let tag_ref = &mut *(tags_ptr as *mut IValue).add(i);
+                let timer_ref = &mut *(timers_ptr as *mut u16).add(i);
+                let volatility_ref = &mut *(volatility_ptr as *mut u8).add(i);
+                plasticity_rule.tag(tag_ref, timer_ref, volatility_ref, &ctx);
             }
         });
+
+        // Synaptic Tagging and Capture (STC): Capture Phase
+        // Convert tags to weights if global PRPs (Plasticity-Related Proteins) are present.
+        // PRPs are triggered by reward or high surprise.
+        let prp_present = reward.is_some() || (modulation.noradrenaline > 500);
+
+        if prp_present {
+            synapses.weight.par_iter_mut()
+                .zip(synapses.tag.par_iter_mut())
+                .zip(synapses.tag_timer.par_iter_mut())
+                .for_each(|((w, t), timer)| {
+                    if *timer > 0 {
+                        let capture_strength = if reward.is_some() { 2 } else { 1 };
+                        let delta = *t * capture_strength;
+                        let old_w = *w;
+                        *w = w.saturating_add(delta);
+                        genesis_core::plasticity::clamp_and_preserve_sign_with_limit(w, old_w, model.config.weight_clamp_limit);
+
+                        // Consolidation: tag is used up
+                        *t = 0;
+                        *timer = 0;
+                    }
+                });
+        } else {
+            // Tag Decay
+            synapses.tag_timer.par_iter_mut()
+                .zip(synapses.tag.par_iter_mut())
+                .for_each(|(timer, t)| {
+                    if *timer > 0 {
+                        *timer -= 1;
+                        if *timer == 0 { *t = 0; }
+                    }
+                });
+        }
     }
 
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]) {

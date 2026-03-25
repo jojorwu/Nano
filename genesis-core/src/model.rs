@@ -302,9 +302,12 @@ pub struct SynapsesSoA {
     pub source_index: Vec<u32>,
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
+    pub tag: Vec<IValue>, // Synaptic Tagging (STC) - temporary trace
+    pub tag_timer: Vec<u16>, // Ticks until tag expires
     pub delay: Vec<u8>, // Axonal delays (1-16 ticks)
     pub stp_resources: Vec<IValue>, // Short-Term Depression (SCALE = 1.0)
     pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
+    pub volatility: Vec<u8>,        // Probabilistic Metaplasticity (0 = stable, 255 = volatile)
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
@@ -356,9 +359,12 @@ impl SynapsesSoA {
             source_index: Vec::with_capacity(capacity),
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
+            tag: Vec::with_capacity(capacity),
+            tag_timer: Vec::with_capacity(capacity),
             delay: Vec::with_capacity(capacity),
             stp_resources: Vec::with_capacity(capacity),
             stp_calcium: Vec::with_capacity(capacity),
+            volatility: Vec::with_capacity(capacity),
             compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
@@ -376,9 +382,12 @@ impl SynapsesSoA {
         self.source_index.push(source);
         self.target_index.push(target);
         self.weight.push(weight);
+        self.tag.push(0);
+        self.tag_timer.push(0);
         self.delay.push(delay.max(1));
         self.stp_resources.push(SCALE); // Start fully charged
         self.stp_calcium.push(0);       // Start at baseline
+        self.volatility.push(255);      // New synapses are highly volatile
         self.compartment.push(compartment);
     }
 
@@ -403,9 +412,12 @@ impl SynapsesSoA {
         self.source_index.swap_remove(index);
         self.target_index.swap_remove(index);
         self.weight.swap_remove(index);
+        self.tag.swap_remove(index);
+        self.tag_timer.swap_remove(index);
         self.delay.swap_remove(index);
         self.stp_resources.swap_remove(index);
         self.stp_calcium.swap_remove(index);
+        self.volatility.swap_remove(index);
         self.compartment.swap_remove(index);
     }
 
@@ -413,9 +425,12 @@ impl SynapsesSoA {
         self.source_index.shrink_to_fit();
         self.target_index.shrink_to_fit();
         self.weight.shrink_to_fit();
+        self.tag.shrink_to_fit();
+        self.tag_timer.shrink_to_fit();
         self.delay.shrink_to_fit();
         self.stp_resources.shrink_to_fit();
         self.stp_calcium.shrink_to_fit();
+        self.volatility.shrink_to_fit();
         self.compartment.shrink_to_fit();
     }
 }
