@@ -49,6 +49,9 @@ mod tests_advanced {
             episode_reward_history: Vec::new(),
             network_manager: None,
             observers,
+            last_surprise: 0,
+            surprise_history: Vec::new(),
+            titan_rx: None,
         }
     }
 

@@ -89,18 +89,20 @@ impl RuntimeBuilder {
 
         let engine = SimulationEngine::new(model, modules, backend, &self.settings);
 
-        let nm = if !self.peers.is_empty() {
+        let (nm, titan_rx) = if !self.peers.is_empty() {
              let node_id = self.node_id.clone().unwrap_or_else(|| "node0".to_string());
              let remote_queue = engine.remote_spike_queue.clone();
+             let (tx, rx) = tokio::sync::mpsc::channel(10);
              let nm = pollster::block_on(crate::network::NetworkManager::new(
                  node_id,
                  self.peers.clone(),
                  self.settings.distributed_port,
-                 remote_queue
+                 remote_queue,
+                 Some(tx)
              )).map_err(|e| RuntimeError::NetworkError("node_init".into(), e.to_string()))?;
-             Some(std::sync::Arc::new(nm))
+             (Some(std::sync::Arc::new(nm)), Some(rx))
         } else {
-            None
+            (None, None)
         };
 
         let mut rt = Runtime {
@@ -109,6 +111,9 @@ impl RuntimeBuilder {
             episode_reward_history: Vec::new(),
             network_manager: nm,
             observers,
+            last_surprise: 0,
+            surprise_history: Vec::new(),
+            titan_rx,
         };
         rt.post_init()?;
         Ok(rt)

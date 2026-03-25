@@ -52,6 +52,34 @@ enum Commands {
         #[arg(short, long, default_value_t = 1000)] ticks: usize,
         #[arg(long)] backend: Option<String>,
     },
+    /// Perform a health check on a model file
+    Check {
+        #[arg(short, long)] model: String,
+    },
+    /// Compare two models to see what was learned
+    Diff {
+        #[arg(short, long)] base: String,
+        #[arg(short, long)] current: String,
+    },
+    /// Auto-tune simulation settings based on surprise
+    Tune {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] input: String,
+        #[arg(short, long, default_value_t = 100)] steps: usize,
+    },
+    /// Train model on a directory of files with interleaved sleep cycles
+    Train {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] data: String,
+        #[arg(short, long, default_value_t = 1)] epochs: usize,
+        #[arg(long)] backend: Option<String>,
+    },
+    /// Connect to a remote node to sync memory
+    Remote {
+        #[arg(short, long)] model: String,
+        #[arg(short, long)] peer: String,
+        #[arg(long)] backend: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +110,8 @@ impl SimulationSession {
 
         let mut runtime = Runtime::load_with_settings(model_path, settings)
             .with_context(|| format!("Failed to load model from {}", model_path))?;
+
+        runtime.post_init().map_err(|e| anyhow::anyhow!(e)).context("Failed to initialize modules")?;
 
         if let Some(net_cfg) = global.network {
             runtime.engine.model.config = net_cfg;
@@ -151,11 +181,17 @@ async fn main() -> Result<()> {
 checkpoint_interval = 1000
 night_phase_interval = 100
 save_on_exit = true
+preferred_backend = "cpu"
 
 [network]
 default_threshold = 1024
 learning_rate = 10
 neurogenesis_reward_threshold = 200
+# Metaplasticity settings
+metaplasticity_enabled = true
+# Titan Memory settings
+titan_surprise_threshold = 100
+titan_decay_rate = 1
 "#;
             fs::write("nano.toml", config).context("Failed to write nano.toml")?;
 
@@ -184,7 +220,11 @@ vocab_size = 1000
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
             let mut session = SimulationSession::new(model, *learning_rate, backend.clone())?;
-            session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level)?;
+            if let Err(e) = session.run_multimodal(input.as_deref(), image.as_deref(), *byte_level) {
+                eprintln!("🔥 Runtime Error: {}. Attempting emergency backup...", e);
+                session.finish(&format!("{}.bak", model))?;
+                return Err(e);
+            }
             session.finish(model)?;
         }
         Commands::Gym { model, env: env_name, episodes, backend } => {
@@ -223,7 +263,7 @@ vocab_size = 1000
         Commands::Shell { model, backend } => {
             let mut session = SimulationSession::new(model, None, backend.clone())?;
             println!("🐚 Nano Interactive Shell (Backend: {})", session.runtime.engine.backend.name());
-            println!("Commands: help, save, run <text>, load_image <path>, exit");
+            println!("Commands: help, save, run <text>, load_image <path>, reload, consolidate <iters>, exit");
 
             use std::io::{Write, BufRead};
             let stdin = std::io::stdin();
@@ -243,6 +283,20 @@ vocab_size = 1000
                 else if cmd.starts_with("load_image ") {
                     let path = &cmd[11..];
                     session.run_multimodal(None, Some(path), false)?;
+                }
+                else if cmd == "reload" {
+                    if let Err(e) = session.runtime.reload_settings("nano.toml") {
+                        println!("!! Failed to reload config: {}", e);
+                    } else {
+                        println!("++ Settings reloaded from nano.toml");
+                    }
+                }
+                else if cmd.starts_with("consolidate ") {
+                    if let Ok(iters) = cmd[12..].parse::<u32>() {
+                        println!("⏳ Consolidating memory ({} iterations)...", iters);
+                        session.runtime.consolidate_memory(iters);
+                        println!("✅ Consolidation complete.");
+                    }
                 }
                 else {
                     let resp = session.runtime.handle_command(cmd);
@@ -278,6 +332,208 @@ vocab_size = 1000
             println!("  Total Ticks: {}", ticks);
             println!("  Total Time:  {:.2?}", duration);
             println!("  Throughput:  {:.2} ticks/sec (TPS)", tps);
+        }
+        Commands::Diff { base, current } => {
+            println!("⚖️  Comparing base model '{}' with current model '{}'...", base, current);
+            let b_baked = genesis_core::BakedModel::load(base).context("Failed to load base model")?;
+            let c_baked = genesis_core::BakedModel::load(current).context("Failed to load current model")?;
+
+            // 1. Synapse weight changes
+            let mut total_delta = 0i64;
+            let mut changed_count = 0;
+            let s_len = b_baked.synapses.len().min(c_baked.synapses.len());
+            for i in 0..s_len {
+                let delta = (c_baked.synapses.weight[i] - b_baked.synapses.weight[i]).abs() as i64;
+                if delta > 0 {
+                    total_delta += delta;
+                    changed_count += 1;
+                }
+            }
+            println!("  - Synapses: {} changed, total weight delta = {}", changed_count, total_delta);
+
+            // 2. Associative memory changes (Titan)
+            if let (Some(b_titan), Some(c_titan)) = (&b_baked.titan_memory, &c_baked.titan_memory) {
+                let b_count = b_titan.associations_flat.len();
+                let c_count = c_titan.associations_flat.len();
+                println!("  - Titan Associations: {} -> {} (delta: {})", b_count, c_count, c_count as i32 - b_count as i32);
+            }
+
+            // 3. Byte Memory changes
+            if let (Some(b_titan), Some(c_titan)) = (&b_baked.titan_memory, &c_baked.titan_memory) {
+                let mut bytes_changed = 0;
+                let m_len = b_titan.byte_memory.len().min(c_titan.byte_memory.len());
+                for i in 0..m_len {
+                    if b_titan.byte_memory[i] != c_titan.byte_memory[i] {
+                        bytes_changed += 1;
+                    }
+                }
+                println!("  - Byte RAM (1MB): {} bytes modified", bytes_changed);
+            }
+
+            println!("✅ Knowledge comparison complete.");
+        }
+        Commands::Tune { model, input, steps } => {
+            println!("🛠️  Auto-tuning model '{}' with input data...", model);
+            let mut session = SimulationSession::new(model, None, None)?;
+
+            let mut avg_surprise = 0f32;
+            let mut best_lr = session.runtime.engine.model.config.learning_rate;
+            let mut best_interval = session.runtime.settings.night_phase_interval;
+
+            println!("  Initial State: LR={}, SleepInterval={}", best_lr, best_interval);
+
+            // Tuning loop
+            for step in 1..=*steps {
+                session.runtime.inject_text(input);
+                let _spikes = session.runtime.tick(&vec![0; session.runtime.engine.model.neurons.len()]);
+
+                let surprise = session.runtime.last_surprise;
+                avg_surprise = avg_surprise * 0.9 + surprise as f32 * 0.1;
+
+                // Simple auto-tuning heuristic:
+                // If surprise is consistently high (> 500), the model is struggling to learn or too unstable.
+                if avg_surprise > 500.0 {
+                    best_lr = (best_lr - 1).max(1);
+                    best_interval = (best_interval - 5).max(10);
+                } else if avg_surprise < 50.0 {
+                    // If surprise is very low, we can increase LR to speed up learning.
+                    best_lr = (best_lr + 1).min(100);
+                    best_interval = (best_interval + 5).min(1000);
+                }
+
+                if step % 10 == 0 {
+                    println!("    Step {}: AvgSurprise={:.2}, Suggesting LR={}, SleepInterval={}",
+                        step, avg_surprise, best_lr, best_interval);
+                }
+            }
+
+            session.runtime.engine.model.config.learning_rate = best_lr;
+            session.runtime.settings.night_phase_interval = best_interval;
+
+            println!("✅ Auto-tuning complete. Suggested settings applied.");
+            session.finish(model)?;
+        }
+        Commands::Check { model } => {
+            println!("🔍 Performing Health Check on model: {}...", model);
+            let baked = genesis_core::BakedModel::load(model).context("Health Check Failed: Could not load model")?;
+
+            println!("  - Neurons: {} (Structure: SoA)", baked.neurons.len());
+            println!("  - Synapses: {}", baked.synapses.len());
+
+            // Basic consistency check
+            baked.neurons.validate().map_err(|e| anyhow::anyhow!(e)).context("Health Check Failed: Neuron state is inconsistent")?;
+
+            // Check for NaN or infinite potentials (if applicable, but IValue is i32)
+
+            // Check modules
+            println!("  - Modules ({}):", baked.module_states.len());
+            for name in baked.module_states.keys() {
+                println!("    * {}", name);
+            }
+
+            if let Some(titan) = &baked.titan_memory {
+                 println!("  - Titan Memory: {} associations, {} bytes buffer", titan.associations_flat.len(), titan.byte_memory.len());
+            }
+
+            println!("✅ Model Health Check PASSED.");
+        }
+        Commands::Train { model, data, epochs, backend } => {
+            println!("🎓 Starting Training Session on: {}", data);
+            let mut session = SimulationSession::new(model, None, backend.clone())?;
+
+            let mut files: Vec<_> = fs::read_dir(data)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect();
+            files.sort();
+
+            for epoch in 1..=*epochs {
+                println!("  Epoch {}/{}", epoch, epochs);
+                for file_path in &files {
+                    match fs::read_to_string(file_path) {
+                        Ok(content) => {
+                            println!("    Processing: {:?}", file_path.file_name().unwrap());
+                            session.runtime.process_text(&content);
+
+                            // Force a night phase (sleep) after each file for consolidation
+                            println!("    Consolidating memory...");
+                            session.runtime.consolidate_memory(1);
+                        }
+                        Err(e) => {
+                            eprintln!("    ⚠️  Failed to read {:?}: {}", file_path, e);
+                        }
+                    }
+                }
+            }
+
+            session.finish(model)?;
+            println!("✅ Training complete.");
+        }
+        Commands::Remote { model, peer, backend } => {
+            println!("🌐 Connecting to remote node: {}...", peer);
+
+            let global = SimulationSession::load_global_config();
+            let mut settings = global.simulation.unwrap_or_default();
+            if let Some(b) = backend { settings.preferred_backend = Some(b.clone()); }
+
+            let mut runtime = genesis_node::RuntimeBuilder::new()
+                .from_model(model)
+                .with_settings(settings)
+                .build()
+                .context("Failed to build runtime")?;
+
+            // Add peer manually for this session
+            let nm = if let Some(ref existing_nm) = runtime.network_manager {
+                 let mut peers = existing_nm.peers.clone();
+                 if !peers.contains(peer) { peers.push(peer.clone()); }
+                 let node_id = existing_nm.node_id.clone();
+                 let remote_queue = runtime.engine.remote_spike_queue.clone();
+                 let (tx, rx) = tokio::sync::mpsc::channel(10);
+                 runtime.titan_rx = Some(rx);
+                 let nm = pollster::block_on(genesis_node::NetworkManager::new(
+                    node_id,
+                    peers,
+                    runtime.settings.distributed_port,
+                    remote_queue,
+                    Some(tx)
+                 )).context("Network init failed")?;
+                 Some(std::sync::Arc::new(nm))
+            } else {
+                 let node_id = "cli_node".to_string();
+                 let remote_queue = runtime.engine.remote_spike_queue.clone();
+                 let (tx, rx) = tokio::sync::mpsc::channel(10);
+                 runtime.titan_rx = Some(rx);
+                 let nm = pollster::block_on(genesis_node::NetworkManager::new(
+                    node_id,
+                    vec![peer.clone()],
+                    runtime.settings.distributed_port,
+                    remote_queue,
+                    Some(tx)
+                 )).context("Network init failed")?;
+                 Some(std::sync::Arc::new(nm))
+            };
+            runtime.network_manager = nm;
+
+            println!("🛰️  Broadcasting local Titan memory state...");
+            runtime.broadcast_titan_state();
+
+            println!("⏳ Waiting for incoming memory sync...");
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(ProgressStyle::default_spinner().template("{spinner:.blue} [{elapsed_precise}] {msg}")?);
+
+            // Wait for 5 seconds, polling every 100ms
+            for s in 0..50 {
+                pb.set_message(format!("Syncing... ({}%)", s * 2));
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Run a dummy tick to process network packets
+                runtime.tick(&vec![0; runtime.engine.model.neurons.len()]);
+            }
+            pb.finish_with_message("✅ Sync window closed.");
+
+            runtime.sync_state();
+            runtime.engine.model.save(model).context("Failed to save synced model")?;
+            println!("✅ Remote synchronization complete.");
         }
     }
     Ok(())
