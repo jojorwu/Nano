@@ -37,6 +37,8 @@ pub struct BitWiseTitan {
     pub max_associations: usize,
     pub max_blocks: u32,
     pub max_entries_per_block: usize,
+    pub deep_replay_threshold: IValue,
+    pub elastic_window_max: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -88,6 +90,8 @@ impl BitWiseTitan {
             max_associations: 1_000_000,
             max_blocks: 1_000_000,
             max_entries_per_block: 256,
+            deep_replay_threshold: 1500,
+            elastic_window_max: 16,
         }
     }
 
@@ -249,7 +253,7 @@ impl BitWiseTitan {
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
-        if surprise > 1500 {
+        if surprise > self.deep_replay_threshold {
             // Store highly surprising patterns in L3 episodic archive for night replay
             let now = history[h_ptr].to_bitpacked(neurons.len());
             let mut active_blocks = Vec::new();
@@ -281,8 +285,8 @@ impl BitWiseTitan {
 
         let now = history[h_ptr].to_bitpacked(n_count);
 
-        // Elastic Window: high surprise = look further into the past (up to 16 steps)
-        let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
+        // Elastic Window: high surprise = look further into the past (up to configured max)
+        let search_depth = if surprise > 1000 { self.elastic_window_max } else if surprise > 500 { self.elastic_window_max / 2 } else { 2 };
         let search_depth = search_depth.min(history.len());
 
         // Update Context Hashes and LSH

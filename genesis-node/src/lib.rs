@@ -71,6 +71,7 @@ impl Runtime {
     }
 
     pub fn post_init(&mut self) -> Result<(), genesis_core::ModuleError> {
+        self.engine.modules.on_config_sync(&self.engine.model.config);
         self.engine.modules.on_init(&mut self.engine.model.neurons)
     }
 
@@ -262,8 +263,17 @@ impl Runtime {
 
     pub fn reload_settings(&mut self, path: &str) -> Result<(), RuntimeError> {
         let content = std::fs::read_to_string(path)?;
-        let new_settings: SimulationSettings = serde_json::from_str(&content)?;
-        self.settings = new_settings;
+        let config: crate::commands::GlobalConfig = toml::from_str(&content).map_err(|e| RuntimeError::ModelLoad(e.to_string()))?;
+
+        if let Some(sim) = config.simulation {
+            self.settings = sim;
+        }
+
+        if let Some(net) = config.network {
+             self.engine.model.config = net;
+             self.engine.modules.on_config_sync(&self.engine.model.config);
+        }
+
         log::info!("Simulation settings reloaded from {}", path);
         Ok(())
     }

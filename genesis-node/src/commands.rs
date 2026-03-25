@@ -1,4 +1,11 @@
 use crate::engine::SimulationEngine;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    pub simulation: Option<crate::SimulationSettings>,
+    pub network: Option<genesis_core::NetworkConfig>,
+}
 
 pub struct CommandProcessor;
 

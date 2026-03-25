@@ -62,11 +62,20 @@ pub struct NeuromodulationState {
 pub struct ThinkModule {
     pub extra_ticks: usize,
     pub active: bool,
+    pub max_ticks: usize,
+    pub surprise_threshold_deep: IValue,
+    pub surprise_threshold_low: IValue,
 }
 
 impl ThinkModule {
     pub fn new(ticks: usize) -> Self {
-        Self { extra_ticks: ticks, active: true }
+        Self {
+            extra_ticks: ticks,
+            active: true,
+            max_ticks: 100,
+            surprise_threshold_deep: 1500,
+            surprise_threshold_low: 100,
+        }
     }
 }
 
@@ -86,12 +95,11 @@ impl NanoModule for ThinkModule {
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
         if let Some(s) = surprise {
             // Adaptive Thought Depth: increase internal iteration depth during high uncertainty (surprise)
-            // SCALE = 1024.
-            if s > 1500 {
-                self.extra_ticks = (self.extra_ticks + 5).min(100); // Deep reasoning
-            } else if s > 512 {
-                self.extra_ticks = (self.extra_ticks + 1).min(50);
-            } else if s < 100 {
+            if s > self.surprise_threshold_deep {
+                self.extra_ticks = (self.extra_ticks + 5).min(self.max_ticks); // Deep reasoning
+            } else if s > (self.surprise_threshold_deep / 3) {
+                self.extra_ticks = (self.extra_ticks + 1).min(self.max_ticks / 2);
+            } else if s < self.surprise_threshold_low {
                 self.extra_ticks = self.extra_ticks.saturating_sub(1);
             }
         }
@@ -103,6 +111,11 @@ impl NanoModule for ThinkModule {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
     fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
+    fn on_config_sync(&mut self, config: &NetworkConfig) {
+        self.max_ticks = config.think_max_ticks;
+        self.surprise_threshold_deep = config.think_surprise_threshold_deep;
+        self.surprise_threshold_low = config.think_surprise_threshold_low;
+    }
 }
 
 /// Context passed to plasticity rules to improve flexibility and reduce argument count.

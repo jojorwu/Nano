@@ -96,6 +96,9 @@ impl ModelBlueprint {
                             tm.max_blocks = cfg.titan_max_blocks;
                             tm.max_entries_per_block = cfg.titan_max_entries_per_block;
                             tm.surprise_threshold = cfg.titan_surprise_threshold;
+                            tm.deep_replay_threshold = cfg.titan_deep_replay_threshold;
+                            tm.elastic_window_max = cfg.titan_elastic_window_max;
+                            tm.decay_rate = cfg.titan_decay_rate;
                         }
                         module_states.insert("titan".to_string(), bincode::serialize(&tm).unwrap());
                         titan_memory = Some(tm);

@@ -524,6 +524,9 @@ impl BakedModel {
              titan.max_blocks = model.config.titan_max_blocks;
              titan.max_entries_per_block = model.config.titan_max_entries_per_block;
              titan.surprise_threshold = model.config.titan_surprise_threshold;
+             titan.deep_replay_threshold = model.config.titan_deep_replay_threshold;
+             titan.elastic_window_max = model.config.titan_elastic_window_max;
+             titan.decay_rate = model.config.titan_decay_rate;
         }
 
         model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

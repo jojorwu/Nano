@@ -53,6 +53,9 @@ pub trait NanoModule: Send + Sync {
     /// Called once when the module is added to the network or during model bootstrap.
     fn on_init(&mut self, _neurons: &mut NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
 
+    /// Called to provide global network configuration to the module.
+    fn on_config_sync(&mut self, _config: &crate::config::NetworkConfig) {}
+
     /// Called every simulation tick. Use this to inject external signals into the InputBus.
     /// The InputBus uses atomic integers to allow thread-safe signal injection from multiple modules.
     fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32);
@@ -360,6 +363,12 @@ impl ModuleManager {
             module.validate_state(neurons)?;
         }
         Ok(())
+    }
+
+    pub fn on_config_sync(&mut self, config: &crate::config::NetworkConfig) {
+        for module in &mut self.modules {
+            module.on_config_sync(config);
+        }
     }
 
     /// Executes all modules, respecting their tier-based execution order.

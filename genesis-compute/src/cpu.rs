@@ -129,8 +129,8 @@ impl CpuBackend {
                     let stp_weight = ((stp_weight as i64 * (SCALE as i64 + u_facilitation as i64)) >> 10) as i32;
 
                     // Consumption: firing uses resources and increases calcium
-                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] * 800) >> 10;
-                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] + 200).min(SCALE);
+                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] as i64 * model.config.stp_resource_decay >> 10) as i32;
+                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] as i64 + model.config.stp_calcium_recovery as i64).min(SCALE as i64) as i32;
 
                     let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
                     match model.synapses.compartment[syn_idx] {
@@ -244,7 +244,7 @@ impl CpuBackend {
                     *action = SCALE; // Signal to action bus
                     *thresh = thresh.saturating_add(ip_inc);
                     let alpha = model.config.activity_ema_alpha as i32;
-                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 10) / 1000) as i32; // Scaled to 1000
+                    *activity = ((*activity as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32; // Scaled to 1000 (100 * 10)
                     *adaptation = adaptation.saturating_add(100); // Metabolic cost
                 } else {
                     *pot = current_pot;
@@ -264,7 +264,7 @@ impl CpuBackend {
                 if error > 0 {
                     // Overactive: increase base threshold proportional to error
                     *b_thresh = b_thresh.saturating_add(homeo_rate);
-                } else if error < 0 && *b_thresh > 512 {
+                } else if error < 0 && *b_thresh > model.config.default_threshold / 2 {
                     // Underactive: decrease base threshold
                     *b_thresh = b_thresh.saturating_sub(1);
                 }
@@ -300,11 +300,13 @@ impl ComputeBackend for CpuBackend {
 
                 // Parallelized STP Recovery
                 let synapses = &mut model.synapses;
+                let r_rec = model.config.stp_resource_recovery;
+                let c_dec = model.config.stp_calcium_decay;
                 synapses.stp_resources.par_iter_mut()
                     .zip(synapses.stp_calcium.par_iter_mut())
                     .for_each(|(r, c)| {
-                        *r = (*r * 99 + SCALE) / 100;
-                        *c = (*c * 95) / 100;
+                        *r = ((*r as i64 * r_rec + SCALE as i64) / 100) as i32;
+                        *c = ((*c as i64 * c_dec) / 100) as i32;
                     });
                 None
             }
@@ -454,7 +456,7 @@ impl ComputeBackend for CpuBackend {
             }
         }
 
-        let max_neuron_sum = 1024 * 16;
+        let max_neuron_sum = model.config.homeostatic_scaling_limit;
         let synapses = &mut model.synapses;
 
         // Use chunks to parallelize weight adjustment across large synapse populations

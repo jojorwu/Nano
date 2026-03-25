@@ -1,9 +1,12 @@
 [network]
 default_threshold = 1024
+homeostatic_scaling_limit = 32768
 learning_rate = 42
 metaplasticity_enabled = true
 neurogenesis_reward_threshold = 200
+think_max_ticks = 200
 titan_decay_rate = 1
+titan_elastic_window_max = 32
 titan_max_associations = 2000000
 titan_surprise_threshold = 100
 

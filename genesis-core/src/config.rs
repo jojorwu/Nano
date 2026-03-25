@@ -40,6 +40,14 @@ pub struct NetworkConfig {
     pub titan_max_blocks: u32,
     pub titan_max_entries_per_block: usize,
     pub titan_surprise_threshold: IValue,
+    pub titan_deep_replay_threshold: IValue,
+    pub titan_elastic_window_max: usize,
+    pub titan_decay_rate: IValue,
+
+    // Thinking (Reasoning) Module Configuration
+    pub think_max_ticks: usize,
+    pub think_surprise_threshold_deep: IValue,
+    pub think_surprise_threshold_low: IValue,
 
     // Global Physics & Plasticity
     pub default_refractory_ticks: i32,
@@ -47,6 +55,13 @@ pub struct NetworkConfig {
     pub smbp_decay: i64,
     pub activity_ema_alpha: i64,
     pub target_activity_level: IValue,
+    pub homeostatic_scaling_limit: i64,
+
+    // STP (Short-Term Plasticity) Parameters
+    pub stp_resource_decay: i64,
+    pub stp_calcium_decay: i64,
+    pub stp_resource_recovery: i64,
+    pub stp_calcium_recovery: i64,
 }
 
 impl Default for NetworkConfig {
@@ -73,11 +88,22 @@ impl Default for NetworkConfig {
             titan_max_blocks: 1_000_000,
             titan_max_entries_per_block: 256,
             titan_surprise_threshold: 100,
+            titan_deep_replay_threshold: 1500,
+            titan_elastic_window_max: 16,
+            titan_decay_rate: 1,
+            think_max_ticks: 100,
+            think_surprise_threshold_deep: 1500,
+            think_surprise_threshold_low: 100,
             default_refractory_ticks: 4,
             weight_clamp_limit: SCALE * 5,
             smbp_decay: 800,
             activity_ema_alpha: 990, // Alpha out of 1000 (0.99)
             target_activity_level: 100,
+            homeostatic_scaling_limit: 1024 * 16,
+            stp_resource_decay: 800,
+            stp_calcium_decay: 95,
+            stp_resource_recovery: 99,
+            stp_calcium_recovery: 200,
         }
     }
 }
