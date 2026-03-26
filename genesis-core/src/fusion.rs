@@ -98,7 +98,23 @@ impl NanoModule for SpikingFusionModule {
         }
     }
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
-    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+        // Adaptive Modality Weighting: Adjust importance of sensory channels based on reward performance.
+        if let Some(r) = reward {
+             // Heuristic: if reward is very high, strengthen active modalities.
+             // If reward is low/negative, slightly shift weights to encourage exploration of other channels.
+             let adjustment = if r > 500 { 10 } else if r < -100 { -5 } else { 0 };
+
+             if adjustment != 0 {
+                  // For simplicity, we apply a global shift.
+                  // In a more advanced implementation, we would track which modality was most active
+                  // during the rewarded period.
+                  self.vision_weight = (self.vision_weight + adjustment).clamp(SCALE / 2, SCALE * 2);
+                  self.text_weight = (self.text_weight + adjustment).clamp(SCALE / 2, SCALE * 2);
+                  self.audio_weight = (self.audio_weight + adjustment).clamp(SCALE / 2, SCALE * 2);
+             }
+        }
+    }
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
     fn set_state(&mut self, state: &[u8]) {

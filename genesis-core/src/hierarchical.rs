@@ -13,6 +13,8 @@ pub struct HierarchicalModule {
     pub hierarchy_map: std::collections::HashMap<u16, Vec<u16>>,
     /// Cached average activity per layer
     pub layer_activity: std::collections::HashMap<u16, f32>,
+    /// Cache: layer ID to list of neuron indices
+    pub layer_to_neurons: std::collections::HashMap<u16, Vec<u32>>,
 }
 
 impl HierarchicalModule {
@@ -27,6 +29,7 @@ impl HierarchicalModule {
             top_down_gain: SCALE / 4,
             hierarchy_map,
             layer_activity: std::collections::HashMap::new(),
+            layer_to_neurons: std::collections::HashMap::new(),
         }
     }
 }
@@ -35,25 +38,34 @@ impl NanoModule for HierarchicalModule {
     fn name(&self) -> &str { "hierarchical" }
     fn tier(&self) -> u32 { 15 } // Runs after workspace but before final integration
 
-    fn on_init(&mut self, _neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> { Ok(()) }
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
+        self.layer_to_neurons.clear();
+        for (i, &lid) in neurons.layer_id.iter().enumerate() {
+            self.layer_to_neurons.entry(lid).or_default().push(i as u32);
+        }
+        Ok(())
+    }
 
-    fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
+    fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         if !self.enabled { return; }
 
-        // In a real implementation, we would use the actual layer_id from neurons.
-        // For on_tick efficiency, we assume the host provides layer summaries or we use metadata.
-        // Here we simulate the top-down flow:
+        // Top-Down Modulation: High-level layers drive distal predictions in lower layers.
+        // This represents "State-Dependent Perception" or "Mental Imagery".
         for (&high_layer, low_layers) in &self.hierarchy_map {
              let high_act = self.layer_activity.get(&high_layer).cloned().unwrap_or(0.0);
-             if high_act > 0.1 {
-                  for _low_layer in low_layers {
-                       // Broadcast the high-level expectation to all neurons in the low layer
-                       // (Simplified: in a real system this would be structured/learned)
-                       let _boost = (high_act * self.top_down_gain as f32) as i32;
 
-                       // We need access to neuron-to-layer mapping here.
-                       // For this POC, we skip the loop and assume the backend handles the dense mapping
-                       // OR we use the bus to signal a layer-wide distal modulation.
+             if high_act > 0.1 {
+                  let boost = (high_act * self.top_down_gain as f32) as i32;
+                  let dist = bus.distal();
+
+                  for &low_layer in low_layers {
+                       if let Some(neurons) = self.layer_to_neurons.get(&low_layer) {
+                            for &idx in neurons {
+                                 if (idx as usize) < dist.len() {
+                                      InputBus::atomic_saturating_add(&dist[idx as usize], boost);
+                                 }
+                            }
+                       }
                   }
              }
         }

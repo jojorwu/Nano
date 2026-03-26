@@ -197,7 +197,7 @@ impl InputBus {
         loop {
             let next = current.saturating_add(val);
             if next == current { break; } // Optimization: no change needed
-            match target.compare_exchange_weak(current, next, Ordering::Acquire, Ordering::Relaxed) {
+            match target.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(updated) => current = updated,
             }
