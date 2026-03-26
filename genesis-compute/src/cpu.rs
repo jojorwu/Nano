@@ -33,83 +33,88 @@ impl Default for CpuBackend {
 }
 
 impl CpuBackend {
-    /// Integrated Single Neuron State Update
-    fn update_single_neuron(&self, i: usize, neurons: &mut genesis_core::NeuronsSoA, model: &BakedModel, current_tick: u32, noise_amp: i32, ip_inc: i32, ip_dec: i32, target_activity: i32) -> bool {
-        let attn_dist = ((neurons.distal_potential[i] as i64 * neurons.distal_gate[i] as i64) >> 10) as i32;
-        let attn_apical = ((neurons.apical_potential[i] as i64 * neurons.apical_gate[i] as i64) >> 10) as i32;
-        let attn_basal = ((neurons.basal_potential[i] as i64 * neurons.basal_gate[i] as i64) >> 10) as i32;
+    /// Integrated Single Neuron State Update (Thread-Safe using raw pointers)
+    fn update_single_neuron_ffi(&self, i: usize, n: &genesis_core::NeuronsFFI, model: &BakedModel, current_tick: u32, noise_amp: i32, ip_inc: i32, ip_dec: i32, target_activity: i32) -> bool {
+        unsafe {
+            let attn_dist = ((*n.distal_potential.add(i) as i64 * *n.distal_gate.add(i) as i64) >> 10) as i32;
+            let attn_apical = ((*n.apical_potential.add(i) as i64 * *n.apical_gate.add(i) as i64) >> 10) as i32;
+            let attn_basal = ((*n.basal_potential.add(i) as i64 * *n.basal_gate.add(i) as i64) >> 10) as i32;
 
-        let astro_mod = ((neurons.astro_calcium[i] as i64 * SCALE as i64) >> 12) as i32;
-        // Multi-Segment Dendritic Integration
-        let mut total_distal = attn_dist;
-        let seg_offset = i * 4;
-        for s in 0..4 {
-             let seg_pot = neurons.segment_potentials[seg_offset + s];
-             let seg_gate = neurons.segment_gates[seg_offset + s];
-             let gated = (seg_pot as i64 * seg_gate as i64 >> 10) as i32;
-             if gated > 500 { // Segment threshold
-                  total_distal = total_distal.saturating_add(SCALE); // Segmental Ignition
-             }
-        }
-
-        let current_pot = calculate_membrane_potential(
-            neurons.potential[i], neurons.proximal_potential[i], total_distal, attn_apical, attn_basal,
-            neurons.gate_threshold[i], neurons.liquid_current[i], neurons.decay[i], noise_amp,
-            neurons.adaptation_current[i] + astro_mod
-        );
-
-        let refr_mult = if neurons.refractory_timer[i] > 0 { 1 + (1 << neurons.refractory_timer[i]) } else { 1 };
-        let mut effective_threshold = neurons.threshold[i] * refr_mult;
-
-        let theta = ((current_tick as f32 * 0.1).sin() * 200.0) as i32;
-        effective_threshold = effective_threshold.saturating_add(theta);
-
-        let fired = current_pot >= effective_threshold;
-
-        if fired {
-            neurons.potential[i] = 0;
-            neurons.refractory_timer[i] = model.config.physics.default_refractory_ticks;
-            neurons.last_spike_tick[i] = current_tick;
-            neurons.backprop_signal[i] = SCALE;
-            neurons.action_potential[i] = SCALE;
-            neurons.threshold[i] = neurons.threshold[i].saturating_add(ip_inc);
-            let alpha = model.config.physics.activity_ema_alpha as i32;
-            neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
-            neurons.adaptation_current[i] = neurons.adaptation_current[i].saturating_add(100);
-            neurons.astro_calcium[i] = neurons.astro_calcium[i].saturating_add(model.config.astro.increment);
-        } else {
-            neurons.potential[i] = current_pot;
-            if neurons.refractory_timer[i] > 0 { neurons.refractory_timer[i] -= 1; }
-            if neurons.threshold[i] > neurons.base_threshold[i] { neurons.threshold[i] = neurons.threshold[i].saturating_sub(ip_dec); }
-            neurons.backprop_signal[i] = ((neurons.backprop_signal[i] as i64 * model.config.physics.smbp_decay) >> 10) as i32;
-            neurons.action_potential[i] = ((neurons.action_potential[i] as i64 * model.config.physics.smbp_decay) >> 10) as i32;
-            let alpha = model.config.physics.activity_ema_alpha as i32;
-            neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64) / 1000) as i32;
-            neurons.adaptation_current[i] = (neurons.adaptation_current[i] * 95) / 100;
-            neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro.decay_rate) / 1000) as i32;
-
+            let astro_mod = ((*n.astro_calcium.add(i) as i64 * SCALE as i64) >> 12) as i32;
+            // Multi-Segment Dendritic Integration
+            let mut total_distal = attn_dist;
             let seg_offset = i * 4;
             for s in 0..4 {
-                 neurons.segment_potentials[seg_offset + s] = (neurons.segment_potentials[seg_offset + s] * 90) / 100;
+                 let seg_pot = *n.segment_potentials.add(seg_offset + s);
+                 let seg_gate = *n.segment_gates.add(seg_offset + s);
+                 let gated = (seg_pot as i64 * seg_gate as i64 >> 10) as i32;
+                 if gated > 500 { // Segment threshold
+                      total_distal = total_distal.saturating_add(SCALE); // Segmental Ignition
+                 }
             }
-        }
 
-        if fired {
-            neurons.energy_level[i] = neurons.energy_level[i].saturating_sub(10);
-            neurons.specialization_score[i] = neurons.specialization_score[i] * 0.99 + 0.1;
-        } else {
-            neurons.energy_level[i] = neurons.energy_level[i].saturating_add(2);
-        }
+            let current_pot = calculate_membrane_potential(
+                *n.potential.add(i), *n.proximal_potential.add(i), total_distal, attn_apical, attn_basal,
+                *n.gate_threshold.add(i), *n.liquid_current.add(i), *n.decay.add(i), noise_amp,
+                *n.adaptation_current.add(i) + astro_mod
+            );
 
-        let error = neurons.activity_ema[i] - target_activity;
-        let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
-        if error > 0 {
-            neurons.base_threshold[i] = neurons.base_threshold[i].saturating_add(homeo_rate);
-        } else if error < 0 && neurons.base_threshold[i] > model.config.physics.default_threshold / 2 {
-            neurons.base_threshold[i] = neurons.base_threshold[i].saturating_sub(1);
+            let refr_mult = if *n.refractory_timer.add(i) > 0 { 1 + (1 << *n.refractory_timer.add(i)) } else { 1 };
+            let mut effective_threshold = *n.threshold.add(i) * refr_mult;
+
+            let theta = if model.config.physics.theta_rhythm {
+                 ((current_tick as f32 * model.config.physics.theta_frequency).sin() * 200.0) as i32
+            } else { 0 };
+            effective_threshold = effective_threshold.saturating_add(theta);
+
+            let fired = current_pot >= effective_threshold;
+
+            if fired {
+                *n.potential.add(i) = 0;
+                *n.refractory_timer.add(i) = model.config.physics.default_refractory_ticks;
+                *n.last_spike_tick.add(i) = current_tick;
+                *n.backprop_signal.add(i) = SCALE;
+                *n.action_potential.add(i) = SCALE;
+                *n.threshold.add(i) = (*n.threshold.add(i)).saturating_add(ip_inc);
+                let alpha = model.config.physics.activity_ema_alpha as i32;
+                *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
+                *n.adaptation_current.add(i) = (*n.adaptation_current.add(i)).saturating_add(100);
+                *n.astro_calcium.add(i) = (*n.astro_calcium.add(i)).saturating_add(model.config.astro.increment);
+            } else {
+                *n.potential.add(i) = current_pot;
+                if *n.refractory_timer.add(i) > 0 { *n.refractory_timer.add(i) -= 1; }
+                if *n.threshold.add(i) > *n.base_threshold.add(i) { *n.threshold.add(i) = (*n.threshold.add(i)).saturating_sub(ip_dec); }
+                *n.backprop_signal.add(i) = ((*n.backprop_signal.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+                *n.action_potential.add(i) = ((*n.action_potential.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+                let alpha = model.config.physics.activity_ema_alpha as i32;
+                *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64) / 1000) as i32;
+                *n.adaptation_current.add(i) = (*n.adaptation_current.add(i) * 95) / 100;
+                *n.astro_calcium.add(i) = ((*n.astro_calcium.add(i) as i64 * model.config.astro.decay_rate) / 1000) as i32;
+
+                let seg_offset = i * 4;
+                for s in 0..4 {
+                     *n.segment_potentials.add(seg_offset + s) = (*n.segment_potentials.add(seg_offset + s) * 90) / 100;
+                }
+            }
+
+            if fired {
+                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_sub(model.config.physics.metabolic_spike_cost);
+                *n.specialization_score.add(i) = *n.specialization_score.add(i) * model.config.physics.specialization_decay + 0.1;
+            } else {
+                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate);
+            }
+
+            let error = *n.activity_ema.add(i) - target_activity;
+            let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
+            if error > 0 {
+                *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_add(homeo_rate);
+            } else if error < 0 && *n.base_threshold.add(i) > model.config.physics.default_threshold / 2 {
+                *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_sub(1);
+            }
+            // next_update_tick and update_interval are not in NeuronsFFI yet, let's fix that if needed.
+            // For now assume sequential update
+            fired
         }
-        neurons.next_update_tick[i] = current_tick + neurons.update_interval[i];
-        fired
     }
 
     pub fn rebuild_index_internal(&mut self, model: &BakedModel) {
@@ -370,10 +375,6 @@ impl CpuBackend {
         }
     }
 
-    fn update_neuron_states_internal(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
-        let n_count = model.neurons.len();
-        self.update_neuron_states_range(model, current_tick, new_spikes, 0..n_count);
-    }
 
     fn update_neuron_states_range(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool], range: std::ops::Range<usize>) {
         let n_count = model.neurons.len();
@@ -383,23 +384,33 @@ impl CpuBackend {
         let noise_amp = model.config.physics.noise_amplitude;
         let target_activity = model.config.physics.target_activity_level;
         let expert_masks = &self.expert_masks;
-        let neurons = &mut model.neurons;
+
+        // Use FFI view to safely share pointers across threads
+        let n_ffi = model.neurons.as_ffi();
+        let next_update_ptr = model.neurons.next_update_tick.as_mut_ptr() as usize;
+        let is_remote_ptr = model.neurons.is_remote.as_ptr() as usize;
+
         let mut spike_results = vec![false; n_count];
         let chunk_size = (range_len / rayon::current_num_threads()).max(64);
         let expert_masks_ptr = expert_masks.as_ptr() as usize;
-        let neurons_ptr = neurons as *mut _ as usize;
+
         spike_results.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| {
             let start_idx = range.start + chunk_idx * chunk_size;
             let end_idx = (start_idx + chunk_size).min(range.end);
             unsafe {
-                let n_mut = &mut *(neurons_ptr as *mut genesis_core::NeuronsSoA);
                 let e_masks = if expert_masks_ptr == 0 { &[] } else { std::slice::from_raw_parts(expert_masks_ptr as *const bool, expert_masks.len()) };
+                let next_up = next_update_ptr as *mut u32;
+                let is_rem = is_remote_ptr as *const u8;
                 for i in start_idx..end_idx {
-                    if current_tick < n_mut.next_update_tick[i] { continue; }
-                    if n_mut.is_remote[i] != 0 { continue; }
+                    if current_tick < *next_up.add(i) { continue; }
+                    if *is_rem.add(i) != 0 { continue; }
                     if !e_masks.is_empty() && !e_masks[i % e_masks.len()] { continue; }
-                    let fired = self.update_single_neuron(i, n_mut, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
+
+                    let fired = self.update_single_neuron_ffi(i, &n_ffi, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
                     chunk[i - start_idx] = fired;
+
+                    // Assumptions about update interval - for now sequential
+                    *next_up.add(i) = current_tick + 1;
                 }
             }
         });

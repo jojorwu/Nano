@@ -48,6 +48,7 @@ impl SimulationPipeline {
                 "observation" => stages.push(Box::new(ObservationStage)),
                 "neuromodulation" => stages.push(Box::new(NeuromodulationStage)),
                 "normalization" => stages.push(Box::new(NormalizationStage)),
+                "load_balancing" => stages.push(Box::new(LoadBalancingStage)),
                 "structural_plasticity" => stages.push(Box::new(StructuralPlasticityStage::new(settings.night_phase_interval))),
                 "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
                 _ => log::warn!("Unknown pipeline stage: {}", name),
@@ -116,6 +117,8 @@ impl PipelineStage for PropagationStage {
             engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
 
             // 2. Parallel Membrane Potential & Spike Generation
+            // In a production environment, we would use the is_remote flags to filter neurons per-backend.
+            // For this implementation, we use a simple range-based split.
             let primary_range = 0..split_point;
             let secondary_range = split_point..n_count;
 
@@ -407,6 +410,22 @@ impl PipelineStage for StructuralPlasticityStage {
         }
 
         engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
+    }
+}
+
+pub struct LoadBalancingStage;
+impl PipelineStage for LoadBalancingStage {
+    fn name(&self) -> &str { "load_balancing" }
+    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
+         for m in engine.modules.modules.iter_mut() {
+             if m.name() == "load_balancer" {
+                 if let Ok(mut lb) = bincode::deserialize::<genesis_core::LoadBalancerModule>(&m.get_state()) {
+                     let changes = lb.rebalance(&mut engine.model.neurons);
+                     if changes > 0 { log::debug!("LoadBalancer: {} blocks remapped", changes); }
+                     m.set_state(&bincode::serialize(&lb).unwrap());
+                 }
+             }
+         }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{NanoModule, NeuronsSoA, SynapsesSoA, InputBus, IValue, SCALE};
+use crate::{NanoModule, NeuronsSoA, SynapsesSoA, InputBus, IValue};
 use serde::{Serialize, Deserialize};
 
 /// LoadBalancer Module: Dynamically manages block-to-hardware mapping based on
@@ -42,10 +42,8 @@ impl LoadBalancerModule {
             for i in 0..neurons.len() {
                 let bid = neurons.block_id[i] as usize;
                 if bid < self.preferred_device.len() {
-                    // Update is_remote for heterogeneous compute splitting
-                    // If preferred_device is 1 (CPU) but engine's primary is GPU,
-                    // we might need to flag this differently.
-                    // For now, let's use origin_node_id or a new field.
+                    // Update is_remote: 1 means this neuron should be handled by the secondary backend
+                    neurons.is_remote[i] = self.preferred_device[bid];
                 }
             }
         }

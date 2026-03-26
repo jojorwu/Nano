@@ -18,8 +18,8 @@ pub struct WorkspaceModule {
     pub broadcast_intensity: IValue,
     /// Minimum activity to trigger ignition
     pub ignition_threshold: f32,
-    /// Neuron to Block mapping
-    pub neuron_to_block: Vec<u32>,
+    /// Per-block lists of neuron indices for efficient broadcasting
+    pub block_to_neurons: std::collections::HashMap<u32, Vec<u32>>,
 }
 
 impl WorkspaceModule {
@@ -30,7 +30,7 @@ impl WorkspaceModule {
             block_activity: std::collections::HashMap::new(),
             broadcast_intensity: SCALE / 2, // 0.5 intensity
             ignition_threshold: 10.0,
-            neuron_to_block: Vec::new(),
+            block_to_neurons: std::collections::HashMap::new(),
         }
     }
 }
@@ -41,28 +41,25 @@ impl NanoModule for WorkspaceModule {
     fn outputs(&self) -> Vec<String> { vec!["broadcast".to_string()] }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
-        self.neuron_to_block = neurons.block_id.clone();
+        self.block_to_neurons.clear();
+        for (i, &bid) in neurons.block_id.iter().enumerate() {
+            self.block_to_neurons.entry(bid).or_default().push(i as u32);
+        }
         Ok(())
     }
 
     fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
-
-        // 1. Competition: Aggregrate activity per block
-        // In a real implementation, we would access block_id from neurons.
-        // For efficiency in on_tick, we use a heuristic or assume fixed block size if needed.
-        // However, Workspace needs proper block mapping.
-
         if self.ignition_timer > 0 {
             self.ignition_timer -= 1;
 
-            // 2. Broadcast: Inject active block's pattern (from history/state)
-            // For now, we simulate broadcast by boosting specific signals if they belong to workspace
+            // 2. Broadcast: Inject active block's pattern (Targeted neurons only)
             if let Some(bid) = self.active_block {
-                let prox = bus.proximal();
-                // Broadcast using the actual mapping stored during on_init
-                for (i, &mapped_bid) in self.neuron_to_block.iter().enumerate() {
-                    if mapped_bid == bid && i < prox.len() {
-                        InputBus::atomic_saturating_add(&prox[i], self.broadcast_intensity);
+                if let Some(neurons) = self.block_to_neurons.get(&bid) {
+                    let prox = bus.proximal();
+                    for &idx in neurons {
+                        if (idx as usize) < prox.len() {
+                            InputBus::atomic_saturating_add(&prox[idx as usize], self.broadcast_intensity);
+                        }
                     }
                 }
             }

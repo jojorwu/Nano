@@ -1,4 +1,4 @@
-use crate::{IValue, SCALE, NanoModule, bus::InputBus, model::{NeuronsSoA, SynapsesSoA}, module::{ModuleInput, ModuleError}, config::NetworkConfig};
+use crate::{IValue, NanoModule, bus::InputBus, model::{NeuronsSoA, SynapsesSoA}, module::{ModuleInput, ModuleError}, config::NetworkConfig};
 use serde::{Serialize, Deserialize};
 
 /// Thinking Mode Module: Enables "Chain of Thought" reasoning by performing

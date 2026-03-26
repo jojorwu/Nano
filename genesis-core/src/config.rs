@@ -24,6 +24,10 @@ pub struct PhysicsConfig {
     pub target_activity_level: IValue,
     pub dendritic_coincidence_threshold: IValue,
     pub theta_rhythm: bool,
+    pub theta_frequency: f32,
+    pub metabolic_spike_cost: IValue,
+    pub metabolic_recovery_rate: IValue,
+    pub specialization_decay: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -95,6 +99,10 @@ impl Default for NetworkConfig {
                 target_activity_level: 100,
                 dendritic_coincidence_threshold: 512,
                 theta_rhythm: true,
+                theta_frequency: 0.1,
+                metabolic_spike_cost: 10,
+                metabolic_recovery_rate: 2,
+                specialization_decay: 0.99,
             },
             plasticity: PlasticityConfig {
                 learning_rate: 10,

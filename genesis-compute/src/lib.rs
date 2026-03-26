@@ -36,7 +36,7 @@ pub trait ComputeBackend {
 
     /// Executes a simulation kernel on a specific range of neurons/synapses.
     /// This enables heterogeneous compute by splitting the workload between backends.
-    fn execute_kernel_range(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext, range: std::ops::Range<usize>) -> Option<SpikeData> {
+    fn execute_kernel_range(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext, _range: std::ops::Range<usize>) -> Option<SpikeData> {
         // Default implementation fallbacks to full execution if range-splitting is not supported by the backend
         self.execute_kernel(kernel, model, context)
     }
@@ -80,6 +80,12 @@ pub trait ComputeBackend {
 
     /// Weight update with neuromodulatory context (Dopamine/Noradrenaline signals).
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: NeuromodulationState, history: &[Vec<bool>]);
+
+    /// Range-based weight update.
+    fn update_weights_range(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: NeuromodulationState, history: &[Vec<bool>], _range: std::ops::Range<usize>) {
+        // Default fallback to full update
+        self.update_weights_modulated(model, previous_spikes, current_spikes, current_tick, reward, modulation, history)
+    }
 
     /// Performs large-scale structural changes (pruning, neurogenesis, and SNNaS optimization).
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);

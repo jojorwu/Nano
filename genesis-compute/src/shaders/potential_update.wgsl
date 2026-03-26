@@ -35,6 +35,8 @@ struct Config {
     noise_amplitude: i32,
     theta_rhythm: i32,
     intrinsic_learning_rate: i32,
+    metabolic_spike_cost: i32,
+    metabolic_recovery_rate: i32,
 }
 @group(0) @binding(5) var<storage, read> config: Config;
 @group(0) @binding(6) var<storage, read_write> spikes: array<u32>;
@@ -56,6 +58,12 @@ struct Modulation {
 @group(0) @binding(23) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> current_tick: u32;
 
+struct Range {
+    start: u32,
+    end: u32,
+}
+@group(1) @binding(1) var<uniform> exec_range: Range;
+
 fn xorshift(seed: u32) -> u32 {
     var x = seed;
     x ^= x << 13u;
@@ -68,6 +76,10 @@ fn xorshift(seed: u32) -> u32 {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&neuron_states)) { return; }
+    if (i < exec_range.start || i >= exec_range.end) { return; }
+
+    let st = neuron_states[i];
+    if (st.is_remote != 0u) { return; }
 
     // Dynamic MoE: Expert Freezing
     // If all dendritic gates for this neuron are very low, skip potential calculation to save power/cycles
@@ -169,7 +181,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         neuron_states[i].threshold = neuron_states[i].threshold + config.intrinsic_learning_rate;
         // Energy consumption on spike
-        neuron_states[i].energy_level = max(0, neuron_states[i].energy_level - 50);
+        neuron_states[i].energy_level = max(0, neuron_states[i].energy_level - config.metabolic_spike_cost);
     } else {
         neuron_states[i].potential = pot;
         spikes[i] = 0u;
@@ -177,7 +189,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             neuron_states[i].threshold = neuron_states[i].threshold - (config.intrinsic_learning_rate / 4);
         }
         // Energy recovery when idle
-        neuron_states[i].energy_level = min(1024, neuron_states[i].energy_level + 5);
+        neuron_states[i].energy_level = min(1024, neuron_states[i].energy_level + config.metabolic_recovery_rate);
         neuron_states[i].backprop_signal = (neuron_states[i].backprop_signal * 800) >> 10;
         neuron_states[i].action = (neuron_states[i].action * 800) >> 10;
         neuron_states[i].adaptation = (neuron_states[i].adaptation * 972) >> 10;

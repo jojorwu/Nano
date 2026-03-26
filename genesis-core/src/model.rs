@@ -151,6 +151,9 @@ pub struct NeuronsFFI {
     pub len: u32,
 }
 
+unsafe impl Send for NeuronsFFI {}
+unsafe impl Sync for NeuronsFFI {}
+
 impl NeuronsSoA {
     pub fn as_ffi(&mut self) -> NeuronsFFI {
         NeuronsFFI {

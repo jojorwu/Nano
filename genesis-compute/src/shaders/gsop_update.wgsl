@@ -42,10 +42,17 @@ struct Modulation {
 @group(0) @binding(9) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> base_learning_rate: i32;
 
+struct Range {
+    start: u32,
+    end: u32,
+}
+@group(1) @binding(1) var<uniform> exec_range: Range;
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = id.x;
     if (idx >= arrayLength(&weights)) { return; }
+    if (idx < exec_range.start || idx >= exec_range.end) { return; }
 
     let src = source_indices[idx];
     let tgt = target_indices[idx];
