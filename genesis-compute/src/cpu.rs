@@ -36,6 +36,12 @@ impl CpuBackend {
     /// Integrated Single Neuron State Update (Thread-Safe using raw pointers)
     fn update_single_neuron_ffi(&self, i: usize, n: &genesis_core::NeuronsFFI, model: &BakedModel, current_tick: u32, noise_amp: i32, ip_inc: i32, ip_dec: i32, target_activity: i32) -> bool {
         unsafe {
+            // Metabolic Gating: skip update if exhausted
+            if *n.energy_level.add(i) < 50 {
+                 *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate * 2);
+                 return false;
+            }
+
             let attn_dist = ((*n.distal_potential.add(i) as i64 * *n.distal_gate.add(i) as i64) >> 10) as i32;
             let attn_apical = ((*n.apical_potential.add(i) as i64 * *n.apical_gate.add(i) as i64) >> 10) as i32;
             let attn_basal = ((*n.basal_potential.add(i) as i64 * *n.basal_gate.add(i) as i64) >> 10) as i32;

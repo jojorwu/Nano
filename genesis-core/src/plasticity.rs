@@ -519,6 +519,25 @@ impl NanoModule for AdaptiveLearningRateModule {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        match event {
+            crate::event::GlobalEvent::RewardSignal(r) => {
+                if *r > 500 {
+                    self.current_lr = (self.current_lr * 12) / 10;
+                } else if *r < -100 {
+                    self.current_lr = (self.current_lr * 8) / 10;
+                }
+            }
+            crate::event::GlobalEvent::HighSurprise(s) => {
+                if *s > 1500 {
+                    self.current_lr = (self.current_lr * 11) / 10;
+                }
+            }
+            _ => {}
+        }
+        self.current_lr = self.current_lr.clamp(self.base_lr / 2, self.base_lr * 4);
+    }
+
     fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {}
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {

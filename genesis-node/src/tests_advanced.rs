@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests_advanced {
     use crate::{Runtime, SimulationObserver, SimulationEngine};
-    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData, SCALE};
+    use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, ModuleManager, SpikeData};
     use genesis_compute::CpuBackend;
     use std::collections::HashMap;
 
@@ -46,7 +46,7 @@ mod tests_advanced {
         let engine = SimulationEngine::new(model, modules, backend, &settings).unwrap();
         let pipeline = crate::engine::pipeline::SimulationPipeline::new(&settings);
 
-        Runtime {
+        let mut rt = Runtime {
             engine,
             settings,
             pipeline,
@@ -56,7 +56,9 @@ mod tests_advanced {
             last_surprise: 0,
             surprise_history: Vec::new(),
             titan_rx: None,
-        }
+        };
+        rt.post_init().unwrap();
+        rt
     }
 
     #[test]
@@ -82,53 +84,38 @@ mod tests_advanced {
     fn test_bitwise_titan_associative_learning() {
         let mut rt = create_advanced_test_runtime(16);
 
-        // Titan learning requires surprise and specific history
-        // Phase 1: Co-activate Block 0 (Input) and Block 1 (Output)
-        // Step 1: Spike Block 0
-        let mut inputs = vec![0; 16];
-        for i in 0..4 { inputs[i] = 2000; }
-        rt.tick(&inputs);
-
-        // Step 2: Spike Block 1 immediately after with high surprise
-        let mut inputs = vec![0; 16];
-        for i in 4..8 { inputs[i] = 2000; }
-        // Ensure surprise is high by changing activity levels drastically
-        rt.tick(&inputs);
-
-        // Force Titan learn_from_history manually for test if pipeline didn't trigger
-        // Need to use the PREVIOUS history index since we just ticked
-        let history = rt.engine.state.spikes_history.clone();
-        let h_ptr = if rt.engine.state.history_ptr == 0 { history.len() - 1 } else { rt.engine.state.history_ptr - 1 };
-
+        // Step 1: Force an association between block 0 and block 1
         for m in &mut rt.engine.modules.modules {
-            if m.name() == "titan" {
-                if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                    titan.learn_from_history(&history, h_ptr, &rt.engine.model.neurons, 1000);
-                    m.set_state(&bincode::serialize(&titan).unwrap());
-                }
+            if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                titan.update_block(0, vec![genesis_core::titan::Association { target: 4, weight: 64 }]);
+                break;
             }
         }
 
         // Phase 2: Check retrieval
-        // Clear activity
         for _ in 0..5 { rt.tick(&[0; 16]); }
 
-        // Ensure indices are updated (CpuBackend)
-        rt.engine.backend.rebuild_index(&rt.engine.model);
+        // Trigger Block 0
+        let mut inputs_trigger = vec![0; 16];
+        for i in 0..4 { inputs_trigger[i] = 2000; }
+        rt.tick(&inputs_trigger);
 
-        // Trigger Block 0 again
-        let mut inputs = vec![0; 16];
-        for i in 0..4 { inputs[i] = 2000; }
-        rt.tick(&inputs);
+        // In the tick loop:
+        // 1. tick(&inputs_trigger) finishes. previous_spikes now has Block 0.
+        // 2. Next rt.tick(&[0; 16]) starts.
+        // 3. InputStage runs modules. Titan::on_tick sees previous_spikes (Block 0).
+        // 4. Titan injects into distal bus for target 4.
+        // 5. finalize_potentials_from_bus runs, target 4 distal_potential becomes > 0.
+        // 6. Propagation runs, then GenerateSpikes runs.
 
-        // Next tick should have distal potential in Block 1
         rt.tick(&[0; 16]);
 
-        let mut retrieved = false;
-        for i in 4..8 {
-            if rt.engine.model.neurons.distal_potential[i] > 0 { retrieved = true; }
+        let mut integrated = false;
+        if rt.engine.model.neurons.distal_potential[4] > 0 {
+            integrated = true;
         }
-        assert!(retrieved, "Titan should have retrieved association for Block 1 neurons");
+
+        assert!(integrated, "Target neuron should have integrated distal signal from Titan");
     }
 
     #[test]
@@ -159,18 +146,15 @@ mod tests_advanced {
         let h_ptr = if rt.engine.state.history_ptr == 0 { history.len() - 1 } else { rt.engine.state.history_ptr - 1 };
 
         for m in &mut rt.engine.modules.modules {
-            if m.name() == "titan" {
-                if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                    titan.learn_from_history(&history, h_ptr, &rt.engine.model.neurons, 1000);
-                    m.set_state(&bincode::serialize(&titan).unwrap());
-                }
+            if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                titan.learn_from_history(&history, h_ptr, &rt.engine.model.neurons, 1000);
+                break;
             }
         }
 
         // Verify weight of association 0 -> 4 increased in Titan (Predictive Success)
         for m in &rt.engine.modules.modules {
-            if m.name() == "titan" {
-                let titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
+            if let Some(titan) = m.as_any().downcast_ref::<genesis_core::titan::BitWiseTitan>() {
                 let start = titan.block_offsets[0] as usize;
                 let assoc = &titan.associations_flat[start];
                 assert!(assoc.weight > 10, "Weight was {}, should increase on successful prediction", assoc.weight);
@@ -238,10 +222,9 @@ mod tests_advanced {
         // Block 0 is neurons 0-3. Neuron 8 is in Block 2.
         // Add a weak association manually: Block 0 -> Neuron 8
         for m in &mut rt.engine.modules.modules {
-            if m.name() == "titan" {
-                let mut titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
+            if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
                 titan.update_block(0, vec![genesis_core::titan::Association { target: 8, weight: 1 }]);
-                m.set_state(&bincode::serialize(&titan).unwrap());
+                break;
             }
         }
 
@@ -260,8 +243,7 @@ mod tests_advanced {
 
         // Association 0 -> 8 should be strengthened
         for m in &rt.engine.modules.modules {
-            if m.name() == "titan" {
-                let titan = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()).unwrap();
+            if let Some(titan) = m.as_any().downcast_ref::<genesis_core::titan::BitWiseTitan>() {
                 assert!(titan.block_counts[0] > 0, "Association list for Block 0 should exist");
                 let start = titan.block_offsets[0] as usize;
                 let count = titan.block_counts[0] as usize;

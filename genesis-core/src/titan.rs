@@ -355,12 +355,15 @@ impl BitWiseTitan {
 
     fn perform_temporal_learning_optimized(&mut self, history: &[crate::SpikeData], h_ptr: usize, now_packed: &[u64], now_active: &[u32], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
         let n_count = neurons.len();
-        let current_hash = Self::compute_context_hash(now_packed);
+        // Index by the 'now' signatures for retrieval when this pattern appears as 'previous'
         let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now_packed);
+        let now_hash = Self::compute_context_hash(now_packed);
 
         for t in 1..depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
             let past_packed = history[past_idx].to_bitpacked(n_count);
+            let past_hash = Self::compute_context_hash(&past_packed);
+
             let bound = Self::vsa_bind(now_packed, &past_packed);
             let bound_hash = Self::compute_context_hash(&bound);
 
@@ -398,7 +401,10 @@ impl BitWiseTitan {
                         self.update_block(src_bid, entries);
 
                         if changed {
-                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            // Store mapping: Past Pattern Hash -> Src Block
+                            // This allows retrieval when 'past' pattern repeats as 'previous_spikes'
+                            self.context_hashes.entry(past_hash).or_default().push(src_bid);
+                            self.context_hashes.entry(now_hash).or_default().push(src_bid);
                             self.context_hashes.entry(bound_hash).or_default().push(src_bid);
                             for (table_idx, &sig) in sigs_l1.iter().enumerate() { self.lsh_tables[table_idx].entry(sig).or_default().push(src_bid); }
                             for (table_idx, &sig) in sigs_l2.iter().enumerate() { self.lsh_tables_l2[table_idx].entry(sig).or_default().push(src_bid); }
@@ -461,13 +467,14 @@ impl BitWiseTitan {
 
     fn perform_temporal_learning_linear(&mut self, history: &[crate::SpikeData], h_ptr: usize, now_packed: &[u64], now_active: &[u32], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
         let n_count = neurons.len();
-        let current_hash = Self::compute_context_hash(now_packed);
         let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now_packed);
 
         for t in 1..=depth {
             if t > h_ptr { break; }
             let past_idx = h_ptr - t;
             let past_packed = history[past_idx].to_bitpacked(n_count);
+            let past_hash = Self::compute_context_hash(&past_packed);
+
             let bound = Self::vsa_bind(now_packed, &past_packed);
             let bound_hash = Self::compute_context_hash(&bound);
 
@@ -505,7 +512,7 @@ impl BitWiseTitan {
                         self.update_block(src_bid, entries);
 
                         if changed {
-                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            self.context_hashes.entry(past_hash).or_default().push(src_bid);
                             self.context_hashes.entry(bound_hash).or_default().push(src_bid);
                             for (table_idx, &sig) in sigs_l1.iter().enumerate() { self.lsh_tables[table_idx].entry(sig).or_default().push(src_bid); }
                             for (table_idx, &sig) in sigs_l2.iter().enumerate() { self.lsh_tables_l2[table_idx].entry(sig).or_default().push(src_bid); }
@@ -523,6 +530,22 @@ impl NanoModule for BitWiseTitan {
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        match event {
+            crate::event::GlobalEvent::ConsolidationTriggered => {
+                // Boost learning rate during consolidation replays
+                self.learning_rate = self.learning_rate.saturating_add(5);
+            }
+            crate::event::GlobalEvent::RewardSignal(r) => {
+                if *r > 500 {
+                    // Halve surprise threshold for high reward events to capture associations more easily
+                    self.surprise_threshold = self.surprise_threshold / 2;
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::ModuleError> {
         self.neuron_to_block = neurons.block_id.clone();
@@ -642,6 +665,8 @@ impl NanoModule for BitWiseTitan {
         let dist = bus.distal();
         let n_count = dist.len();
 
+        log::debug!("Titan on_tick: previous_spikes sum = {}", previous_spikes.iter().filter(|&&s| s).count());
+
         // 1. Pack previous spikes into a pattern
         let mut packed = vec![0u64; (n_count + 63) / 64];
         for (i, &s) in previous_spikes.iter().enumerate() {
@@ -728,7 +753,8 @@ impl NanoModule for BitWiseTitan {
                 for i in start..start + count {
                     let a = &self.associations_flat[i];
                     if (a.target as usize) < dist.len() {
-                            let weight = if a.weight > 0 { (a.weight as i32) * 50 } else { 0 }; // Scale weight for impact
+                            // Scale weight for impact. Boosted to 100x to ensure it's detectable and above thresholds.
+                            let weight = if a.weight > 0 { (a.weight as i32) * 100 } else { 0 };
                             crate::InputBus::atomic_saturating_add(&dist[a.target as usize], weight);
                     }
                 }

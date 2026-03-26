@@ -102,6 +102,7 @@ impl Runtime {
             normalized_reward,
             surprise: 0,
             start_time,
+            events: Vec::new(),
             blackboard: std::collections::HashMap::new(),
         };
 
@@ -139,6 +140,7 @@ impl Runtime {
 
         if tick > 0 && tick % self.settings.night_phase_interval == 0 {
             self.emit_event(SimulationEvent::NightPhaseStarted(tick));
+            self.engine.input_bus.event_bus.publish(genesis_core::GlobalEvent::ConsolidationTriggered);
             self.perform_night_phase(reward, normalized_reward, layer_mask, context.surprise);
             self.emit_event(SimulationEvent::NightPhaseComplete(tick));
         }
@@ -190,31 +192,50 @@ impl Runtime {
         self.engine.backend.structural_plasticity(&mut self.engine.model, raw_reward, &reconstructed);
 
         // Memory Consolidation: Transfer episodic sequences to Titan using zero-copy downcasting
-        // We use a scope to manage borrows
-        {
-            let mut episodic_sequences = Vec::new();
-            for m in &self.engine.modules.modules {
-                if let Some(ep) = m.as_any().downcast_ref::<genesis_core::episodic::EpisodicModule>() {
-                    episodic_sequences = ep.sequences.clone();
-                    break;
-                }
+        let mut episodic_sequences = Vec::new();
+        for m in &self.engine.modules.modules {
+            if let Some(ep) = m.as_any().downcast_ref::<genesis_core::episodic::EpisodicModule>() {
+                episodic_sequences = ep.sequences.clone();
+                break;
             }
+        }
 
-            if !episodic_sequences.is_empty() {
-                for m in &mut self.engine.modules.modules {
-                    if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
-                        for seq in &episodic_sequences {
-                            titan.learn_from_sequence(seq, &self.engine.model.neurons);
-                        }
-                        break;
+        if !episodic_sequences.is_empty() {
+            for m in &mut self.engine.modules.modules {
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    for seq in &episodic_sequences {
+                        titan.learn_from_sequence(seq, &self.engine.model.neurons);
                     }
+                    break;
                 }
             }
         }
 
         self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
+
+        // Dreaming Phase: Replay episodic memory sequences to drive synaptic plasticity
+        if !episodic_sequences.is_empty() {
+             self.perform_dreaming_phase(&episodic_sequences);
+        }
+
         self.sync_modules_to_model();
         // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.
+    }
+
+    fn perform_dreaming_phase(&mut self, sequences: &[genesis_core::episodic::EpisodicSequence]) {
+        log::info!("Dreaming: replaying {} episodic sequences", sequences.len());
+        for seq in sequences {
+             for tick_active_indices in &seq.ticks {
+                  let mut inputs = vec![0i32; self.engine.model.neurons.len()];
+                  for &idx in tick_active_indices {
+                       if idx < inputs.len() {
+                            inputs[idx] = genesis_core::SCALE;
+                       }
+                  }
+                  // Internal tick without external reward, simulating internal replay
+                  self.tick(&inputs);
+             }
+        }
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {

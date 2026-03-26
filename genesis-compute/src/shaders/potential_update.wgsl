@@ -82,9 +82,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let st = neuron_states[i];
     if (st.is_remote != 0u) { return; }
 
+    // Metabolic Gating: if energy is extremely low, the neuron is 'exhausted' and skips update
+    if (st.energy_level < 50) {
+        neuron_states[i].energy_level = min(1024, st.energy_level + config.metabolic_recovery_rate * 2);
+        spikes[i] = 0u;
+        return;
+    }
+
     // Dynamic MoE: Expert Freezing
     // If all dendritic gates for this neuron are very low, skip potential calculation to save power/cycles
-    let st = neuron_states[i];
     if (st.distal_gate < 16 && st.apical_gate < 16 && st.basal_gate < 16 && dendritic_gate[i] < 16) {
         spikes[i] = 0u;
         return;

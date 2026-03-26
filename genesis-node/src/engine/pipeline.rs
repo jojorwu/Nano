@@ -14,6 +14,7 @@ pub struct PipelineContext {
     pub normalized_reward: Option<i32>,
     pub surprise: i32,
     pub start_time: Instant,
+    pub events: Vec<genesis_core::GlobalEvent>,
     /// Blackboard for inter-stage communication
     pub blackboard: std::collections::HashMap<String, f32>,
 }
@@ -30,6 +31,7 @@ impl SimulationPipeline {
                 Box::new(PropagationStage),
                 Box::new(ThinkingStage),
                 Box::new(ObservationStage),
+                Box::new(AstroStage),
                 Box::new(NeuromodulationStage),
                 Box::new(NormalizationStage),
                 Box::new(StructuralPlasticityStage::new(settings.night_phase_interval)),
@@ -58,8 +60,21 @@ impl SimulationPipeline {
     }
 
     pub fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        for stage in &mut self.stages {
+        let mut i = 0;
+        while i < self.stages.len() {
+            let stage = &mut self.stages[i];
             stage.execute(engine, context);
+
+            // Dynamic Gating Logic
+            // If high surprise is detected, certain stages might be repeated or skipped.
+            if stage.name() == "propagation" && context.surprise > 1800 {
+                 // High surprise during propagation: re-run propagation once to stabilize
+                 if !context.blackboard.contains_key("prop_retry") {
+                      context.blackboard.insert("prop_retry".to_string(), 1.0);
+                      continue; // Execute the same stage index again
+                 }
+            }
+            i += 1;
         }
     }
 }
@@ -69,6 +84,9 @@ impl PipelineStage for InputStage {
     fn name(&self) -> &str { "input" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
         engine.reset_potential_buffers();
+
+        // 0. Poll all events for this tick
+        context.events = engine.input_bus.event_bus.poll_all();
 
         // Prepare merged inputs logic
         let n_count = engine.model.neurons.len();
@@ -389,6 +407,18 @@ impl StructuralPlasticityStage {
 impl PipelineStage for StructuralPlasticityStage {
     fn name(&self) -> &str { "structural_plasticity" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        // Event-Driven Neurogenesis
+        for event in &context.events {
+             if let genesis_core::GlobalEvent::StructuralUpdate(details) = event {
+                  if details.starts_with("Neurogenesis:") {
+                       if let Ok(bid) = details.replace("Neurogenesis:", "").parse::<u32>() {
+                            log::info!("Architectural Change: Self-organizing neurogenesis in block {}", bid);
+                            genesis_core::plasticity::grow_neurons_in_block(&mut engine.model.neurons, bid, 2, 0);
+                       }
+                  }
+             }
+        }
+
         if context.tick % self.interval != 0 { return; }
 
         let reward_val = context.reward.map(|r| r as i32);
@@ -423,6 +453,34 @@ impl PipelineStage for LoadBalancingStage {
                  }
              }
          }
+    }
+}
+
+pub struct AstroStage;
+impl PipelineStage for AstroStage {
+    fn name(&self) -> &str { "astro" }
+    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
+        // Astrocytic Modulation Logic:
+        // Accumulate 'calcium' based on recent spikes and apply threshold feedback.
+        // This is a slow, spatially localized modulation.
+        let n_count = engine.model.neurons.len();
+        let inc = engine.model.config.astro.increment;
+        let decay = engine.model.config.astro.decay_rate;
+
+        // Note: For multi-compartment SNNs, astrocytes typically respond to glutamate leakage.
+        // Simplified: respond to somatic spikes.
+        for i in 0..n_count {
+            if engine.state.current_spikes_buffer[i] {
+                engine.model.neurons.astro_calcium[i] = engine.model.neurons.astro_calcium[i].saturating_add(inc);
+            } else {
+                engine.model.neurons.astro_calcium[i] = (engine.model.neurons.astro_calcium[i] as i64 * decay as i64 / 1000) as i32;
+            }
+
+            // Feedback: Calcium acts as a local threshold modulator
+            // If calcium is high, the neuron becomes harder to fire (homeostatic protection)
+            let feedback = (engine.model.neurons.astro_calcium[i] as i64 * 512 >> 10) as i32;
+            engine.model.neurons.threshold[i] = engine.model.neurons.threshold[i].saturating_add(feedback);
+        }
     }
 }
 

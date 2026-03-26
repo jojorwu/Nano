@@ -7,6 +7,9 @@ pub enum GlobalEvent {
     LowEnergy(u32),               // block_id
     HighSurprise(i32),            // surprise level
     RewardSignal(i32),            // reward value
+    ConsolidationTriggered,       // Start of Night Phase / Replay
+    ModulationShift(usize, i32),  // signal_id, delta
+    StructuralUpdate(String),     // e.g. "Neurogenesis"
     Custom(String, Vec<u8>),
 }
 
@@ -32,6 +35,10 @@ impl EventBus {
             results.push(ev);
         }
         results
+    }
+
+    pub fn clear(&self) {
+        while self.events.pop().is_some() {}
     }
 }
 

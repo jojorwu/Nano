@@ -56,6 +56,13 @@ impl NanoModule for LoadBalancerModule {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        if let crate::event::GlobalEvent::StructuralUpdate(_) = event {
+             // Force rebalance next tick if structural changes occurred
+             self.last_rebalance_tick = 0;
+        }
+    }
+
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
         self.last_rebalance_tick = tick;
     }

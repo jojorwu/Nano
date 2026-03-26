@@ -33,6 +33,16 @@ impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        if let crate::event::GlobalEvent::HighSurprise(s) = event {
+            // Adaptive Thought Depth: increase internal iteration depth during high surprise events
+            if *s > self.surprise_threshold_deep {
+                self.extra_ticks = (self.extra_ticks + 10).min(self.max_ticks);
+            }
+        }
+    }
+
     fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
     fn handle_input(&mut self, input: &ModuleInput) {
         if let ModuleInput::Control(name, val) = input {

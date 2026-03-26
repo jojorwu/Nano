@@ -53,7 +53,7 @@ mod tests {
         let engine = SimulationEngine::new(model, modules, backend, &settings).unwrap();
         let pipeline = crate::engine::pipeline::SimulationPipeline::new(&settings);
 
-        Runtime {
+        let mut rt = Runtime {
             engine,
             settings,
             pipeline,
@@ -63,7 +63,9 @@ mod tests {
             last_surprise: 0,
             surprise_history: Vec::new(),
             titan_rx: None,
-        }
+        };
+        rt.post_init().unwrap();
+        rt
     }
 
     #[test]
