@@ -313,42 +313,64 @@ impl CpuBackend {
             self.rebuild_index_internal(model);
         }
         let n_count = model.neurons.len();
+
+        // Efficiency: Bitset-based iteration to reduce branch mispredictions
         for d in 1..=16 {
             let spikes = if d == 1 { previous_spikes } else if d - 1 < history.len() { &history[d - 1] } else { continue; };
             let d_idx = (d - 1) as usize;
-            for (src, &fired) in spikes.iter().enumerate() {
-                if !fired || src >= n_count { continue; }
-                let start = self.synapse_offsets[src * 16 + d_idx] as usize;
-                let end = self.synapse_offsets[src * 16 + d_idx + 1] as usize;
-                for i in start..end {
-                    let syn_idx = self.synapse_indices_flat[i];
-                    let target = model.synapses.target_index[syn_idx] as usize;
-                    let gate = model.neurons.dendritic_gate[target];
-                    if gate < 8 { continue; }
-                    let u_facilitation = model.synapses.stp_calcium[syn_idx];
-                    let r_depression = model.synapses.stp_resources[syn_idx];
-                    let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
-                    let stp_weight = ((stp_weight as i64 * (SCALE as i64 + u_facilitation as i64)) >> 10) as i32;
-                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] as i64 * model.config.plasticity.stp_resource_decay >> 10) as i32;
-                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] as i64 + model.config.plasticity.stp_calcium_recovery as i64).min(SCALE as i64) as i32;
-                    let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
-                    match model.synapses.compartment[syn_idx] {
-                        Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
-                        Compartment::Distal => {
-                            let attn_gated = ((gated_weight as i64 * model.neurons.distal_gate[target] as i64) >> 10) as i32;
-                            model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(attn_gated);
-                        }
-                        Compartment::Apical => {
-                            let attn_gated = ((gated_weight as i64 * model.neurons.apical_gate[target] as i64) >> 10) as i32;
-                            model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(attn_gated);
-                        }
-                        Compartment::Basal => {
-                            let attn_gated = ((gated_weight as i64 * model.neurons.basal_gate[target] as i64) >> 10) as i32;
-                            model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(attn_gated);
-                        }
-                        Compartment::Custom(_) => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
-                    }
-                }
+
+            // Pack spikes into u64s for faster traversal
+            let packed_len = (spikes.len() + 63) / 64;
+            for block_idx in 0..packed_len {
+                 let mut mask = 0u64;
+                 let base = block_idx * 64;
+                 for bit in 0..64 {
+                      if base + bit < spikes.len() && spikes[base + bit] {
+                           mask |= 1 << bit;
+                      }
+                 }
+                 if mask == 0 { continue; }
+
+                 // Process set bits using trailing zero count
+                 let mut temp_mask = mask;
+                 while temp_mask != 0 {
+                      let bit_idx = temp_mask.trailing_zeros() as usize;
+                      let src = base + bit_idx;
+                      temp_mask &= !(1 << bit_idx);
+
+                      if src >= n_count { continue; }
+                      let start = self.synapse_offsets[src * 16 + d_idx] as usize;
+                      let end = self.synapse_offsets[src * 16 + d_idx + 1] as usize;
+                      for i in start..end {
+                          let syn_idx = self.synapse_indices_flat[i];
+                          let target = model.synapses.target_index[syn_idx] as usize;
+                          let gate = model.neurons.dendritic_gate[target];
+                          if gate < 8 { continue; }
+                          let u_facilitation = model.synapses.stp_calcium[syn_idx];
+                          let r_depression = model.synapses.stp_resources[syn_idx];
+                          let stp_weight = ((model.synapses.weight[syn_idx] as i64 * r_depression as i64) >> 10) as i32;
+                          let stp_weight = ((stp_weight as i64 * (SCALE as i64 + u_facilitation as i64)) >> 10) as i32;
+                          model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] as i64 * model.config.plasticity.stp_resource_decay >> 10) as i32;
+                          model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] as i64 + model.config.plasticity.stp_calcium_recovery as i64).min(SCALE as i64) as i32;
+                          let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
+                          match model.synapses.compartment[syn_idx] {
+                              Compartment::Proximal => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
+                              Compartment::Distal => {
+                                  let attn_gated = ((gated_weight as i64 * model.neurons.distal_gate[target] as i64) >> 10) as i32;
+                                  model.neurons.distal_potential[target] = model.neurons.distal_potential[target].saturating_add(attn_gated);
+                              }
+                              Compartment::Apical => {
+                                  let attn_gated = ((gated_weight as i64 * model.neurons.apical_gate[target] as i64) >> 10) as i32;
+                                  model.neurons.apical_potential[target] = model.neurons.apical_potential[target].saturating_add(attn_gated);
+                              }
+                              Compartment::Basal => {
+                                  let attn_gated = ((gated_weight as i64 * model.neurons.basal_gate[target] as i64) >> 10) as i32;
+                                  model.neurons.basal_potential[target] = model.neurons.basal_potential[target].saturating_add(attn_gated);
+                              }
+                              Compartment::Custom(_) => { model.neurons.proximal_potential[target] = model.neurons.proximal_potential[target].saturating_add(gated_weight); }
+                          }
+                      }
+                 }
             }
         }
     }

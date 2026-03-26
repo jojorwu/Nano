@@ -103,6 +103,7 @@ pub struct WgpuBackend {
     pub lr_bind_group: Option<wgpu::BindGroup>,
     pub cached_neuron_count: usize,
     pub cached_synapse_count: usize,
+    pub state_dirty: bool,
 }
 
 impl WgpuBackend {
@@ -245,7 +246,8 @@ impl WgpuBackend {
             potential_layout, gsop_layout, latent_accum_layout, latent_distrib_layout, propagation_layout, tick_layout,
             resources,
             bind_group: None, tick_bind_group: None, range_buffer: None, lr_bind_group: None,
-            cached_neuron_count: 0, cached_synapse_count: 0
+            cached_neuron_count: 0, cached_synapse_count: 0,
+            state_dirty: true,
         })
     }
 
@@ -388,40 +390,45 @@ impl ComputeBackend for WgpuBackend {
 
         let res = &mut self.resources;
 
-        // 1. Prepare buffers
-        let mut states = Vec::with_capacity(n_count);
-        for i in 0..n_count {
-            states.push(GpuNeuronState {
-                potential: model.neurons.potential[i],
-                threshold: model.neurons.threshold[i],
-                decay: model.neurons.decay[i],
-                refractory: model.neurons.refractory_timer[i],
-                next_update: model.neurons.next_update_tick[i],
-                last_spike_tick: model.neurons.last_spike_tick[i],
-                backprop_signal: model.neurons.backprop_signal[i],
-                adaptation: model.neurons.adaptation_current[i],
-                activity_ema: model.neurons.activity_ema[i],
-                base_threshold: model.neurons.base_threshold[i],
-                distal_gate: model.neurons.distal_gate[i],
-                apical_gate: model.neurons.apical_gate[i],
-                basal_gate: model.neurons.basal_gate[i],
-                block_id: model.neurons.block_id[i],
-                action: model.neurons.action_potential[i],
-                packed: model.neurons.packed_params[i],
-                plasticity_gate: model.neurons.plasticity_gate[i],
-                astro_calcium: model.neurons.astro_calcium[i],
-                is_remote: model.neurons.is_remote[i] as u32,
-                origin_node_id: model.neurons.origin_node_id[i],
-                energy_level: model.neurons.energy_level[i],
-                specialization_score: model.neurons.specialization_score[i],
-                liquid_current: model.neurons.liquid_current[i],
-                update_interval: model.neurons.update_interval[i],
-            });
+        // 1. Prepare buffers (Device-Resident: only upload if dirty or size changed)
+        let needs_upload = self.state_dirty || self.cached_neuron_count != n_count;
+        if needs_upload {
+            let mut states = Vec::with_capacity(n_count);
+            for i in 0..n_count {
+                states.push(GpuNeuronState {
+                    potential: model.neurons.potential[i],
+                    threshold: model.neurons.threshold[i],
+                    decay: model.neurons.decay[i],
+                    refractory: model.neurons.refractory_timer[i],
+                    next_update: model.neurons.next_update_tick[i],
+                    last_spike_tick: model.neurons.last_spike_tick[i],
+                    backprop_signal: model.neurons.backprop_signal[i],
+                    adaptation: model.neurons.adaptation_current[i],
+                    activity_ema: model.neurons.activity_ema[i],
+                    base_threshold: model.neurons.base_threshold[i],
+                    distal_gate: model.neurons.distal_gate[i],
+                    apical_gate: model.neurons.apical_gate[i],
+                    basal_gate: model.neurons.basal_gate[i],
+                    block_id: model.neurons.block_id[i],
+                    action: model.neurons.action_potential[i],
+                    packed: model.neurons.packed_params[i],
+                    plasticity_gate: model.neurons.plasticity_gate[i],
+                    astro_calcium: model.neurons.astro_calcium[i],
+                    is_remote: model.neurons.is_remote[i] as u32,
+                    origin_node_id: model.neurons.origin_node_id[i],
+                    energy_level: model.neurons.energy_level[i],
+                    specialization_score: model.neurons.specialization_score[i],
+                    liquid_current: model.neurons.liquid_current[i],
+                    update_interval: model.neurons.update_interval[i],
+                });
+            }
+            Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
+            self.queue.write_buffer(res.neuron_state_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&states));
+            self.state_dirty = false;
+            self.cached_neuron_count = n_count;
         }
-        Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
-        self.queue.write_buffer(res.neuron_state_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&states));
 
-        // History buffer: Pack history into u64s
+        // History buffer: Only upload if we are not maintaining it on-device
         let packed_history_len = (n_count + 63) / 64;
         let mut packed_history = vec![0u64; packed_history_len * 16];
         for (t, step) in history.iter().take(16).enumerate() {
@@ -434,8 +441,8 @@ impl ComputeBackend for WgpuBackend {
         Self::ensure_buffer(&self.device, &mut res.spike_history_buffer, "Spike History", &packed_history, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
         self.queue.write_buffer(res.spike_history_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&packed_history));
 
-        // Synapse buffers
-        if s_count > 0 {
+        // Synapse buffers: Only upload if changed (cached_synapse_count)
+        if s_count > 0 && self.cached_synapse_count != s_count {
             if Self::ensure_buffer(&self.device, &mut res.source_buffer, "Source", &model.synapses.source_index, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false) {
                  self.queue.write_buffer(res.source_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.synapses.source_index));
             }
@@ -453,6 +460,7 @@ impl ComputeBackend for WgpuBackend {
             if Self::ensure_buffer(&self.device, &mut res.delay_buffer, "Delay", &delays_u32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false) {
                  self.queue.write_buffer(res.delay_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&delays_u32));
             }
+            self.cached_synapse_count = s_count;
         }
 
         // Potential buffers (RW)
@@ -658,15 +666,12 @@ impl ComputeBackend for WgpuBackend {
             pass.dispatch_workgroups((range_len + 63) / 64, 1, 1);
         }
 
-        // 4. Read back results
+        // 4. Read back results (Efficiency: only spikes/counter)
         Self::ensure_buffer(&self.device, &mut res.staging_spikes, "Staging Spikes", &vec![0u32; n_count], wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, false);
         encoder.copy_buffer_to_buffer(res.sparse_spike_buffer.as_ref().unwrap(), 0, res.staging_spikes.as_ref().unwrap(), 0, (n_count * 4) as u64);
 
         Self::ensure_buffer(&self.device, &mut res.staging_counter, "Staging Counter", &[0u32], wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, false);
         encoder.copy_buffer_to_buffer(res.spike_counter_buffer.as_ref().unwrap(), 0, res.staging_counter.as_ref().unwrap(), 0, 4);
-
-        Self::ensure_buffer(&self.device, &mut res.staging_state, "Staging State", &states, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, false);
-        encoder.copy_buffer_to_buffer(res.neuron_state_buffer.as_ref().unwrap(), 0, res.staging_state.as_ref().unwrap(), 0, (n_count * std::mem::size_of::<GpuNeuronState>()) as u64);
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -689,29 +694,6 @@ impl ComputeBackend for WgpuBackend {
         let result_indices = indices[..spike_count].iter().map(|&i| i as usize).collect();
         drop(spikes_data);
         res.staging_spikes.as_ref().unwrap().unmap();
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        res.staging_state.as_ref().unwrap().slice(..).map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
-        self.device.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().unwrap();
-        let state_data = res.staging_state.as_ref().unwrap().slice(..).get_mapped_range();
-        let out_states: &[GpuNeuronState] = bytemuck::cast_slice(&state_data);
-        for i in 0..n_count {
-            model.neurons.potential[i] = out_states[i].potential;
-            model.neurons.threshold[i] = out_states[i].threshold;
-            model.neurons.base_threshold[i] = out_states[i].base_threshold;
-            model.neurons.refractory_timer[i] = out_states[i].refractory;
-            model.neurons.last_spike_tick[i] = out_states[i].last_spike_tick;
-            model.neurons.activity_ema[i] = out_states[i].activity_ema;
-            model.neurons.adaptation_current[i] = out_states[i].adaptation;
-            model.neurons.backprop_signal[i] = out_states[i].backprop_signal;
-            model.neurons.action_potential[i] = out_states[i].action;
-            model.neurons.astro_calcium[i] = out_states[i].astro_calcium;
-            model.neurons.energy_level[i] = out_states[i].energy_level;
-            model.neurons.specialization_score[i] = out_states[i].specialization_score;
-        }
-        drop(state_data);
-        res.staging_state.as_ref().unwrap().unmap();
 
         SpikeData::Sparse(result_indices)
     }
@@ -853,31 +835,63 @@ impl ComputeBackend for WgpuBackend {
         cpu.structural_plasticity_with_surprise(model, reward, history, block_surprise);
     }
     fn sync_state(&mut self, model: &mut BakedModel) {
-        if let Some(ref buffer) = self.resources.weight_buffer {
+        let n_count = model.neurons.len();
+        let s_count = model.synapses.len();
+        let res = &mut self.resources;
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Sync Encoder") });
+
+        // 1. Sync Weights
+        if let Some(ref buffer) = res.weight_buffer {
             let size = buffer.size();
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Weight Staging Buffer"),
-                size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            Self::ensure_buffer(&self.device, &mut res.staging_weights, "Staging Weights", &vec![0i32; s_count], wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, false);
+            encoder.copy_buffer_to_buffer(buffer, 0, res.staging_weights.as_ref().unwrap(), 0, size);
+        }
 
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Sync Encoder") });
-            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-            self.queue.submit(Some(encoder.finish()));
+        // 2. Sync Neuron States
+        if let Some(ref buffer) = res.neuron_state_buffer {
+            let size = (n_count * std::mem::size_of::<GpuNeuronState>()) as u64;
+            Self::ensure_buffer(&self.device, &mut res.staging_state, "Staging State", &vec![GpuNeuronState::zeroed(); n_count], wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, false);
+            encoder.copy_buffer_to_buffer(buffer, 0, res.staging_state.as_ref().unwrap(), 0, size);
+        }
 
-            let buffer_slice = staging.slice(..);
-            let (sender, receiver) = std::sync::mpsc::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        self.queue.submit(Some(encoder.finish()));
 
+        // Polling and retrieval
+        if let Some(ref staging) = res.staging_weights {
+            let (tx, rx) = std::sync::mpsc::channel();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
             self.device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let data = staging.slice(..).get_mapped_range();
+            model.synapses.weight.copy_from_slice(bytemuck::cast_slice(&data));
+            drop(data);
+            staging.unmap();
+        }
 
-            if let Ok(Ok(())) = receiver.recv() {
-                let data = buffer_slice.get_mapped_range();
-                model.synapses.weight.copy_from_slice(bytemuck::cast_slice(&data));
-                drop(data);
-                staging.unmap();
+        if let Some(ref staging) = res.staging_state {
+            let (tx, rx) = std::sync::mpsc::channel();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+            self.device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let data = staging.slice(..).get_mapped_range();
+            let out_states: &[GpuNeuronState] = bytemuck::cast_slice(&data);
+            for i in 0..n_count {
+                model.neurons.potential[i] = out_states[i].potential;
+                model.neurons.threshold[i] = out_states[i].threshold;
+                model.neurons.base_threshold[i] = out_states[i].base_threshold;
+                model.neurons.refractory_timer[i] = out_states[i].refractory;
+                model.neurons.last_spike_tick[i] = out_states[i].last_spike_tick;
+                model.neurons.activity_ema[i] = out_states[i].activity_ema;
+                model.neurons.adaptation_current[i] = out_states[i].adaptation;
+                model.neurons.backprop_signal[i] = out_states[i].backprop_signal;
+                model.neurons.action_potential[i] = out_states[i].action;
+                model.neurons.astro_calcium[i] = out_states[i].astro_calcium;
+                model.neurons.energy_level[i] = out_states[i].energy_level;
+                model.neurons.specialization_score[i] = out_states[i].specialization_score;
             }
+            drop(data);
+            staging.unmap();
         }
     }
 }
