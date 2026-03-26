@@ -33,6 +33,8 @@ pub struct BitWiseTitan {
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
+    /// Cached mapping from neuron index to block_id
+    pub neuron_to_block: Vec<u32>,
     // Configurable Limits
     pub max_associations: usize,
     pub max_blocks: u32,
@@ -85,6 +87,7 @@ impl BitWiseTitan {
             memory_mapped_range: None,
             block_utility: vec![0.0; size.max(64)],
             last_access: vec![0; size.max(64)],
+            neuron_to_block: Vec::new(),
             script_sequences: Vec::new(),
             active_scripts: Vec::new(),
             max_associations: 1_000_000,
@@ -155,8 +158,10 @@ impl BitWiseTitan {
         for (i, sig) in l1.iter_mut().enumerate() {
             let mut h = 0u64;
             for (j, &w) in pattern.iter().enumerate() {
-                // Coarse projection (shifts bits to reduce sensitivity)
-                h ^= (w >> 4).wrapping_mul(0xbf58476d1ce4e5b9 ^ (i as u64) ^ (j as u64));
+                // Coarse projection: use bitCount for similarity-based hashing
+                let pop = w.count_ones() as u64;
+                h ^= pop.wrapping_mul(0xbf58476d1ce4e5b9 ^ (i as u64) ^ (j as u64));
+                h = h.rotate_left(5);
             }
             *sig = (h ^ (h >> 32)) as u32;
         }
@@ -298,14 +303,27 @@ impl BitWiseTitan {
         if surprise < effective_threshold || history.len() < 2 || history[h_ptr].is_empty() { return; }
 
         let n_count = neurons.len();
-        let now = history[h_ptr].to_bitpacked(n_count);
+        let now_packed = history[h_ptr].to_bitpacked(n_count);
+
+        // Pre-extract active indices for "now" to avoid scanning in nested loops
+        let mut now_active = Vec::new();
+        for (i, &word) in now_packed.iter().enumerate() {
+            if word == 0 { continue; }
+            for bit in 0..64 {
+                if (word >> bit) & 1 == 1 {
+                    let idx = (i * 64 + bit) as u32;
+                    if (idx as usize) < n_count { now_active.push(idx); }
+                }
+            }
+        }
+        if now_active.is_empty() { return; }
 
         // 3. Elastic Temporal Window
         let search_depth = if surprise > 1000 { self.elastic_window_max } else if surprise > 500 { self.elastic_window_max / 2 } else { 2 };
         let search_depth = search_depth.min(history.len());
 
         // 4. Update Associations
-        self.perform_temporal_learning(history, h_ptr, &now, search_depth, neurons, surprise);
+        self.perform_temporal_learning_optimized(history, h_ptr, &now_packed, &now_active, search_depth, neurons, surprise);
 
         // 5. Global Memory Maintenance
         if surprise > 500 { self.decay_associations(); }
@@ -334,21 +352,21 @@ impl BitWiseTitan {
         }
     }
 
-    fn perform_temporal_learning(&mut self, history: &[crate::SpikeData], h_ptr: usize, now: &[u64], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
+    fn perform_temporal_learning_optimized(&mut self, history: &[crate::SpikeData], h_ptr: usize, now_packed: &[u64], now_active: &[u32], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
         let n_count = neurons.len();
-        let current_hash = Self::compute_context_hash(now);
-        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now);
+        let current_hash = Self::compute_context_hash(now_packed);
+        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now_packed);
 
         for t in 1..depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
-            let past = history[past_idx].to_bitpacked(n_count);
-            let bound = Self::vsa_bind(now, &past);
+            let past_packed = history[past_idx].to_bitpacked(n_count);
+            let bound = Self::vsa_bind(now_packed, &past_packed);
             let bound_hash = Self::compute_context_hash(&bound);
 
             let reinforcement = if t == 1 { 2 } else { 1 };
             let reduction_bonus = if surprise < 100 { 5 } else { 0 };
 
-            for (i, &past_word) in past.iter().enumerate() {
+            for (i, &past_word) in past_packed.iter().enumerate() {
                 if past_word == 0 { continue; }
                 for bit in 0..64 {
                     if (past_word >> bit) & 1 == 1 {
@@ -361,25 +379,18 @@ impl BitWiseTitan {
                         let mut entries = self.get_block_mut(src_bid);
                         let mut changed = false;
 
-                        for (j, &now_word) in now.iter().enumerate() {
-                            if now_word == 0 { continue; }
-                            for now_bit in 0..64 {
-                                if (now_word >> now_bit) & 1 == 1 {
-                                    let tgt_idx = (j * 64 + now_bit) as u32;
-                                    if tgt_idx as usize >= n_count { continue; }
-                                    let tgt_modality = neurons.layer_id[tgt_idx as usize] >> 12;
-                                    let synesthesia_bonus = if src_modality != tgt_modality { 2 } else { 0 };
+                        for &tgt_idx in now_active {
+                            let tgt_modality = neurons.layer_id[tgt_idx as usize] >> 12;
+                            let synesthesia_bonus = if src_modality != tgt_modality { 2 } else { 0 };
 
-                                    if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
-                                        let boost = if surprise > 1500 { 5 } else { 0 };
-                                        assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
-                                        changed = true;
-                                    } else if entries.len() < self.max_entries_per_block {
-                                        let boost = if surprise > 1500 { 10 } else { 0 };
-                                        entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
-                                        changed = true;
-                                    }
-                                }
+                            if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
+                                let boost = if surprise > 1500 { 5 } else { 0 };
+                                assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
+                                changed = true;
+                            } else if entries.len() < self.max_entries_per_block {
+                                let boost = if surprise > 1500 { 10 } else { 0 };
+                                entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
+                                changed = true;
                             }
                         }
                         if changed {
@@ -410,6 +421,11 @@ impl NanoModule for BitWiseTitan {
     fn name(&self) -> &str { "titan" }
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
+
+    fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::ModuleError> {
+        self.neuron_to_block = neurons.block_id.clone();
+        Ok(())
+    }
 
     fn on_config_sync(&mut self, config: &crate::NetworkConfig) {
         self.max_associations = config.titan.max_associations;
@@ -586,13 +602,15 @@ impl NanoModule for BitWiseTitan {
         // For now, we utilize the fact that previous_spikes is often sparse.
         let mut triggered_blocks = std::collections::HashSet::new();
 
-        // Heuristic: trigger blocks based on individual neuron firing.
-        // The block_id information is ideally stored in NeuronsSoA, but on_tick only receives spikes.
-        // We assume a default block size of 16 for triggered retrieval if no better info is available.
+        // Optimized: trigger blocks based on individual neuron firing using cached mapping.
         for (i, &fired) in previous_spikes.iter().enumerate() {
             if fired {
-                let bid = (i / 16) as u32; // Updated heuristic: block size 16
-                triggered_blocks.insert(bid);
+                if i < self.neuron_to_block.len() {
+                    triggered_blocks.insert(self.neuron_to_block[i]);
+                } else {
+                    // Fallback heuristic if mapping is missing
+                    triggered_blocks.insert((i / 16) as u32);
+                }
             }
         }
 

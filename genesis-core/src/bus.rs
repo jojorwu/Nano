@@ -181,10 +181,12 @@ impl InputBus {
     }
 
     pub fn atomic_saturating_add(target: &AtomicI32, val: i32) {
+        if val == 0 { return; }
         let mut current = target.load(Ordering::Relaxed);
         loop {
             let next = current.saturating_add(val);
-            match target.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::Relaxed) {
+            if next == current { break; } // Optimization: no change needed
+            match target.compare_exchange_weak(current, next, Ordering::Acquire, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(updated) => current = updated,
             }

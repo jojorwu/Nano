@@ -13,13 +13,13 @@ pub struct WorkspaceModule {
     /// Persistence of ignition (ticks remaining)
     pub ignition_timer: u32,
     /// Last activity per block for competition
-    pub block_activity: std::collections::HashMap<u32, f32>,
+    pub block_activity: Vec<f32>,
     /// Broadcasting strength
     pub broadcast_intensity: IValue,
     /// Minimum activity to trigger ignition
     pub ignition_threshold: f32,
     /// Per-block lists of neuron indices for efficient broadcasting
-    pub block_to_neurons: std::collections::HashMap<u32, Vec<u32>>,
+    pub block_to_neurons: Vec<Vec<u32>>,
 }
 
 impl WorkspaceModule {
@@ -27,10 +27,10 @@ impl WorkspaceModule {
         Self {
             active_block: None,
             ignition_timer: 0,
-            block_activity: std::collections::HashMap::new(),
+            block_activity: Vec::new(),
             broadcast_intensity: SCALE / 2, // 0.5 intensity
             ignition_threshold: 10.0,
-            block_to_neurons: std::collections::HashMap::new(),
+            block_to_neurons: Vec::new(),
         }
     }
 }
@@ -41,9 +41,14 @@ impl NanoModule for WorkspaceModule {
     fn outputs(&self) -> Vec<String> { vec!["broadcast".to_string()] }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
-        self.block_to_neurons.clear();
+        let max_bid = neurons.block_id.iter().max().copied().unwrap_or(0) as usize;
+        self.block_to_neurons = vec![Vec::new(); max_bid + 1];
+        self.block_activity = vec![0.0; max_bid + 1];
+
         for (i, &bid) in neurons.block_id.iter().enumerate() {
-            self.block_to_neurons.entry(bid).or_default().push(i as u32);
+            if (bid as usize) < self.block_to_neurons.len() {
+                self.block_to_neurons[bid as usize].push(i as u32);
+            }
         }
         Ok(())
     }
@@ -54,7 +59,8 @@ impl NanoModule for WorkspaceModule {
 
             // 2. Broadcast: Inject active block's pattern (Targeted neurons only)
             if let Some(bid) = self.active_block {
-                if let Some(neurons) = self.block_to_neurons.get(&bid) {
+                if (bid as usize) < self.block_to_neurons.len() {
+                    let neurons = &self.block_to_neurons[bid as usize];
                     let prox = bus.proximal();
                     for &idx in neurons {
                         if (idx as usize) < prox.len() {
@@ -70,10 +76,10 @@ impl NanoModule for WorkspaceModule {
             let mut winner = None;
             let mut max_act = self.ignition_threshold;
 
-            for (bid, &act) in &self.block_activity {
+            for (bid, &act) in self.block_activity.iter().enumerate() {
                 if act > max_act {
                     max_act = act;
-                    winner = Some(*bid);
+                    winner = Some(bid as u32);
                 }
             }
 
@@ -85,18 +91,20 @@ impl NanoModule for WorkspaceModule {
         }
 
         // Decay block activity
-        for act in self.block_activity.values_mut() {
+        for act in &mut self.block_activity {
             *act *= 0.9;
         }
     }
 
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {
         // Monitor current activity to update competition state
+        if self.block_activity.is_empty() { return; }
         for i in 0..neurons.len() {
             if current_spikes[i] {
-                let bid = neurons.block_id[i];
-                let entry = self.block_activity.entry(bid).or_insert(0.0);
-                *entry += 1.0;
+                let bid = neurons.block_id[i] as usize;
+                if bid < self.block_activity.len() {
+                    self.block_activity[bid] += 1.0;
+                }
             }
         }
     }

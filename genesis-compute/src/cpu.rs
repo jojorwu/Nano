@@ -59,8 +59,15 @@ impl CpuBackend {
                 *n.adaptation_current.add(i) + astro_mod
             );
 
-            let refr_mult = if *n.refractory_timer.add(i) > 0 { 1 + (1 << *n.refractory_timer.add(i)) } else { 1 };
-            let mut effective_threshold = *n.threshold.add(i) * refr_mult;
+            // Refractory Multiplier: exponential threshold increase during refractory period
+            let refr_timer = *n.refractory_timer.add(i);
+            let refr_mult = if refr_timer > 0 {
+                 // Clamp timer to avoid extreme shifts (max 16x threshold)
+                 1 + (1 << refr_timer.min(4))
+            } else {
+                 1
+            };
+            let mut effective_threshold = (*n.threshold.add(i)).saturating_mul(refr_mult);
 
             let theta = if model.config.physics.theta_rhythm {
                  ((current_tick as f32 * model.config.physics.theta_frequency).sin() * 200.0) as i32
@@ -75,19 +82,35 @@ impl CpuBackend {
                 *n.last_spike_tick.add(i) = current_tick;
                 *n.backprop_signal.add(i) = SCALE;
                 *n.action_potential.add(i) = SCALE;
+
+                // IP (Intrinsic Plasticity): Increment threshold upon firing
                 *n.threshold.add(i) = (*n.threshold.add(i)).saturating_add(ip_inc);
+
+                // EMA Activity tracking
                 let alpha = model.config.physics.activity_ema_alpha as i32;
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
+
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i)).saturating_add(100);
                 *n.astro_calcium.add(i) = (*n.astro_calcium.add(i)).saturating_add(model.config.astro.increment);
             } else {
                 *n.potential.add(i) = current_pot;
-                if *n.refractory_timer.add(i) > 0 { *n.refractory_timer.add(i) -= 1; }
-                if *n.threshold.add(i) > *n.base_threshold.add(i) { *n.threshold.add(i) = (*n.threshold.add(i)).saturating_sub(ip_dec); }
-                *n.backprop_signal.add(i) = ((*n.backprop_signal.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
-                *n.action_potential.add(i) = ((*n.action_potential.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+
+                if *n.refractory_timer.add(i) > 0 {
+                     *n.refractory_timer.add(i) -= 1;
+                }
+
+                // IP Decay: threshold slowly returns to baseline
+                if *n.threshold.add(i) > *n.base_threshold.add(i) {
+                     *n.threshold.add(i) = (*n.threshold.add(i)).saturating_sub(ip_dec);
+                }
+
+                let smbp_decay = model.config.physics.smbp_decay;
+                *n.backprop_signal.add(i) = ((*n.backprop_signal.add(i) as i64 * smbp_decay) >> 10) as i32;
+                *n.action_potential.add(i) = ((*n.action_potential.add(i) as i64 * smbp_decay) >> 10) as i32;
+
                 let alpha = model.config.physics.activity_ema_alpha as i32;
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64) / 1000) as i32;
+
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i) * 95) / 100;
                 *n.astro_calcium.add(i) = ((*n.astro_calcium.add(i) as i64 * model.config.astro.decay_rate) / 1000) as i32;
 
