@@ -48,6 +48,7 @@ impl SimulationPipeline {
                 "observation" => stages.push(Box::new(ObservationStage)),
                 "neuromodulation" => stages.push(Box::new(NeuromodulationStage)),
                 "normalization" => stages.push(Box::new(NormalizationStage)),
+                "load_balancing" => stages.push(Box::new(LoadBalancingStage)),
                 "structural_plasticity" => stages.push(Box::new(StructuralPlasticityStage::new(settings.night_phase_interval))),
                 "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
                 _ => log::warn!("Unknown pipeline stage: {}", name),
@@ -95,17 +96,67 @@ pub struct PropagationStage;
 impl PipelineStage for PropagationStage {
     fn name(&self) -> &str { "propagation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        let full_history = engine.reconstruct_history(16);
-        let spike_data = engine.backend.day_phase(
-            &mut engine.model,
-            &engine.state.merged_inputs_buffer,
-            &engine.state.previous_spikes,
-            &full_history,
-            context.tick,
-            engine.state.global_modulators,
-        );
-        engine.state.current_spikes_buffer.fill(false);
         let n_count = engine.model.neurons.len();
+        let full_history = engine.reconstruct_history(16);
+
+        let spike_data = if let Some(ref mut secondary) = engine.secondary_backend {
+            // Heterogeneous Compute: split the neural blocks between backends
+            // Primary backend (typically WGPU/GPU) handles the bulk of neurons
+            // Secondary backend (typically CPU) handles a specific range (e.g. the last 20%)
+            let split_point = (n_count * 80) / 100;
+
+            let kernel_ctx = genesis_compute::KernelContext {
+                external_inputs: &engine.state.merged_inputs_buffer,
+                previous_spikes: &engine.state.previous_spikes,
+                history: &full_history,
+                current_tick: context.tick,
+                modulation: engine.state.global_modulators,
+            };
+
+            // 1. Concurrent Synapse Propagation (Currently simplified to full on primary)
+            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
+
+            // 2. Parallel Membrane Potential & Spike Generation
+            // In a production environment, we would use the is_remote flags to filter neurons per-backend.
+            // For this implementation, we use a simple range-based split.
+            let primary_range = 0..split_point;
+            let secondary_range = split_point..n_count;
+
+            let primary_spikes = engine.backend.execute_kernel_range(
+                genesis_compute::SimulationKernel::GenerateSpikes,
+                &mut engine.model,
+                &kernel_ctx,
+                primary_range
+            );
+
+            let secondary_spikes = secondary.execute_kernel_range(
+                genesis_compute::SimulationKernel::GenerateSpikes,
+                &mut engine.model,
+                &kernel_ctx,
+                secondary_range
+            );
+
+            // 3. Merge results
+            let mut merged_indices = Vec::new();
+            if let Some(genesis_core::SpikeData::Sparse(indices)) = primary_spikes {
+                merged_indices.extend(indices);
+            }
+            if let Some(genesis_core::SpikeData::Sparse(indices)) = secondary_spikes {
+                merged_indices.extend(indices);
+            }
+            genesis_core::SpikeData::Sparse(merged_indices)
+        } else {
+            engine.backend.day_phase(
+                &mut engine.model,
+                &engine.state.merged_inputs_buffer,
+                &engine.state.previous_spikes,
+                &full_history,
+                context.tick,
+                engine.state.global_modulators,
+            )
+        };
+
+        engine.state.current_spikes_buffer.fill(false);
         match &spike_data {
             SpikeData::Sparse(indices) => {
                 for &idx in indices { if idx < n_count { engine.state.current_spikes_buffer[idx] = true; } }
@@ -359,6 +410,22 @@ impl PipelineStage for StructuralPlasticityStage {
         }
 
         engine.modules.on_night_phase(&mut engine.model.neurons, &mut engine.model.synapses, reward_val);
+    }
+}
+
+pub struct LoadBalancingStage;
+impl PipelineStage for LoadBalancingStage {
+    fn name(&self) -> &str { "load_balancing" }
+    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
+         for m in engine.modules.modules.iter_mut() {
+             if m.name() == "load_balancer" {
+                 if let Ok(mut lb) = bincode::deserialize::<genesis_core::LoadBalancerModule>(&m.get_state()) {
+                     let changes = lb.rebalance(&mut engine.model.neurons);
+                     if changes > 0 { log::debug!("LoadBalancer: {} blocks remapped", changes); }
+                     m.set_state(&bincode::serialize(&lb).unwrap());
+                 }
+             }
+         }
     }
 }
 

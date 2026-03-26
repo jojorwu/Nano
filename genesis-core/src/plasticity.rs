@@ -1,10 +1,14 @@
 use crate::{SynapsesSoA, IValue, WEIGHT_CLAMP_LIMIT};
 
 pub fn clamp_and_preserve_sign(weight: &mut IValue, old_weight: IValue) {
+    clamp_and_preserve_sign_with_limit(weight, old_weight, WEIGHT_CLAMP_LIMIT);
+}
+
+pub fn clamp_and_preserve_sign_with_limit(weight: &mut IValue, old_weight: IValue, limit: IValue) {
     if old_weight > 0 && *weight < 0 { *weight = 1; }
     if old_weight < 0 && *weight > 0 { *weight = -1; }
-    if *weight > WEIGHT_CLAMP_LIMIT { *weight = WEIGHT_CLAMP_LIMIT; }
-    if *weight < -WEIGHT_CLAMP_LIMIT { *weight = -WEIGHT_CLAMP_LIMIT; }
+    if *weight > limit { *weight = limit; }
+    if *weight < -limit { *weight = -limit; }
 }
 
 pub struct StdpRule {
@@ -139,7 +143,7 @@ impl crate::PlasticityRule for StdpRule {
             *weight = weight.saturating_sub(delta);
         }
 
-        clamp_and_preserve_sign(weight, weight_before);
+        clamp_and_preserve_sign_with_limit(weight, weight_before, ctx.config.plasticity.weight_clamp_limit);
     }
 }
 
@@ -159,11 +163,19 @@ impl Default for StructuralPlasticityConfig {
     }
 }
 
-pub fn prune_synapses(synapses: &mut SynapsesSoA, threshold: IValue) -> usize {
+pub fn prune_synapses(synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, threshold: IValue) -> usize {
     let mut pruned = 0;
     let mut i = 0;
     while i < synapses.len() {
-        if synapses.weight[i].abs() < threshold {
+        let target = synapses.target_index[i] as usize;
+        let mut should_prune = synapses.weight[i].abs() < threshold;
+
+        // Metabolic Pruning: if target neuron is starving (low energy), prune incoming connections
+        if target < neurons.len() && neurons.energy_level[target] < 100 {
+            should_prune = true;
+        }
+
+        if should_prune {
             synapses.remove(i);
             pruned += 1;
         } else {
@@ -395,10 +407,11 @@ mod tests {
 
     #[test]
     fn test_pruning() {
+        let neurons = NeuronsSoA::new(3);
         let mut synapses = SynapsesSoA::with_capacity(10);
         synapses.push(0, 1, 100);
         synapses.push(1, 2, 5);
-        let pruned = prune_synapses(&mut synapses, 10);
+        let pruned = prune_synapses(&mut synapses, &neurons, 10);
         assert_eq!(pruned, 1);
         assert_eq!(synapses.len(), 1);
     }
@@ -410,15 +423,18 @@ mod tests {
         let mut weight = 1024;
         let neurons = NeuronsSoA::new(1);
 
+        let config = crate::NetworkConfig::default();
         // LTP: pre=5, post=8 (diff=3)
         let ctx = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),
             pre_last_spike: 5, post_last_spike: 8, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight, &ctx);
         assert!(weight > 1024);
@@ -427,12 +443,14 @@ mod tests {
         let mut weight2 = 1024;
         let ctx2 = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: crate::NeuromodulationState::default(),
             pre_last_spike: 8, post_last_spike: 5, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight2, &ctx2);
         assert!(weight2 < 1024);

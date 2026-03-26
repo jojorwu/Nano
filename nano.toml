@@ -1,9 +1,62 @@
+[network.physics]
+default_threshold = 1024
+default_decay = 50
+default_refractory_ticks = 4
+noise_amplitude = 50
+smbp_decay = 800
+activity_ema_alpha = 990
+target_activity_level = 100
+dendritic_coincidence_threshold = 512
+theta_rhythm = true
+
+[network.plasticity]
+learning_rate = 42
+weight_clamp_limit = 5120
+metaplasticity_enabled = true
+max_synapses = 1000000
+max_neurons = 100000
+neurogenesis_reward_threshold = 200
+pruning_threshold = 10
+homeostatic_scaling_limit = 32768
+stdp_tau = 20
+stdp_a_plus = 100
+stdp_a_minus = 100
+ip_increment = 50
+ip_decay = 1
+intrinsic_learning_rate = 5
+stp_resource_decay = 800
+stp_calcium_decay = 95
+stp_resource_recovery = 99
+stp_calcium_recovery = 200
+
+[network.titan]
+byte_memory_size = 1048576
+max_associations = 2000000
+max_blocks = 1000000
+max_entries_per_block = 256
+surprise_threshold = 100
+deep_replay_threshold = 1500
+elastic_window_max = 32
+decay_rate = 1
+
+[network.modules]
+think_max_ticks = 200
+think_surprise_threshold_deep = 1500
+think_surprise_threshold_low = 100
+workspace_broadcast_intensity = 512
+workspace_ignition_threshold = 10.0
+hierarchical_control_enabled = true
+top_down_gain = 256
+
+[network.astro]
+increment = 50
+decay_rate = 990
+
+[network.hardware]
+preferred_backend = "cpu"
+
 [simulation]
 checkpoint_interval = 1000
 night_phase_interval = 100
+preferred_backend = "cpu"
 save_on_exit = true
-
-[network]
-default_threshold = 1024
-learning_rate = 10
-neurogenesis_reward_threshold = 200

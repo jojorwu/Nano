@@ -71,6 +71,7 @@ impl Runtime {
     }
 
     pub fn post_init(&mut self) -> Result<(), genesis_core::ModuleError> {
+        self.engine.modules.on_config_sync(&self.engine.model.config);
         self.engine.modules.on_init(&mut self.engine.model.neurons)
     }
 
@@ -147,6 +148,7 @@ impl Runtime {
 
         self.engine.state.previous_spikes.copy_from_slice(&self.engine.state.current_spikes_buffer);
         self.broadcast_ghost_spikes(&self.engine.state.previous_spikes);
+        self.poll_remote_spikes();
         self.poll_remote_titan();
         self.engine.state.previous_spikes.clone()
     }
@@ -230,6 +232,18 @@ impl Runtime {
         self.tick_with_reward(external_inputs, None)
     }
 
+    fn poll_remote_spikes(&mut self) {
+        if let Ok(mut queue) = self.engine.remote_spike_queue.lock() {
+            let n_count = self.engine.model.neurons.len();
+            for &idx in queue.iter() {
+                if idx < n_count && self.engine.model.neurons.is_remote[idx] != 0 {
+                    self.engine.state.current_spikes_buffer[idx] = true;
+                }
+            }
+            queue.clear();
+        }
+    }
+
     pub fn inject_text(&mut self, text: &str) {
         let input = genesis_core::ModuleInput::Text(text.to_string());
         for m in &mut self.engine.modules.modules {
@@ -262,8 +276,17 @@ impl Runtime {
 
     pub fn reload_settings(&mut self, path: &str) -> Result<(), RuntimeError> {
         let content = std::fs::read_to_string(path)?;
-        let new_settings: SimulationSettings = serde_json::from_str(&content)?;
-        self.settings = new_settings;
+        let config: crate::commands::GlobalConfig = toml::from_str(&content).map_err(|e| RuntimeError::ModelLoad(e.to_string()))?;
+
+        if let Some(sim) = config.simulation {
+            self.settings = sim;
+        }
+
+        if let Some(net) = config.network {
+             self.engine.model.config = net;
+             self.engine.modules.on_config_sync(&self.engine.model.config);
+        }
+
         log::info!("Simulation settings reloaded from {}", path);
         Ok(())
     }
@@ -379,3 +402,5 @@ impl Runtime {
 mod tests;
 #[cfg(test)]
 mod tests_advanced;
+#[cfg(test)]
+mod tests_scenarios;

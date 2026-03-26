@@ -34,6 +34,13 @@ pub trait ComputeBackend {
     /// the simulation steps more flexibly.
     fn execute_kernel(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext) -> Option<SpikeData>;
 
+    /// Executes a simulation kernel on a specific range of neurons/synapses.
+    /// This enables heterogeneous compute by splitting the workload between backends.
+    fn execute_kernel_range(&mut self, kernel: SimulationKernel, model: &mut BakedModel, context: &KernelContext, _range: std::ops::Range<usize>) -> Option<SpikeData> {
+        // Default implementation fallbacks to full execution if range-splitting is not supported by the backend
+        self.execute_kernel(kernel, model, context)
+    }
+
     /// Executes the main simulation kernels for a single tick:
     /// spike propagation, multi-compartment potential integration, and spike generation.
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData;
@@ -73,6 +80,12 @@ pub trait ComputeBackend {
 
     /// Weight update with neuromodulatory context (Dopamine/Noradrenaline signals).
     fn update_weights_modulated(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: NeuromodulationState, history: &[Vec<bool>]);
+
+    /// Range-based weight update.
+    fn update_weights_range(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, modulation: NeuromodulationState, history: &[Vec<bool>], _range: std::ops::Range<usize>) {
+        // Default fallback to full update
+        self.update_weights_modulated(model, previous_spikes, current_spikes, current_tick, reward, modulation, history)
+    }
 
     /// Performs large-scale structural changes (pruning, neurogenesis, and SNNaS optimization).
     fn structural_plasticity(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>]);
@@ -180,7 +193,13 @@ mod tests {
     fn test_backend_parity() {
         let model = BakedModel {
             version: "4.2".to_string(),
-            config: genesis_core::NetworkConfig { learning_rate: 100, ..Default::default() },
+            config: genesis_core::NetworkConfig {
+                plasticity: genesis_core::PlasticityConfig {
+                    learning_rate: 100,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             node_id: 0,
             local_range: (0, 2),
             neurons: {

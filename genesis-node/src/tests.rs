@@ -17,7 +17,7 @@ mod tests {
 
     fn create_test_runtime_internal(n_count: usize, backend_name: &str, with_observer: bool) -> Runtime {
         let mut config = genesis_core::NetworkConfig::default();
-        config.noise_amplitude = 0; // High precision parity requires deterministic environment
+        config.physics.noise_amplitude = 0; // High precision parity requires deterministic environment
 
         let model = BakedModel {
             version: "4.2".to_string(),
@@ -51,7 +51,7 @@ mod tests {
         observers.push(Box::new(Telemetry::default()));
 
         Runtime {
-            engine: SimulationEngine::new(model, modules, backend, &settings),
+            engine: SimulationEngine::new(model, modules, backend, &settings).unwrap(),
             settings,
             episode_reward_history: Vec::new(),
             network_manager: None,
@@ -207,17 +207,20 @@ mod tests {
         let stdp = StdpRule { tau: 10, a_plus: 100, a_minus: 100, reward_scale: 1024 };
         let mut neurons = NeuronsSoA::new(1);
 
+        let config = genesis_core::NetworkConfig::default();
         // Low activity -> should result in larger weight increase
         neurons.activity_ema[0] = 50;
         let mut weight_low = 1000;
         let ctx_low = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: Default::default(),
             pre_last_spike: 5, post_last_spike: 7, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight_low, &ctx_low);
         let delta_low = weight_low - 1000;
@@ -227,12 +230,14 @@ mod tests {
         let mut weight_high = 1000;
         let ctx_high = PlasticityContext {
             pre_spiked: true, post_spiked: true, backprop_signal: 0,
+            prediction_error: 0,
             compartment: Compartment::Proximal,
             reward: None,
             neuromodulation: Default::default(),
             pre_last_spike: 5, post_last_spike: 7, current_tick: 10,
             post_index: 0,
             neurons: &neurons,
+            config: &config,
         };
         stdp.apply(&mut weight_high, &ctx_high);
         let delta_high = weight_high - 1000;
@@ -288,7 +293,7 @@ mod tests {
         runtime.engine.model.neurons.threshold[0] = 500;
         runtime.engine.model.neurons.base_threshold[0] = 500;
         runtime.engine.model.neurons.decay[0] = 0;
-        runtime.engine.model.config.ip_increment = 0;
+        runtime.engine.model.config.plasticity.ip_increment = 0;
         runtime.engine.model.neurons.dendritic_gate[0] = 1024;
 
         // Tick 1: Input 2000 -> Fires. Adaptation -> 100.

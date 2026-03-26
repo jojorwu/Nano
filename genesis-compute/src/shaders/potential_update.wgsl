@@ -15,6 +15,14 @@ struct NeuronState {
     block_id: u32,
     action: i32,
     packed: vec2<u32>, // u64 mirror
+    plasticity_gate: i32,
+    astro_calcium: i32,
+    is_remote: u32,
+    origin_node_id: u32,
+    energy_level: i32,
+    specialization_score: f32,
+    liquid_current: i32,
+    update_interval: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> neuron_states: array<NeuronState>;
@@ -24,9 +32,11 @@ struct NeuronState {
 @group(0) @binding(4) var<storage, read> basal_potentials: array<i32>;
 
 struct Config {
-    ip_increment: i32,
-    ip_decay: i32,
     noise_amplitude: i32,
+    theta_rhythm: i32,
+    intrinsic_learning_rate: i32,
+    metabolic_spike_cost: i32,
+    metabolic_recovery_rate: i32,
 }
 @group(0) @binding(5) var<storage, read> config: Config;
 @group(0) @binding(6) var<storage, read_write> spikes: array<u32>;
@@ -37,6 +47,8 @@ struct Config {
 @group(0) @binding(11) var<storage, read> dendritic_gate: array<i32>;
 @group(0) @binding(12) var<storage, read> gate_thresholds: array<i32>;
 @group(0) @binding(13) var<storage, read> expert_mask: array<u32>;
+@group(0) @binding(14) var<storage, read_write> segment_potentials: array<i32>;
+@group(0) @binding(15) var<storage, read> segment_gates: array<i32>;
 
 struct Modulation {
     dopamine: i32,
@@ -45,6 +57,12 @@ struct Modulation {
 }
 @group(0) @binding(23) var<uniform> modulation: Modulation;
 @group(1) @binding(0) var<uniform> current_tick: u32;
+
+struct Range {
+    start: u32,
+    end: u32,
+}
+@group(1) @binding(1) var<uniform> exec_range: Range;
 
 fn xorshift(seed: u32) -> u32 {
     var x = seed;
@@ -58,6 +76,10 @@ fn xorshift(seed: u32) -> u32 {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= arrayLength(&neuron_states)) { return; }
+    if (i < exec_range.start || i >= exec_range.end) { return; }
+
+    let st = neuron_states[i];
+    if (st.is_remote != 0u) { return; }
 
     // Dynamic MoE: Expert Freezing
     // If all dendritic gates for this neuron are very low, skip potential calculation to save power/cycles
@@ -110,8 +132,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
          noise = i32(xorshift(seed) % (amplitude * 2u)) - i32(amplitude);
     }
 
-    var pot = neuron_states[i].potential + gated_input + proximal + dist_gated + apical_gated + noise - neuron_states[i].adaptation;
+    // Multi-Segment Dendrites: sum up segments
+    var segments_sum = 0;
+    for (var s = 0u; s < 4u; s = s + 1u) {
+        let seg_idx = i * 4u + s;
+        segments_sum = segments_sum + ((segment_potentials[seg_idx] * segment_gates[seg_idx]) >> 10);
+        // SMBP backprop to segments
+        segment_potentials[seg_idx] = (segment_potentials[seg_idx] * 800) >> 10;
+    }
+
+    // Theta Rhythm: global oscillation gating
+    var theta_gate = 1024;
+    if (config.theta_rhythm > 0) {
+        let phase = (current_tick % 16u);
+        if (phase < 4u || phase > 12u) { theta_gate = 512; }
+    }
+
+    var pot = neuron_states[i].potential + gated_input + proximal + dist_gated + apical_gated + segments_sum + noise - neuron_states[i].adaptation;
     pot = (pot * mod_factor) >> 10;
+    pot = (pot * theta_gate) >> 10;
+
+    // Metabolic Economy: potential leaks faster if energy is low
+    let energy_mult = max(128, neuron_states[i].energy_level);
+    pot = (pot * energy_mult) >> 10;
 
     let liquid_mod = ((abs(proximal) + abs(distal_potentials[i])) * 10) >> 10;
     let final_decay = max(1, neuron_states[i].decay - liquid_mod);
@@ -136,13 +179,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (count < arrayLength(&sparse_spikes)) {
             sparse_spikes[count] = i;
         }
-        neuron_states[i].threshold = neuron_states[i].threshold + config.ip_increment;
+        neuron_states[i].threshold = neuron_states[i].threshold + config.intrinsic_learning_rate;
+        // Energy consumption on spike
+        neuron_states[i].energy_level = max(0, neuron_states[i].energy_level - config.metabolic_spike_cost);
     } else {
         neuron_states[i].potential = pot;
         spikes[i] = 0u;
         if (neuron_states[i].threshold > neuron_states[i].base_threshold) {
-            neuron_states[i].threshold = neuron_states[i].threshold - config.ip_decay;
+            neuron_states[i].threshold = neuron_states[i].threshold - (config.intrinsic_learning_rate / 4);
         }
+        // Energy recovery when idle
+        neuron_states[i].energy_level = min(1024, neuron_states[i].energy_level + config.metabolic_recovery_rate);
         neuron_states[i].backprop_signal = (neuron_states[i].backprop_signal * 800) >> 10;
         neuron_states[i].action = (neuron_states[i].action * 800) >> 10;
         neuron_states[i].adaptation = (neuron_states[i].adaptation * 972) >> 10;

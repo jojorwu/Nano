@@ -33,6 +33,12 @@ pub struct BitWiseTitan {
     pub block_utility: Vec<f32>,
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
+    // Configurable Limits
+    pub max_associations: usize,
+    pub max_blocks: u32,
+    pub max_entries_per_block: usize,
+    pub deep_replay_threshold: IValue,
+    pub elastic_window_max: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -65,7 +71,7 @@ impl BitWiseTitan {
             lsh_tables_l2.push(std::collections::HashMap::new());
         }
         Self {
-            associations_flat: Vec::with_capacity(1000000), // Pre-allocate for scale
+            associations_flat: Vec::with_capacity(1_000_000), // Pre-allocate for scale
             block_offsets: vec![0; size.max(64)],
             block_counts: vec![0; size.max(64)],
             learning_rate: lr,
@@ -81,6 +87,11 @@ impl BitWiseTitan {
             last_access: vec![0; size.max(64)],
             script_sequences: Vec::new(),
             active_scripts: Vec::new(),
+            max_associations: 1_000_000,
+            max_blocks: 1_000_000,
+            max_entries_per_block: 256,
+            deep_replay_threshold: 1500,
+            elastic_window_max: 16,
         }
     }
 
@@ -96,6 +107,43 @@ impl BitWiseTitan {
             h = h.rotate_left(7);
         }
         h
+    }
+
+    /// VSA: Circular Convolution / XOR-binding for structured relationships
+    pub fn vsa_bind(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let len = a.len().min(b.len());
+        let mut result = vec![0u64; len];
+        for i in 0..len {
+            // XOR-binding is the standard for Binary Spatter Codes (BSC)
+            result[i] = a[i] ^ b[i].rotate_left(1);
+        }
+        result
+    }
+
+    /// VSA: Superposition of patterns (bundling)
+    pub fn vsa_bundle(patterns: &[Vec<u64>], n_count: usize) -> Vec<u64> {
+        let packed_len = (n_count + 63) / 64;
+        let mut result = vec![0u64; packed_len];
+        if patterns.is_empty() { return result; }
+
+        for i in 0..packed_len {
+            let mut bit_counts = [0u16; 64];
+            for p in patterns {
+                if i < p.len() {
+                    for bit in 0..64 {
+                        if (p[i] >> bit) & 1 == 1 { bit_counts[bit] += 1; }
+                    }
+                }
+            }
+            // Majority rule for bundling
+            let threshold = (patterns.len() / 2) as u16;
+            for bit in 0..64 {
+                if bit_counts[bit] > threshold {
+                    result[i] |= 1 << bit;
+                }
+            }
+        }
+        result
     }
 
     /// Compute LSH signatures for fuzzy matching (Hierarchical)
@@ -130,9 +178,9 @@ impl BitWiseTitan {
 
     fn ensure_capacity(&mut self, max_bid: u32) {
         // Limit max_bid to prevent excessive memory allocation (e.g. 1M blocks)
-        let max_bid = max_bid.min(1_000_000);
+        let max_bid = max_bid.min(self.max_blocks);
         if (max_bid as usize) >= self.block_offsets.len() {
-            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2).min(1_000_000);
+            let new_size = (max_bid as usize + 1).max(self.block_offsets.len() * 2).min(self.max_blocks as usize);
             self.block_offsets.resize(new_size, 0);
             self.block_counts.resize(new_size, 0);
             self.block_utility.resize(new_size, 0.0);
@@ -162,6 +210,10 @@ impl BitWiseTitan {
             }
             self.block_counts[bid as usize] = new_count as u32;
         } else {
+            // Respect total association limit
+            if self.associations_flat.len() + new_count > self.max_associations {
+                return;
+            }
             // Grow: move to end of buffer
             let new_start = self.associations_flat.len();
             self.block_offsets[bid as usize] = new_start as u32;
@@ -184,7 +236,7 @@ impl BitWiseTitan {
             for oa in other_entries {
                 if let Some(ma) = my_entries.iter_mut().find(|a| a.target == oa.target) {
                     ma.weight = ma.weight.max(oa.weight);
-                } else if my_entries.len() < 256 {
+                } else if my_entries.len() < self.max_entries_per_block {
                     my_entries.push(oa);
                     changed = true;
                 }
@@ -238,8 +290,29 @@ impl BitWiseTitan {
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
-        if surprise > 1500 {
-            // Store highly surprising patterns in L3 episodic archive for night replay
+        // 1. Pattern Archiving
+        self.archive_surprising_patterns(history, h_ptr, neurons, surprise);
+
+        // 2. Learning Gate
+        let effective_threshold = if surprise > 2000 { self.surprise_threshold / 2 } else { self.surprise_threshold };
+        if surprise < effective_threshold || history.len() < 2 || history[h_ptr].is_empty() { return; }
+
+        let n_count = neurons.len();
+        let now = history[h_ptr].to_bitpacked(n_count);
+
+        // 3. Elastic Temporal Window
+        let search_depth = if surprise > 1000 { self.elastic_window_max } else if surprise > 500 { self.elastic_window_max / 2 } else { 2 };
+        let search_depth = search_depth.min(history.len());
+
+        // 4. Update Associations
+        self.perform_temporal_learning(history, h_ptr, &now, search_depth, neurons, surprise);
+
+        // 5. Global Memory Maintenance
+        if surprise > 500 { self.decay_associations(); }
+    }
+
+    fn archive_surprising_patterns(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
+        if surprise > self.deep_replay_threshold {
             let now = history[h_ptr].to_bitpacked(neurons.len());
             let mut active_blocks = Vec::new();
             for (i, &word) in now.iter().enumerate() {
@@ -259,28 +332,18 @@ impl BitWiseTitan {
                 self.l3_buffer.push(EpisodicEvent { context_hash, active_blocks });
             }
         }
+    }
 
-        // Test-Time Adaptation: Learn more aggressively if surprise is extreme
-        let effective_threshold = if surprise > 2000 { self.surprise_threshold / 2 } else { self.surprise_threshold };
-        if surprise < effective_threshold { return; }
-
+    fn perform_temporal_learning(&mut self, history: &[crate::SpikeData], h_ptr: usize, now: &[u64], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
         let n_count = neurons.len();
-        if history.len() < 2 { return; }
-        if history[h_ptr].is_empty() { return; }
+        let current_hash = Self::compute_context_hash(now);
+        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now);
 
-        let now = history[h_ptr].to_bitpacked(n_count);
-
-        // Elastic Window: high surprise = look further into the past (up to 16 steps)
-        let search_depth = if surprise > 1000 { 16 } else if surprise > 500 { 8 } else { 2 };
-        let search_depth = search_depth.min(history.len());
-
-        // Update Context Hashes and LSH
-        let current_hash = Self::compute_context_hash(&now);
-        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(&now);
-
-        for t in 1..search_depth {
+        for t in 1..depth {
             let past_idx = (h_ptr + history.len() - t) % history.len();
             let past = history[past_idx].to_bitpacked(n_count);
+            let bound = Self::vsa_bind(now, &past);
+            let bound_hash = Self::compute_context_hash(&bound);
 
             let reinforcement = if t == 1 { 2 } else { 1 };
             let reduction_bonus = if surprise < 100 { 5 } else { 0 };
@@ -311,7 +374,7 @@ impl BitWiseTitan {
                                         let boost = if surprise > 1500 { 5 } else { 0 };
                                         assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
                                         changed = true;
-                                    } else if entries.len() < 256 { // Increased capacity per block
+                                    } else if entries.len() < self.max_entries_per_block {
                                         let boost = if surprise > 1500 { 10 } else { 0 };
                                         entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
                                         changed = true;
@@ -321,43 +384,24 @@ impl BitWiseTitan {
                         }
                         if changed {
                             self.update_block(src_bid, entries);
-                            // Associate this block with the current contextual hash
-                            let hash_entry = self.context_hashes.entry(current_hash).or_default();
-                            if !hash_entry.contains(&src_bid) {
-                                hash_entry.push(src_bid);
-                            }
-                            for (table_idx, &sig) in sigs_l1.iter().enumerate() {
-                                let table = &mut self.lsh_tables[table_idx];
-                                let entry = table.entry(sig).or_default();
-                                if !entry.contains(&src_bid) {
-                                    entry.push(src_bid);
-                                }
-                            }
-                            for (table_idx, &sig) in sigs_l2.iter().enumerate() {
-                                let table = &mut self.lsh_tables_l2[table_idx];
-                                let entry = table.entry(sig).or_default();
-                                if !entry.contains(&src_bid) {
-                                    entry.push(src_bid);
-                                }
-                            }
+                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            self.context_hashes.entry(bound_hash).or_default().push(src_bid);
+                            for (table_idx, &sig) in sigs_l1.iter().enumerate() { self.lsh_tables[table_idx].entry(sig).or_default().push(src_bid); }
+                            for (table_idx, &sig) in sigs_l2.iter().enumerate() { self.lsh_tables_l2[table_idx].entry(sig).or_default().push(src_bid); }
                         }
                     }
                 }
             }
         }
+    }
 
-        // Periodic Decay (Simplified for flattened storage)
-        if surprise > 500 {
-             for bid in 0..self.block_offsets.len() as u32 {
-                 let mut entries = self.get_block_mut(bid);
-                 if !entries.is_empty() {
-                     entries.retain_mut(|a| {
-                         a.weight = a.weight.saturating_sub(1);
-                         a.weight > 0
-                     });
-                     self.update_block(bid, entries);
-                 }
-             }
+    fn decay_associations(&mut self) {
+        for bid in 0..self.block_offsets.len() as u32 {
+            let mut entries = self.get_block_mut(bid);
+            if !entries.is_empty() {
+                entries.retain_mut(|a| { a.weight = a.weight.saturating_sub(1); a.weight > 0 });
+                self.update_block(bid, entries);
+            }
         }
     }
 }
@@ -366,6 +410,16 @@ impl NanoModule for BitWiseTitan {
     fn name(&self) -> &str { "titan" }
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
+
+    fn on_config_sync(&mut self, config: &crate::NetworkConfig) {
+        self.max_associations = config.titan.max_associations;
+        self.max_blocks = config.titan.max_blocks;
+        self.max_entries_per_block = config.titan.max_entries_per_block;
+        self.surprise_threshold = config.titan.surprise_threshold;
+        self.deep_replay_threshold = config.titan.deep_replay_threshold;
+        self.elastic_window_max = config.titan.elastic_window_max;
+        self.decay_rate = config.titan.decay_rate;
+    }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Script Execution (Hierarchical Planning)

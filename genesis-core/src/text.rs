@@ -101,19 +101,44 @@ impl NanoModule for TextProcessorModule {
         }
     }
 
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, reward: Option<IValue>) {
-        // Simple Plasticity for Embedding: align token patterns with actual network activity
+    fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, reward: Option<IValue>) {
+        // Spiking Auto-Encoder (SAE) Training Logic:
+        // Align token patterns with the neural representations they evoke.
+        // If a token is active, we reinforce embedding bits that correspond to firing neurons.
         if let Some(&token) = self.last_tokens.get(0) {
             let weights = self.embedding_weights.entry(token).or_insert_with(|| vec![512; self.pattern_length]);
             let r = reward.unwrap_or(0);
 
-            for (i, w) in weights.iter_mut().enumerate() {
-                if i < current_spikes.len() && current_spikes[i] {
-                    *w = w.saturating_add(if r >= 0 { 10 } else { -10 });
-                } else {
-                    *w = w.saturating_sub(1);
+            for i in 0..self.pattern_length {
+                if i < current_spikes.len() {
+                    let w = &mut weights[i];
+
+                    // SAE Reconstruction Error:
+                    // current_spikes[i] is reality, *w > 512 is prediction
+                    let predicted = *w > 512;
+                    let actual = current_spikes[i];
+
+                    if actual && predicted {
+                        // Correct Prediction: strengthen (SAE LTP)
+                        *w = w.saturating_add(if r >= 0 { 20 } else { 5 });
+                    } else if actual && !predicted {
+                        // Missing Feature: strengthen (Learning)
+                        *w = w.saturating_add(30);
+                    } else if !actual && predicted {
+                        // False Positive: weaken (SAE LTD)
+                        *w = w.saturating_sub(15);
+                    } else {
+                        // Sparse decay
+                        *w = w.saturating_sub(1);
+                    }
+
+                    // Top-down feedback: neurons that consistently help reconstruction get a specialization boost
+                    if actual {
+                        neurons.specialization_score[i] = neurons.specialization_score[i] * 0.99 + 0.05;
+                    }
+
+                    *w = (*w).clamp(0, SCALE);
                 }
-                *w = (*w).clamp(0, SCALE);
             }
         }
     }

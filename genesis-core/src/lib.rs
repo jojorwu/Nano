@@ -21,19 +21,33 @@ pub mod fusion;
 pub mod graph;
 pub mod robotics;
 pub mod plasticity;
+pub mod plasticity_rules;
 pub mod attention;
+pub mod workspace;
+pub mod hierarchical;
+pub mod episodic;
+pub mod curiosity;
+pub mod think;
+pub mod load_balancer;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
 pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput, ForeignModule, ForeignTickFn};
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI, SynapsesFFI};
 pub use attention::AttnResModule;
-pub use config::NetworkConfig;
+pub use workspace::WorkspaceModule;
+pub use hierarchical::HierarchicalModule;
+pub use episodic::EpisodicModule;
+pub use curiosity::CuriosityModule;
+pub use think::ThinkModule;
+pub use load_balancer::LoadBalancerModule;
+pub use plasticity_rules::{PlasticityContext, PlasticityRule, GsopRule};
+pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, AstroConfig, HardwareConfig};
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
 
-// --- Physics Constants ---
+// --- Physics Constants (Legacy/Defaults - prefer config fields) ---
 pub const DEFAULT_REFRACTORY_TICKS: i32 = 4;
 pub const SMBP_DECAY: i64 = 800; // Multiplier out of SCALE
 pub const ACTIVITY_EMA_ALPHA: i64 = 99; // Alpha out of 100
@@ -54,136 +68,7 @@ pub struct NeuromodulationState {
     pub serotonin: IValue,      // Stability / Risk Mitigation
 }
 
-/// Thinking Mode Module: Enables "Chain of Thought" reasoning by performing
-/// extra simulation sub-ticks for each external input tick.
-/// This allows the network to iterate internally without new modality data.
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ThinkModule {
-    pub extra_ticks: usize,
-    pub active: bool,
-}
-
-impl ThinkModule {
-    pub fn new(ticks: usize) -> Self {
-        Self { extra_ticks: ticks, active: true }
-    }
-}
-
-impl NanoModule for ThinkModule {
-    fn name(&self) -> &str { "think" }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
-    fn handle_input(&mut self, input: &ModuleInput) {
-        if let ModuleInput::Control(name, val) = input {
-            if name == "active" { self.active = *val != 0; }
-            if name == "ticks" { self.extra_ticks = *val as usize; }
-        }
-    }
-    fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
-        // Core logic: The Runtime will check for 'think' module and perform extra backend calls
-    }
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, surprise: Option<IValue>) {
-        if let Some(s) = surprise {
-            // Adaptive Thought Depth: increase internal iteration depth during high uncertainty (surprise)
-            // SCALE = 1024.
-            if s > 1500 {
-                self.extra_ticks = (self.extra_ticks + 5).min(100); // Deep reasoning
-            } else if s > 512 {
-                self.extra_ticks = (self.extra_ticks + 1).min(50);
-            } else if s < 100 {
-                self.extra_ticks = self.extra_ticks.saturating_sub(1);
-            }
-        }
-    }
-    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
-    fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
-    fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
-    fn set_state(&mut self, state: &[u8]) {
-        if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
-    }
-    fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
-}
-
-/// Context passed to plasticity rules to improve flexibility and reduce argument count.
-pub struct PlasticityContext<'a> {
-    pub pre_spiked: bool,
-    pub post_spiked: bool,
-    pub backprop_signal: IValue, // SMBP: signal from soma to dendrites
-    pub compartment: Compartment,
-    pub reward: Option<IValue>,
-    pub neuromodulation: NeuromodulationState,
-    pub pre_last_spike: u32,
-    pub post_last_spike: u32,
-    pub current_tick: u32,
-    pub post_index: usize,
-    pub neurons: &'a NeuronsSoA,
-}
-
-impl<'a> PlasticityContext<'a> {
-    /// Calculates the combined modulation factor based on chemical state and SMBP.
-    pub fn get_modulation_gain(&self) -> i64 {
-        let neuromod = SCALE as i64 + self.neuromodulation.noradrenaline as i64;
-        let dopamine = SCALE as i64 + self.neuromodulation.dopamine.abs() as i64;
-        let smbp = if self.compartment != Compartment::Proximal {
-            SCALE as i64 + self.backprop_signal as i64
-        } else {
-            SCALE as i64
-        };
-        (neuromod * dopamine * smbp) >> 20
-    }
-}
-
-/// Trait for weight update rules (e.g., GSOP, STDP)
-pub trait PlasticityRule {
-    fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext);
-
-    fn update_contrastive(&self, weight: &mut IValue, layer_correlation: IValue) {
-        if layer_correlation > 512 {
-             *weight = (*weight as i64 * (1024 - (layer_correlation / 10)) as i64 >> 10) as i32;
-        }
-    }
-}
-
-pub struct GsopRule {
-    pub learning_rate: IValue,
-}
-
-impl PlasticityRule for GsopRule {
-    fn apply(&self, weight: &mut IValue, ctx: &PlasticityContext) {
-        let lr = match ctx.compartment {
-            Compartment::Proximal => self.learning_rate,
-            Compartment::Distal => self.learning_rate * 8 / 10,
-            _ => self.learning_rate / 2,
-        };
-
-        let p_gate = ctx.neurons.plasticity_gate[ctx.post_index];
-        let lr_final = (lr as i64 * ctx.get_modulation_gain() * p_gate as i64) >> 20;
-        let lr_final = lr_final as i32;
-
-        let reward_mod = if let Some(r) = ctx.reward { if r < 0 { -1 } else { 1 } } else { 1 };
-
-        // Predictive Coding: Reward connections that contributed to a correct prediction.
-        // If the compartment is Distal (Memory), and it matches the somatic spike, boost it.
-        let prediction_gain = if ctx.compartment == Compartment::Distal && ctx.post_spiked {
-            2 // Double reward for memory that correctly predicted firing
-        } else {
-            1
-        };
-
-        let lr_mod = (lr_final * reward_mod * prediction_gain) as i32;
-
-        let old_weight = *weight;
-        if ctx.pre_spiked && ctx.post_spiked {
-            *weight = weight.saturating_add(lr_mod);
-        } else if ctx.pre_spiked && !ctx.post_spiked {
-            // Error Signal: if memory fired (pre) but no spike occurred (post), reduce weight (LTD)
-            *weight = weight.saturating_sub(lr_mod / 2);
-        }
-
-        crate::plasticity::clamp_and_preserve_sign(weight, old_weight);
-    }
-}
 
 #[cfg(test)]
 mod tests {

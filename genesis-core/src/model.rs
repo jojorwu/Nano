@@ -62,6 +62,7 @@ pub enum Compartment {
     Distal = 1,
     Apical = 2,
     Basal = 3,
+    Custom(u8), // Support for additional dendritic branches
 }
 
 impl Default for Compartment {
@@ -79,7 +80,8 @@ pub struct NeuronsSoA {
     /// Identifier for grouping neurons into blocks (mini-columns) for shared attention.
     pub block_id: Vec<u32>,
     pub potential: Vec<IValue>,
-    pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
+    pub distal_potential: Vec<IValue>,
+    pub segment_potentials: Vec<IValue>, // For Multi-Segment Dendrites (Flat with stride)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
     pub apical_potential: Vec<IValue>,  // For hierarchical feedback
     pub basal_potential: Vec<IValue>,   // For lateral signals
@@ -96,7 +98,8 @@ pub struct NeuronsSoA {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
-    pub distal_gate: Vec<IValue>, // Gating scalars per compartment
+    pub distal_gate: Vec<IValue>,
+    pub segment_gates: Vec<IValue>, // For Multi-Segment Dendrites (Flat with stride)
     pub apical_gate: Vec<IValue>,
     pub basal_gate: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
@@ -104,6 +107,11 @@ pub struct NeuronsSoA {
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
     pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
+    pub astro_calcium: Vec<IValue>,      // Astrocytic Modulation (Slow calcium dynamics)
+    pub is_remote: Vec<u8>,              // Distributed SNN (1 = ghost neuron, 0 = local)
+    pub origin_node_id: Vec<u32>,        // Node ID that owns this neuron
+    pub energy_level: Vec<IValue>,       // Metabolic Economy (SCALE = 100% energy)
+    pub specialization_score: Vec<f32>,  // Morphogenesis: tracking neuron utility
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
 }
@@ -134,9 +142,17 @@ pub struct NeuronsFFI {
     pub block_id: *mut u32,
     pub action_potential: *mut IValue,
     pub plasticity_gate: *mut IValue,
+    pub astro_calcium: *mut IValue,
+    pub energy_level: *mut IValue,
+    pub specialization_score: *mut f32,
+    pub segment_potentials: *mut IValue,
+    pub segment_gates: *mut IValue,
     pub packed_params: *mut u64,
     pub len: u32,
 }
+
+unsafe impl Send for NeuronsFFI {}
+unsafe impl Sync for NeuronsFFI {}
 
 impl NeuronsSoA {
     pub fn as_ffi(&mut self) -> NeuronsFFI {
@@ -164,6 +180,11 @@ impl NeuronsSoA {
             block_id: self.block_id.as_mut_ptr(),
             action_potential: self.action_potential.as_mut_ptr(),
             plasticity_gate: self.plasticity_gate.as_mut_ptr(),
+            astro_calcium: self.astro_calcium.as_mut_ptr(),
+            energy_level: self.energy_level.as_mut_ptr(),
+            specialization_score: self.specialization_score.as_mut_ptr(),
+            segment_potentials: self.segment_potentials.as_mut_ptr(),
+            segment_gates: self.segment_gates.as_mut_ptr(),
             packed_params: self.packed_params.as_mut_ptr(),
             len: self.len() as u32,
         }
@@ -205,6 +226,13 @@ impl NeuronsSoA {
             adaptation_current: Vec::with_capacity(capacity),
             action_potential: Vec::with_capacity(capacity),
             plasticity_gate: Vec::with_capacity(capacity),
+            astro_calcium: Vec::with_capacity(capacity),
+            energy_level: Vec::with_capacity(capacity),
+            is_remote: Vec::with_capacity(capacity),
+            origin_node_id: Vec::with_capacity(capacity),
+            specialization_score: Vec::with_capacity(capacity),
+            segment_potentials: Vec::with_capacity(capacity * 4),
+            segment_gates: Vec::with_capacity(capacity * 4),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -237,6 +265,7 @@ impl NeuronsSoA {
         self.block_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
+        self.segment_potentials.resize(new_size * 4, 0);
         self.proximal_potential.resize(new_size, 0);
         self.apical_potential.resize(new_size, 0);
         self.basal_potential.resize(new_size, 0);
@@ -254,6 +283,7 @@ impl NeuronsSoA {
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
         self.distal_gate.resize(new_size, SCALE);
+        self.segment_gates.resize(new_size * 4, SCALE);
         self.apical_gate.resize(new_size, SCALE);
         self.basal_gate.resize(new_size, SCALE);
         self.activity_ema.resize(new_size, 0);
@@ -261,6 +291,11 @@ impl NeuronsSoA {
         self.adaptation_current.resize(new_size, 0);
         self.action_potential.resize(new_size, 0);
         self.plasticity_gate.resize(new_size, SCALE);
+        self.astro_calcium.resize(new_size, 0);
+        self.is_remote.resize(new_size, 0);
+        self.origin_node_id.resize(new_size, 0);
+        self.energy_level.resize(new_size, SCALE); // Start fully charged
+        self.specialization_score.resize(new_size, 0.0);
         self.packed_params.resize(new_size, 0);
     }
 
@@ -293,6 +328,11 @@ impl NeuronsSoA {
         self.adaptation_current.shrink_to_fit();
         self.action_potential.shrink_to_fit();
         self.plasticity_gate.shrink_to_fit();
+        self.astro_calcium.shrink_to_fit();
+        self.is_remote.shrink_to_fit();
+        self.origin_node_id.shrink_to_fit();
+        self.energy_level.shrink_to_fit();
+        self.specialization_score.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }
 }
@@ -302,9 +342,13 @@ pub struct SynapsesSoA {
     pub source_index: Vec<u32>,
     pub target_index: Vec<u32>,
     pub weight: Vec<IValue>,
+    pub tag: Vec<IValue>, // Synaptic Tagging (STC) - temporary trace
+    pub tag_timer: Vec<u16>, // Ticks until tag expires
     pub delay: Vec<u8>, // Axonal delays (1-16 ticks)
     pub stp_resources: Vec<IValue>, // Short-Term Depression (SCALE = 1.0)
     pub stp_calcium: Vec<IValue>,   // Short-Term Facilitation (SCALE = 1.0)
+    pub volatility: Vec<u8>,        // Probabilistic Metaplasticity (0 = stable, 255 = volatile)
+    pub causality_index: Vec<u8>,   // Causal STDP: reliability of temporal relationship
     pub compartment: Vec<Compartment>,
     pub latent_matrix: Option<LatentSynapseMatrix>,
 }
@@ -315,9 +359,13 @@ pub struct SynapsesFFI {
     pub source_index: *const u32,
     pub target_index: *const u32,
     pub weight: *mut IValue,
+    pub tag: *mut IValue,
+    pub tag_timer: *mut u16,
     pub delay: *const u8,
     pub stp_resources: *mut IValue,
     pub stp_calcium: *mut IValue,
+    pub volatility: *mut u8,
+    pub causality_index: *mut u8,
     pub compartment: *const u8,
     pub len: u32,
 
@@ -332,9 +380,13 @@ impl SynapsesSoA {
             source_index: self.source_index.as_ptr(),
             target_index: self.target_index.as_ptr(),
             weight: self.weight.as_mut_ptr(),
+            tag: self.tag.as_mut_ptr(),
+            tag_timer: self.tag_timer.as_mut_ptr(),
             delay: self.delay.as_ptr(),
             stp_resources: self.stp_resources.as_mut_ptr(),
             stp_calcium: self.stp_calcium.as_mut_ptr(),
+            volatility: self.volatility.as_mut_ptr(),
+            causality_index: self.causality_index.as_mut_ptr(),
             compartment: self.compartment.as_ptr() as *const u8,
             len: self.len() as u32,
             offsets,
@@ -356,9 +408,13 @@ impl SynapsesSoA {
             source_index: Vec::with_capacity(capacity),
             target_index: Vec::with_capacity(capacity),
             weight: Vec::with_capacity(capacity),
+            tag: Vec::with_capacity(capacity),
+            tag_timer: Vec::with_capacity(capacity),
             delay: Vec::with_capacity(capacity),
             stp_resources: Vec::with_capacity(capacity),
             stp_calcium: Vec::with_capacity(capacity),
+            volatility: Vec::with_capacity(capacity),
+            causality_index: Vec::with_capacity(capacity),
             compartment: Vec::with_capacity(capacity),
             latent_matrix: None,
         }
@@ -376,9 +432,13 @@ impl SynapsesSoA {
         self.source_index.push(source);
         self.target_index.push(target);
         self.weight.push(weight);
+        self.tag.push(0);
+        self.tag_timer.push(0);
         self.delay.push(delay.max(1));
         self.stp_resources.push(SCALE); // Start fully charged
         self.stp_calcium.push(0);       // Start at baseline
+        self.volatility.push(255);      // New synapses are highly volatile
+        self.causality_index.push(0);
         self.compartment.push(compartment);
     }
 
@@ -403,9 +463,13 @@ impl SynapsesSoA {
         self.source_index.swap_remove(index);
         self.target_index.swap_remove(index);
         self.weight.swap_remove(index);
+        self.tag.swap_remove(index);
+        self.tag_timer.swap_remove(index);
         self.delay.swap_remove(index);
         self.stp_resources.swap_remove(index);
         self.stp_calcium.swap_remove(index);
+        self.volatility.swap_remove(index);
+        self.causality_index.swap_remove(index);
         self.compartment.swap_remove(index);
     }
 
@@ -413,9 +477,13 @@ impl SynapsesSoA {
         self.source_index.shrink_to_fit();
         self.target_index.shrink_to_fit();
         self.weight.shrink_to_fit();
+        self.tag.shrink_to_fit();
+        self.tag_timer.shrink_to_fit();
         self.delay.shrink_to_fit();
         self.stp_resources.shrink_to_fit();
         self.stp_calcium.shrink_to_fit();
+        self.volatility.shrink_to_fit();
+        self.causality_index.shrink_to_fit();
         self.compartment.shrink_to_fit();
     }
 }
@@ -513,13 +581,20 @@ impl BakedModel {
              log::warn!("Loading model version {} into v4.2 engine. Physics scaling (1024) may differ from older versions.", model.version);
         }
 
-        // Dynamic RAM migration: ensure titan_memory.byte_memory matches config size
+        // Dynamic RAM migration: ensure titan_memory matches config
         if let Some(ref mut titan) = model.titan_memory {
-             let cfg_size = model.config.titan_byte_memory_size;
+             let cfg_size = model.config.titan.byte_memory_size;
              if titan.byte_memory.len() != cfg_size {
                   log::info!("Migrating Titan byte_memory from {} to {} bytes", titan.byte_memory.len(), cfg_size);
                   titan.byte_memory.resize(cfg_size, 0);
              }
+             titan.max_associations = model.config.titan.max_associations;
+             titan.max_blocks = model.config.titan.max_blocks;
+             titan.max_entries_per_block = model.config.titan.max_entries_per_block;
+             titan.surprise_threshold = model.config.titan.surprise_threshold;
+             titan.deep_replay_threshold = model.config.titan.deep_replay_threshold;
+             titan.elastic_window_max = model.config.titan.elastic_window_max;
+             titan.decay_rate = model.config.titan.decay_rate;
         }
 
         model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

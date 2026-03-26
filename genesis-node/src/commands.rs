@@ -1,4 +1,11 @@
 use crate::engine::SimulationEngine;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    pub simulation: Option<crate::SimulationSettings>,
+    pub network: Option<genesis_core::NetworkConfig>,
+}
 
 pub struct CommandProcessor;
 
@@ -34,7 +41,7 @@ impl CommandProcessor {
             "set_lr" => {
                 if parts.len() < 2 { return "Usage: set_lr <val>".to_string(); }
                 if let Ok(lr) = parts[1].parse::<i32>() {
-                    engine.model.config.learning_rate = lr;
+                    engine.model.config.plasticity.learning_rate = lr;
                     format!("Learning rate set to {}", lr)
                 } else { "Invalid value".to_string() }
             },

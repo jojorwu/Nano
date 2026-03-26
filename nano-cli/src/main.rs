@@ -80,6 +80,13 @@ enum Commands {
         #[arg(short, long)] peer: String,
         #[arg(long)] backend: Option<String>,
     },
+    /// Manage configuration in nano.toml
+    Config {
+        /// Key to get or set (e.g., 'network.learning_rate'). Use 'list' to see all.
+        key: String,
+        /// Value to set (if omitted, will get the current value)
+        value: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,14 +118,14 @@ impl SimulationSession {
         let mut runtime = Runtime::load_with_settings(model_path, settings)
             .with_context(|| format!("Failed to load model from {}", model_path))?;
 
-        runtime.post_init().map_err(|e| anyhow::anyhow!(e)).context("Failed to initialize modules")?;
+        runtime.post_init().context("Failed to initialize modules")?;
 
         if let Some(net_cfg) = global.network {
             runtime.engine.model.config = net_cfg;
         }
 
         if let Some(lr) = lr_override {
-            runtime.engine.model.config.learning_rate = lr;
+            runtime.engine.model.config.plasticity.learning_rate = lr;
         }
         Ok(Self { runtime })
     }
@@ -212,11 +219,11 @@ vocab_size = 1000
             let mut bp: ModelBlueprint = toml::from_str(&content).with_context(|| "Invalid blueprint format")?;
             if let Some(b) = backend {
                 if bp.config.is_none() { bp.config = Some(Default::default()); }
-                if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
+                if let Some(ref mut cfg) = bp.config { cfg.hardware.preferred_backend = b.clone(); }
             }
             let baked = bp.bake();
             baked.save(output).with_context(|| format!("Failed to save model to {}", output))?;
-            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
+            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.hardware.preferred_backend);
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
             let mut session = SimulationSession::new(model, *learning_rate, backend.clone())?;
@@ -377,7 +384,7 @@ vocab_size = 1000
             let mut session = SimulationSession::new(model, None, None)?;
 
             let mut avg_surprise = 0f32;
-            let mut best_lr = session.runtime.engine.model.config.learning_rate;
+            let mut best_lr = session.runtime.engine.model.config.plasticity.learning_rate;
             let mut best_interval = session.runtime.settings.night_phase_interval;
 
             println!("  Initial State: LR={}, SleepInterval={}", best_lr, best_interval);
@@ -407,7 +414,7 @@ vocab_size = 1000
                 }
             }
 
-            session.runtime.engine.model.config.learning_rate = best_lr;
+            session.runtime.engine.model.config.plasticity.learning_rate = best_lr;
             session.runtime.settings.night_phase_interval = best_interval;
 
             println!("✅ Auto-tuning complete. Suggested settings applied.");
@@ -469,6 +476,50 @@ vocab_size = 1000
 
             session.finish(model)?;
             println!("✅ Training complete.");
+        }
+        Commands::Config { key, value } => {
+            let content = fs::read_to_string("nano.toml").unwrap_or_default();
+            let mut doc = content.parse::<toml_edit::DocumentMut>().context("Failed to parse nano.toml")?;
+
+            if key == "list" {
+                 println!("--- Current Configuration (nano.toml) ---");
+                 println!("{}", doc.to_string());
+                 return Ok(());
+            }
+
+            if let Some(v) = value {
+                let parts: Vec<&str> = key.split('.').collect();
+                let mut current = doc.as_table_mut();
+
+                for (i, part) in parts.iter().enumerate() {
+                    if i == parts.len() - 1 {
+                        if let Ok(i_val) = v.parse::<i64>() {
+                            current.insert(part, toml_edit::value(i_val));
+                        } else if let Ok(f_val) = v.parse::<f64>() {
+                            current.insert(part, toml_edit::value(f_val));
+                        } else if let Ok(b_val) = v.parse::<bool>() {
+                            current.insert(part, toml_edit::value(b_val));
+                        } else {
+                            current.insert(part, toml_edit::value(v.clone()));
+                        }
+                    } else {
+                        current = current.entry(part).or_insert(toml_edit::table()).as_table_mut()
+                            .ok_or_else(|| anyhow::anyhow!("Path component '{}' is not a table", part))?;
+                    }
+                }
+                fs::write("nano.toml", doc.to_string())?;
+                println!("✅ Config updated: {} = {} (Formatting preserved)", key, v);
+            } else {
+                let mut current = doc.as_item();
+                for part in key.split('.') {
+                    current = &current[part];
+                }
+                if !current.is_none() {
+                    println!("{}: {}", key, current);
+                } else {
+                    println!("❌ Key '{}' not found", key);
+                }
+            }
         }
         Commands::Remote { model, peer, backend } => {
             println!("🌐 Connecting to remote node: {}...", peer);

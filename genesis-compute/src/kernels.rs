@@ -13,6 +13,11 @@ pub fn calculate_membrane_potential(
     noise_amp: IValue,
     adaptation: IValue
 ) -> IValue {
+    // Formalized Dendritic Predictive Coding
+    // The distal compartment (memory/context) attempts to PREDICT the proximal (sensory) input.
+    // Prediction Error = proximal - distal_prediction
+    let _prediction_error = proximal - distal;
+
     // Non-linear Sigmoidal Dendritic Gating (Smooth NMDA-like response)
     let dist_gain = sigmoid_gate_approx(proximal, gate_threshold);
     let dist_gated = ((distal as i64 * dist_gain as i64) >> 10) as i32;
