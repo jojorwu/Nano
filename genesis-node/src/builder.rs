@@ -1,4 +1,5 @@
 use crate::{Runtime, SimulationSettings, SimulationObserver, RuntimeError, Observer, telemetry, persistence, engine::SimulationEngine};
+use crate::engine::pipeline::SimulationPipeline;
 use genesis_core::ModuleManager;
 
 pub struct RuntimeBuilder {
@@ -125,9 +126,16 @@ impl RuntimeBuilder {
             (None, None)
         };
 
+        let pipeline = if let Some(ref stages) = self.settings.active_pipeline_stages {
+            SimulationPipeline::from_config(stages, &self.settings)
+        } else {
+            SimulationPipeline::new(&self.settings)
+        };
+
         let mut rt = Runtime {
             engine,
             settings: self.settings,
+            pipeline,
             episode_reward_history: Vec::new(),
             network_manager: nm,
             observers,

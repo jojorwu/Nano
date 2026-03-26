@@ -63,6 +63,9 @@ pub trait NanoModule: Send + Sync {
     /// The InputBus uses atomic integers to allow thread-safe signal injection from multiple modules.
     fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32);
 
+    /// High-level event handling.
+    fn on_event(&mut self, _event: &crate::event::GlobalEvent) {}
+
     /// Called during the learning phase to update module-specific internal weights or states.
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
 
@@ -180,6 +183,7 @@ impl ModuleRegistry {
         self.register_factory("hierarchical", || Box::new(crate::hierarchical::HierarchicalModule::new()));
         self.register_factory("episodic", || Box::new(crate::episodic::EpisodicModule::new()));
         self.register_factory("curiosity", || Box::new(crate::curiosity::CuriosityModule::new()));
+        #[cfg(feature = "robotics")]
         self.register_factory("cerebellum", || Box::new(crate::robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
 
@@ -388,6 +392,17 @@ impl ModuleManager {
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
 
+        // 1. Process Events from previous tick
+        let events = bus.event_bus.poll_all();
+        if !events.is_empty() {
+            for event in &events {
+                for m in &mut self.modules {
+                    m.on_event(event);
+                }
+            }
+        }
+
+        // 2. Main Module Ticks (Parallel within tiers)
         for tier_indices in &self.tiered_indices {
             self.modules.par_iter_mut().enumerate()
                 .filter(|(idx, _)| tier_indices.contains(idx))

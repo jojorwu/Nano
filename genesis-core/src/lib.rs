@@ -5,6 +5,7 @@ pub mod module;
 pub mod model;
 pub mod physics;
 pub mod config;
+pub mod event;
 
 #[cfg(feature = "titan")]
 pub mod titan;
@@ -40,6 +41,7 @@ pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
 pub use curiosity::CuriosityModule;
 pub use think::ThinkModule;
+pub use event::{EventBus, GlobalEvent};
 pub use load_balancer::LoadBalancerModule;
 pub use plasticity_rules::{PlasticityContext, PlasticityRule, GsopRule};
 pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, AstroConfig, HardwareConfig};

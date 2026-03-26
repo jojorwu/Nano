@@ -84,10 +84,22 @@ impl SimulationEngine {
             .zip(self.input_bus.basal())
             .for_each(|(p, b)| *p = p.saturating_add(b.load(Ordering::Relaxed)));
 
-        // Action Bus logic: move somatic action potentials to action bus
+        // Action Bus logic: Bidirectional synchronization
+        // 1. Somatic to Bus: Move somatic action potentials to action bus for sensory gating
         self.model.neurons.action_potential.par_iter()
             .zip(self.input_bus.action())
             .for_each(|(p, b)| b.store(*p, Ordering::Relaxed));
+
+        // 2. Bus to Somatic: If modules injected signals into action bus, add them back to somatic state
+        // This allows modules to directly drive "motor" or "action" neurons.
+        self.model.neurons.action_potential.par_iter_mut()
+            .zip(self.input_bus.action())
+            .for_each(|(p, b)| {
+                let injected = b.load(Ordering::Relaxed);
+                if injected > 0 {
+                    *p = p.saturating_add(injected);
+                }
+            });
     }
 
 }

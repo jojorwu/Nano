@@ -290,13 +290,10 @@ impl PipelineStage for ObservationStage {
                 log::debug!("L3: Episodic memory stored (Surprise: {})", context.surprise);
             }
 
-            // Update BitWise Titan Memory if present
+            // Update BitWise Titan Memory if present using zero-copy downcasting
             for m in engine.modules.modules.iter_mut() {
-                if m.name() == "titan" {
-                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
-                        m.set_state(&bincode::serialize(&titan).unwrap());
-                    }
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
                 }
             }
         }

@@ -43,9 +43,13 @@ mod tests_advanced {
         let backend = Box::new(CpuBackend::default());
         let observers: Vec<Box<dyn SimulationObserver>> = Vec::new();
 
+        let engine = SimulationEngine::new(model, modules, backend, &settings).unwrap();
+        let pipeline = crate::engine::pipeline::SimulationPipeline::new(&settings);
+
         Runtime {
-            engine: SimulationEngine::new(model, modules, backend, &settings).unwrap(),
+            engine,
             settings,
+            pipeline,
             episode_reward_history: Vec::new(),
             network_manager: None,
             observers,

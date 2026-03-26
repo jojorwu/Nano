@@ -47,10 +47,12 @@ pub use events::{SimulationEvent, SimulationObserver};
 pub use settings::SimulationSettings;
 pub use network::{NetworkManager, SpikePacket};
 pub use builder::RuntimeBuilder;
+use crate::engine::pipeline::SimulationPipeline;
 
 pub struct Runtime {
     pub engine: SimulationEngine,
     pub settings: SimulationSettings,
+    pub pipeline: SimulationPipeline,
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observers: Vec<Box<dyn SimulationObserver>>,
@@ -84,7 +86,7 @@ impl Runtime {
     }
 
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
-        use crate::engine::pipeline::{SimulationPipeline, PipelineContext};
+        use crate::engine::pipeline::PipelineContext;
 
         let start_time = std::time::Instant::now();
         let normalized_reward = self.prepare_reward(reward);
@@ -103,12 +105,7 @@ impl Runtime {
             blackboard: std::collections::HashMap::new(),
         };
 
-        let mut pipeline = if let Some(ref stages) = self.settings.active_pipeline_stages {
-            SimulationPipeline::from_config(stages, &self.settings)
-        } else {
-            SimulationPipeline::new(&self.settings)
-        };
-        pipeline.execute(&mut self.engine, &mut context);
+        self.pipeline.execute(&mut self.engine, &mut context);
 
         // History population is now handled by the Propagation stage (or sub-ticks)
         // to ensure it's available for Neuromodulation/Observation stages.
