@@ -191,6 +191,30 @@ impl Runtime {
 
         // Structural plasticity and Global Module updates use raw reward
         self.engine.backend.structural_plasticity(&mut self.engine.model, raw_reward, &reconstructed);
+
+        // Memory Consolidation: Transfer episodic sequences to Titan
+        let mut episodic_sequences = Vec::new();
+        for m in &mut self.engine.modules.modules {
+             if m.name() == "episodic" {
+                  if let Ok(ep) = bincode::deserialize::<genesis_core::episodic::EpisodicModule>(&m.get_state()) {
+                       episodic_sequences = ep.sequences.clone();
+                  }
+             }
+        }
+
+        if !episodic_sequences.is_empty() {
+             for m in &mut self.engine.modules.modules {
+                  if m.name() == "titan" {
+                       if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
+                            for seq in &episodic_sequences {
+                                 titan.learn_from_sequence(seq, &self.engine.model.neurons);
+                            }
+                            m.set_state(&bincode::serialize(&titan).unwrap());
+                       }
+                  }
+             }
+        }
+
         self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
         self.sync_modules_to_model();
         // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.

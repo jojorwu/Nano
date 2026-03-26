@@ -54,6 +54,9 @@ impl NanoModule for WorkspaceModule {
     }
 
     fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
+        // GNW Ignition Competition: selects winner based on activity and surprise
+        let surprise = bus.global_signals[1].load(std::sync::atomic::Ordering::Relaxed);
+
         if self.ignition_timer > 0 {
             self.ignition_timer -= 1;
 
@@ -74,11 +77,16 @@ impl NanoModule for WorkspaceModule {
 
             // Find new winner
             let mut winner = None;
-            let mut max_act = self.ignition_threshold;
+            let mut max_score = self.ignition_threshold;
 
             for (bid, &act) in self.block_activity.iter().enumerate() {
-                if act > max_act {
-                    max_act = act;
+                // Heuristic: surprise-driven ignition
+                // Active blocks that coincide with global surprise get a boost in the competition.
+                let surprise_boost = if surprise > 500 { act * 0.5 } else { 0.0 };
+                let score = act + surprise_boost;
+
+                if score > max_score {
+                    max_score = score;
                     winner = Some(bid as u32);
                 }
             }

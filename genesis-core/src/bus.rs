@@ -163,18 +163,29 @@ impl InputBus {
             let chan = self.channel(id);
             if index < chan.len() {
                 let val = chan[index].load(Ordering::Relaxed);
-                // Active Inference: Gated Perception
-                // If the network is suppressing this modality via the 'action' channel, reduce the value.
+                // Active Inference: Precision-Weighted Sensory Gating
+                // 1. Inhibitory Gating via the 'action' channel (Active Inference)
                 let action_chan = self.action();
+                let mut effective_val = val;
                 if index < action_chan.len() {
                     let suppression = action_chan[index].load(Ordering::Relaxed);
                     if suppression > 0 {
-                        // Use a simple gating mechanism: if suppression is high, value is reduced.
-                        // SCALE = 1024. If suppression = 1024, val = 0.
-                        return (val as i64 * (crate::SCALE - suppression).max(0) as i64 >> 10) as i32;
+                        // If suppression is high (Active Inference drives motor output), sensory input is reduced.
+                        effective_val = (effective_val as i64 * (crate::SCALE - suppression).max(0) as i64 >> 10) as i32;
                     }
                 }
-                return val;
+
+                // 2. Precision-Weighting via Global Surprise (Noradrenaline)
+                // High surprise (noradrenaline) acts as a gain boost for sensory input,
+                // representing heightened attention to unexpected data.
+                let surprise = self.global_signals[1].load(Ordering::Relaxed); // Signal 1: Noradrenaline
+                if surprise > 0 {
+                     // Gain increases with surprise, max +100% gain at surprise = SCALE
+                     let gain = crate::SCALE as i64 + (surprise as i64).min(crate::SCALE as i64);
+                     effective_val = (effective_val as i64 * gain >> 10) as i32;
+                }
+
+                return effective_val;
             }
         }
         0

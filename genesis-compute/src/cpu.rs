@@ -127,12 +127,28 @@ impl CpuBackend {
                 *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate);
             }
 
-            let error = *n.activity_ema.add(i) - target_activity;
+            let activity_ema = *n.activity_ema.add(i);
+            let error = activity_ema - target_activity;
+
+            // 1. Threshold-based Homeostasis (Intrinsic Plasticity)
             let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
             if error > 0 {
                 *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_add(homeo_rate);
             } else if error < 0 && *n.base_threshold.add(i) > model.config.physics.default_threshold / 2 {
                 *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_sub(1);
+            }
+
+            // 2. Metaplasticity-based Homeostasis (BCM Rule)
+            // Adjust plasticity_gate based on activity error to maintain stable firing.
+            // If the neuron is hyper-active, reduce learning capacity to prevent runaway LTP.
+            // If the neuron is under-active, increase learning capacity to allow reorganization.
+            let p_gate = *n.plasticity_gate.add(i);
+            if error > target_activity {
+                // High activity -> Reduce plasticity
+                *n.plasticity_gate.add(i) = p_gate.saturating_sub(2);
+            } else if error < -(target_activity / 2) {
+                // Low activity -> Increase plasticity
+                *n.plasticity_gate.add(i) = p_gate.saturating_add(5).min(SCALE);
             }
             // next_update_tick and update_interval are not in NeuronsFFI yet, let's fix that if needed.
             // For now assume sequential update

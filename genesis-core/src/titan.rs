@@ -415,6 +415,21 @@ impl BitWiseTitan {
             }
         }
     }
+
+    /// Specialized learning from an episodic sequence replay
+    pub fn learn_from_sequence(&mut self, sequence: &crate::episodic::EpisodicSequence, neurons: &NeuronsSoA) {
+        if sequence.ticks.is_empty() { return; }
+
+        // Convert sequence ticks to SpikeData and perform history-based learning
+        let history: Vec<crate::SpikeData> = sequence.ticks.iter().map(|t| {
+            crate::SpikeData::Sparse(t.clone())
+        }).collect();
+
+        // Replay sequence: treat each step as "now" and learn associations with the past
+        for i in 1..history.len() {
+             self.learn_from_history(&history, i, neurons, sequence.surprise_at_start);
+        }
+    }
 }
 
 impl NanoModule for BitWiseTitan {
