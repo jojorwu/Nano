@@ -28,6 +28,7 @@ pub mod hierarchical;
 pub mod episodic;
 pub mod curiosity;
 pub mod think;
+pub mod load_balancer;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
@@ -39,6 +40,7 @@ pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
 pub use curiosity::CuriosityModule;
 pub use think::ThinkModule;
+pub use load_balancer::LoadBalancerModule;
 pub use plasticity_rules::{PlasticityContext, PlasticityRule, GsopRule};
 pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, AstroConfig, HardwareConfig};
 

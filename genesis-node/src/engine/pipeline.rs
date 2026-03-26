@@ -95,17 +95,65 @@ pub struct PropagationStage;
 impl PipelineStage for PropagationStage {
     fn name(&self) -> &str { "propagation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        let full_history = engine.reconstruct_history(16);
-        let spike_data = engine.backend.day_phase(
-            &mut engine.model,
-            &engine.state.merged_inputs_buffer,
-            &engine.state.previous_spikes,
-            &full_history,
-            context.tick,
-            engine.state.global_modulators,
-        );
-        engine.state.current_spikes_buffer.fill(false);
         let n_count = engine.model.neurons.len();
+        let full_history = engine.reconstruct_history(16);
+
+        let spike_data = if let Some(ref mut secondary) = engine.secondary_backend {
+            // Heterogeneous Compute: split the neural blocks between backends
+            // Primary backend (typically WGPU/GPU) handles the bulk of neurons
+            // Secondary backend (typically CPU) handles a specific range (e.g. the last 20%)
+            let split_point = (n_count * 80) / 100;
+
+            let kernel_ctx = genesis_compute::KernelContext {
+                external_inputs: &engine.state.merged_inputs_buffer,
+                previous_spikes: &engine.state.previous_spikes,
+                history: &full_history,
+                current_tick: context.tick,
+                modulation: engine.state.global_modulators,
+            };
+
+            // 1. Concurrent Synapse Propagation (Currently simplified to full on primary)
+            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
+
+            // 2. Parallel Membrane Potential & Spike Generation
+            let primary_range = 0..split_point;
+            let secondary_range = split_point..n_count;
+
+            let primary_spikes = engine.backend.execute_kernel_range(
+                genesis_compute::SimulationKernel::GenerateSpikes,
+                &mut engine.model,
+                &kernel_ctx,
+                primary_range
+            );
+
+            let secondary_spikes = secondary.execute_kernel_range(
+                genesis_compute::SimulationKernel::GenerateSpikes,
+                &mut engine.model,
+                &kernel_ctx,
+                secondary_range
+            );
+
+            // 3. Merge results
+            let mut merged_indices = Vec::new();
+            if let Some(genesis_core::SpikeData::Sparse(indices)) = primary_spikes {
+                merged_indices.extend(indices);
+            }
+            if let Some(genesis_core::SpikeData::Sparse(indices)) = secondary_spikes {
+                merged_indices.extend(indices);
+            }
+            genesis_core::SpikeData::Sparse(merged_indices)
+        } else {
+            engine.backend.day_phase(
+                &mut engine.model,
+                &engine.state.merged_inputs_buffer,
+                &engine.state.previous_spikes,
+                &full_history,
+                context.tick,
+                engine.state.global_modulators,
+            )
+        };
+
+        engine.state.current_spikes_buffer.fill(false);
         match &spike_data {
             SpikeData::Sparse(indices) => {
                 for &idx in indices { if idx < n_count { engine.state.current_spikes_buffer[idx] = true; } }

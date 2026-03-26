@@ -411,6 +411,16 @@ impl NanoModule for BitWiseTitan {
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
 
+    fn on_config_sync(&mut self, config: &crate::NetworkConfig) {
+        self.max_associations = config.titan.max_associations;
+        self.max_blocks = config.titan.max_blocks;
+        self.max_entries_per_block = config.titan.max_entries_per_block;
+        self.surprise_threshold = config.titan.surprise_threshold;
+        self.deep_replay_threshold = config.titan.deep_replay_threshold;
+        self.elastic_window_max = config.titan.elastic_window_max;
+        self.decay_rate = config.titan.decay_rate;
+    }
+
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Script Execution (Hierarchical Planning)
         let n_count_script = previous_spikes.len();

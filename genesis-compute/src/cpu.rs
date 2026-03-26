@@ -372,6 +372,12 @@ impl CpuBackend {
 
     fn update_neuron_states_internal(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         let n_count = model.neurons.len();
+        self.update_neuron_states_range(model, current_tick, new_spikes, 0..n_count);
+    }
+
+    fn update_neuron_states_range(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool], range: std::ops::Range<usize>) {
+        let n_count = model.neurons.len();
+        let range_len = range.end - range.start;
         let ip_inc = model.config.plasticity.ip_increment;
         let ip_dec = model.config.plasticity.ip_decay;
         let noise_amp = model.config.physics.noise_amplitude;
@@ -379,12 +385,12 @@ impl CpuBackend {
         let expert_masks = &self.expert_masks;
         let neurons = &mut model.neurons;
         let mut spike_results = vec![false; n_count];
-        let chunk_size = (n_count / rayon::current_num_threads()).max(64);
+        let chunk_size = (range_len / rayon::current_num_threads()).max(64);
         let expert_masks_ptr = expert_masks.as_ptr() as usize;
         let neurons_ptr = neurons as *mut _ as usize;
         spike_results.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| {
-            let start_idx = chunk_idx * chunk_size;
-            let end_idx = (start_idx + chunk_size).min(n_count);
+            let start_idx = range.start + chunk_idx * chunk_size;
+            let end_idx = (start_idx + chunk_size).min(range.end);
             unsafe {
                 let n_mut = &mut *(neurons_ptr as *mut genesis_core::NeuronsSoA);
                 let e_masks = if expert_masks_ptr == 0 { &[] } else { std::slice::from_raw_parts(expert_masks_ptr as *const bool, expert_masks.len()) };
@@ -397,19 +403,25 @@ impl CpuBackend {
                 }
             }
         });
-        for i in 0..n_count { if spike_results[i] { new_spikes[i] = true; } }
+        for i in range { if spike_results[i] { new_spikes[i] = true; } }
     }
 }
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &'static str { "CpuBackend" }
     fn rebuild_index(&mut self, model: &BakedModel) { self.rebuild_index_internal(model); }
+
     fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<genesis_core::SpikeData> {
+        let n_count = model.neurons.len();
+        self.execute_kernel_range(kernel, model, ctx, 0..n_count)
+    }
+
+    fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<genesis_core::SpikeData> {
         let n_count = model.neurons.len();
         match kernel {
             crate::SimulationKernel::PropagateSynapses => {
                 for (i, &val) in ctx.external_inputs.iter().enumerate() {
-                    if i < n_count {
+                    if i >= range.start && i < range.end && i < n_count {
                         let gate = model.neurons.dendritic_gate[i];
                         let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
                         model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
@@ -429,13 +441,16 @@ impl ComputeBackend for CpuBackend {
             crate::SimulationKernel::UpdateMembranePotentials => { None }
             crate::SimulationKernel::GenerateSpikes => {
                 let mut new_spikes = vec![false; n_count];
-                self.update_neuron_states_internal(model, ctx.current_tick, &mut new_spikes);
-                let active_indices: Vec<usize> = new_spikes.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| i).collect();
+                self.update_neuron_states_range(model, ctx.current_tick, &mut new_spikes, range.clone());
+                let active_indices: Vec<usize> = new_spikes.iter().enumerate()
+                    .filter(|&(i, &s)| s && i >= range.start && i < range.end)
+                    .map(|(i, _)| i).collect();
                 Some(genesis_core::SpikeData::Sparse(active_indices))
             }
             crate::SimulationKernel::ApplyModulation(_modulation) => { None }
         }
     }
+
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
         let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation };
         self.execute_kernel(crate::SimulationKernel::PropagateSynapses, model, &ctx);

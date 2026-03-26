@@ -13,7 +13,7 @@ pub struct NetworkConfig {
     pub hardware: HardwareConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PhysicsConfig {
     pub default_threshold: IValue,
     pub default_decay: IValue,
@@ -23,9 +23,10 @@ pub struct PhysicsConfig {
     pub activity_ema_alpha: i64,
     pub target_activity_level: IValue,
     pub dendritic_coincidence_threshold: IValue,
+    pub theta_rhythm: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PlasticityConfig {
     pub learning_rate: IValue,
     pub weight_clamp_limit: IValue,
@@ -40,13 +41,14 @@ pub struct PlasticityConfig {
     pub stdp_a_minus: IValue,
     pub ip_increment: IValue,
     pub ip_decay: IValue,
+    pub intrinsic_learning_rate: IValue,
     pub stp_resource_decay: i64,
     pub stp_calcium_decay: i64,
     pub stp_resource_recovery: i64,
     pub stp_calcium_recovery: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TitanConfig {
     pub byte_memory_size: usize,
     pub max_associations: usize,
@@ -58,7 +60,7 @@ pub struct TitanConfig {
     pub decay_rate: IValue,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ModuleConfig {
     pub think_max_ticks: usize,
     pub think_surprise_threshold_deep: IValue,
@@ -69,13 +71,13 @@ pub struct ModuleConfig {
     pub top_down_gain: IValue,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AstroConfig {
     pub increment: IValue,
     pub decay_rate: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct HardwareConfig {
     pub preferred_backend: String,
 }
@@ -92,6 +94,7 @@ impl Default for NetworkConfig {
                 activity_ema_alpha: 990,
                 target_activity_level: 100,
                 dendritic_coincidence_threshold: 512,
+                theta_rhythm: true,
             },
             plasticity: PlasticityConfig {
                 learning_rate: 10,
@@ -107,6 +110,7 @@ impl Default for NetworkConfig {
                 stdp_a_minus: 100,
                 ip_increment: 50,
                 ip_decay: 1,
+                intrinsic_learning_rate: 5,
                 stp_resource_decay: 800,
                 stp_calcium_decay: 95,
                 stp_resource_recovery: 99,

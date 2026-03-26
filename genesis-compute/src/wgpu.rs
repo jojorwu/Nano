@@ -21,6 +21,14 @@ pub struct GpuNeuronState {
     pub block_id: u32,
     pub action: i32,
     pub packed: u64,
+    pub plasticity_gate: i32,
+    pub astro_calcium: i32,
+    pub is_remote: u32,
+    pub origin_node_id: u32,
+    pub energy_level: i32,
+    pub specialization_score: f32,
+    pub liquid_current: i32,
+    pub update_interval: u32,
 }
 
 #[repr(C)]
@@ -68,6 +76,8 @@ pub struct GpuResources {
     pub block_id_buffer: Option<wgpu::Buffer>,
     pub block_attn_buffer: Option<wgpu::Buffer>,
     pub context_hash_buffer: Option<wgpu::Buffer>,
+    pub segment_potentials_buffer: Option<wgpu::Buffer>,
+    pub segment_gates_buffer: Option<wgpu::Buffer>,
 }
 
 pub struct WgpuBackend {
@@ -133,6 +143,8 @@ impl WgpuBackend {
                 Self::storage_entry(11, true), // dendritic_gate
                 Self::storage_entry(12, true), // gate_thresholds
                 Self::storage_entry(13, true), // expert_mask
+                Self::storage_entry(14, false), // segment_potentials (RW)
+                Self::storage_entry(15, true),  // segment_gates
                 wgpu::BindGroupLayoutEntry { binding: 23, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
@@ -217,6 +229,9 @@ impl WgpuBackend {
             modulation_buffer: None,
             block_id_buffer: None,
             block_attn_buffer: None,
+            context_hash_buffer: None,
+            segment_potentials_buffer: None,
+            segment_gates_buffer: None,
         };
 
         Ok(Self {
@@ -295,7 +310,12 @@ impl WgpuBackend {
 impl ComputeBackend for WgpuBackend {
     fn name(&self) -> &'static str { "WgpuBackend" }
 
-    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, _model: &mut BakedModel, _ctx: &crate::KernelContext) -> Option<SpikeData> {
+    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<SpikeData> {
+        let n_count = model.neurons.len();
+        self.execute_kernel_range(kernel, model, ctx, 0..n_count)
+    }
+
+    fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, _model: &mut BakedModel, _ctx: &crate::KernelContext, _range: std::ops::Range<usize>) -> Option<SpikeData> {
         match kernel {
             crate::SimulationKernel::PropagateSynapses => {
                 // Dispatch spike_prop.wgsl
@@ -342,6 +362,14 @@ impl ComputeBackend for WgpuBackend {
                 block_id: model.neurons.block_id[i],
                 action: model.neurons.action_potential[i],
                 packed: model.neurons.packed_params[i],
+                plasticity_gate: model.neurons.plasticity_gate[i],
+                astro_calcium: model.neurons.astro_calcium[i],
+                is_remote: model.neurons.is_remote[i] as u32,
+                origin_node_id: model.neurons.origin_node_id[i],
+                energy_level: model.neurons.energy_level[i],
+                specialization_score: model.neurons.specialization_score[i],
+                liquid_current: model.neurons.liquid_current[i],
+                update_interval: model.neurons.update_interval[i],
             });
         }
         Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
@@ -381,7 +409,16 @@ impl ComputeBackend for WgpuBackend {
         Self::ensure_buffer(&self.device, &mut res.dendritic_gate_buffer, "Dendritic Gate", &model.neurons.dendritic_gate, wgpu::BufferUsages::STORAGE, false);
         Self::ensure_buffer(&self.device, &mut res.gate_threshold_buffer, "Gate Threshold", &model.neurons.gate_threshold, wgpu::BufferUsages::STORAGE, false);
 
-        let config_data = [model.config.ip_increment, model.config.ip_decay, 0, 0]; // Simpler config for now
+        // Upload segment potentials and gates for Multi-Segment Dendrites
+        Self::ensure_buffer(&self.device, &mut res.segment_potentials_buffer, "Segment Potentials", &model.neurons.segment_potentials, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+        Self::ensure_buffer(&self.device, &mut res.segment_gates_buffer, "Segment Gates", &model.neurons.segment_gates, wgpu::BufferUsages::STORAGE, false);
+
+        let config_data = [
+             model.config.physics.noise_amplitude,
+             model.config.physics.theta_rhythm as i32,
+             model.config.plasticity.intrinsic_learning_rate as i32,
+             0
+        ];
         Self::ensure_buffer(&self.device, &mut res.config_uniform_buffer, "Config", &config_data, wgpu::BufferUsages::STORAGE, false);
 
         let tick_data = [current_tick];
@@ -516,6 +553,8 @@ impl ComputeBackend for WgpuBackend {
                 wgpu::BindGroupEntry { binding: 11, resource: res.dendritic_gate_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: res.gate_threshold_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 13, resource: res.expert_mask_buffer.as_ref().unwrap_or(&res.input_buffer.as_ref().unwrap()).as_entire_binding() }, // Placeholder
+                wgpu::BindGroupEntry { binding: 14, resource: res.segment_potentials_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 15, resource: res.segment_gates_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 23, resource: res.modulation_buffer.as_ref().unwrap().as_entire_binding() },
             ],
         });
@@ -594,6 +633,9 @@ impl ComputeBackend for WgpuBackend {
             model.neurons.adaptation_current[i] = out_states[i].adaptation;
             model.neurons.backprop_signal[i] = out_states[i].backprop_signal;
             model.neurons.action_potential[i] = out_states[i].action;
+            model.neurons.astro_calcium[i] = out_states[i].astro_calcium;
+            model.neurons.energy_level[i] = out_states[i].energy_level;
+            model.neurons.specialization_score[i] = out_states[i].specialization_score;
         }
         drop(state_data);
 

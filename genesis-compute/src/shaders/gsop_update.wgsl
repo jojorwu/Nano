@@ -9,6 +9,20 @@ struct NeuronState {
     adaptation: i32,
     activity_ema: i32,
     base_threshold: i32,
+    distal_gate: i32,
+    apical_gate: i32,
+    basal_gate: i32,
+    block_id: u32,
+    action: i32,
+    packed: vec2<u32>, // u64 mirror
+    plasticity_gate: i32,
+    astro_calcium: i32,
+    is_remote: u32,
+    origin_node_id: u32,
+    energy_level: i32,
+    specialization_score: f32,
+    liquid_current: i32,
+    update_interval: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> weights: array<i32>;
