@@ -36,7 +36,7 @@ pub use workspace::WorkspaceModule;
 pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
 pub use curiosity::CuriosityModule;
-pub use config::NetworkConfig;
+pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, AstroConfig, HardwareConfig};
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations
@@ -135,9 +135,9 @@ impl NanoModule for ThinkModule {
     }
     fn validate_state(&self, _neurons: &NeuronsSoA) -> Result<(), ModuleError> { Ok(()) }
     fn on_config_sync(&mut self, config: &NetworkConfig) {
-        self.max_ticks = config.think_max_ticks;
-        self.surprise_threshold_deep = config.think_surprise_threshold_deep;
-        self.surprise_threshold_low = config.think_surprise_threshold_low;
+        self.max_ticks = config.modules.think_max_ticks;
+        self.surprise_threshold_deep = config.modules.think_surprise_threshold_deep;
+        self.surprise_threshold_low = config.modules.think_surprise_threshold_low;
     }
 }
 
@@ -263,7 +263,7 @@ impl PlasticityRule for GsopRule {
              }
         }
 
-        crate::plasticity::clamp_and_preserve_sign_with_limit(weight, old_weight, ctx.config.weight_clamp_limit);
+        crate::plasticity::clamp_and_preserve_sign_with_limit(weight, old_weight, ctx.config.plasticity.weight_clamp_limit);
     }
 }
 

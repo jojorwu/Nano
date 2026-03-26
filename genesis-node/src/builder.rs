@@ -41,7 +41,7 @@ impl RuntimeBuilder {
         let n_count = model.neurons.len();
 
         let backend_name = self.settings.preferred_backend.as_deref()
-            .unwrap_or(&model.config.preferred_backend);
+            .unwrap_or(&model.config.hardware.preferred_backend);
 
         let registry = genesis_compute::BackendRegistry::new();
         let backend = registry.create(backend_name)

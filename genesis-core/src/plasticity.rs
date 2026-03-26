@@ -143,7 +143,7 @@ impl crate::PlasticityRule for StdpRule {
             *weight = weight.saturating_sub(delta);
         }
 
-        clamp_and_preserve_sign_with_limit(weight, weight_before, ctx.config.weight_clamp_limit);
+        clamp_and_preserve_sign_with_limit(weight, weight_before, ctx.config.plasticity.weight_clamp_limit);
     }
 }
 

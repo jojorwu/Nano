@@ -125,7 +125,7 @@ impl SimulationSession {
         }
 
         if let Some(lr) = lr_override {
-            runtime.engine.model.config.learning_rate = lr;
+            runtime.engine.model.config.plasticity.learning_rate = lr;
         }
         Ok(Self { runtime })
     }
@@ -219,11 +219,11 @@ vocab_size = 1000
             let mut bp: ModelBlueprint = toml::from_str(&content).with_context(|| "Invalid blueprint format")?;
             if let Some(b) = backend {
                 if bp.config.is_none() { bp.config = Some(Default::default()); }
-                if let Some(ref mut cfg) = bp.config { cfg.preferred_backend = b.clone(); }
+                if let Some(ref mut cfg) = bp.config { cfg.hardware.preferred_backend = b.clone(); }
             }
             let baked = bp.bake();
             baked.save(output).with_context(|| format!("Failed to save model to {}", output))?;
-            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.preferred_backend);
+            println!("✅ Model '{}' baked to {} (Backend: {}).", bp.name, output, baked.config.hardware.preferred_backend);
         }
         Commands::Run { model, input, #[cfg(feature = "vision")] image, byte_level, reasoning: _, learning_rate, backend } => {
             let mut session = SimulationSession::new(model, *learning_rate, backend.clone())?;
@@ -384,7 +384,7 @@ vocab_size = 1000
             let mut session = SimulationSession::new(model, None, None)?;
 
             let mut avg_surprise = 0f32;
-            let mut best_lr = session.runtime.engine.model.config.learning_rate;
+            let mut best_lr = session.runtime.engine.model.config.plasticity.learning_rate;
             let mut best_interval = session.runtime.settings.night_phase_interval;
 
             println!("  Initial State: LR={}, SleepInterval={}", best_lr, best_interval);
@@ -414,7 +414,7 @@ vocab_size = 1000
                 }
             }
 
-            session.runtime.engine.model.config.learning_rate = best_lr;
+            session.runtime.engine.model.config.plasticity.learning_rate = best_lr;
             session.runtime.settings.night_phase_interval = best_interval;
 
             println!("✅ Auto-tuning complete. Suggested settings applied.");

@@ -290,8 +290,8 @@ impl BitWiseTitan {
     /// Three-Factor Learning using BitPacked history for speed.
     /// Elastic Context: search depth increases with surprise.
     pub fn learn_from_history(&mut self, history: &[crate::SpikeData], h_ptr: usize, neurons: &NeuronsSoA, surprise: IValue) {
+        // High Surprise Pattern Storage for Night Replay
         if surprise > self.deep_replay_threshold {
-            // Store highly surprising patterns in L3 episodic archive for night replay
             let now = history[h_ptr].to_bitpacked(neurons.len());
             let mut active_blocks = Vec::new();
             for (i, &word) in now.iter().enumerate() {

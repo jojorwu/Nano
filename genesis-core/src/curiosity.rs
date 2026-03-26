@@ -70,3 +70,24 @@ impl NanoModule for CuriosityModule {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_curiosity_reward() {
+        let mut curiosity = CuriosityModule::new();
+
+        // Simulate decreasing surprise (learning)
+        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(1000));
+        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(900));
+        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(800));
+        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(700));
+        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(600));
+
+        assert!(curiosity.last_internal_reward > 0);
+        let mods = curiosity.get_global_modulations();
+        assert_eq!(mods[0], (0, curiosity.curiosity_reward_strength));
+    }
+}

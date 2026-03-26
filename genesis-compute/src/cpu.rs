@@ -43,8 +43,11 @@ impl CpuBackend {
         // Each segment independently recognizes a pattern. If any segment 'fires',
         // it contributes a significant dendritic spike to the soma.
         let mut total_distal = attn_dist;
-        for (seg_pot, seg_gate) in neurons.segment_potentials[i].iter().zip(&neurons.segment_gates[i]) {
-             let gated = ((*seg_pot as i64 * *seg_gate as i64) >> 10) as i32;
+        let seg_offset = i * 4;
+        for s in 0..4 {
+             let seg_pot = neurons.segment_potentials[seg_offset + s];
+             let seg_gate = neurons.segment_gates[seg_offset + s];
+             let gated = (seg_pot as i64 * seg_gate as i64 >> 10) as i32;
              if gated > 500 { // Segment threshold
                   total_distal = total_distal.saturating_add(SCALE); // Segmental Ignition
              }
@@ -68,29 +71,30 @@ impl CpuBackend {
 
         if fired {
             neurons.potential[i] = 0;
-            neurons.refractory_timer[i] = model.config.default_refractory_ticks;
+            neurons.refractory_timer[i] = model.config.physics.default_refractory_ticks;
             neurons.last_spike_tick[i] = current_tick;
             neurons.backprop_signal[i] = SCALE;
             neurons.action_potential[i] = SCALE;
             neurons.threshold[i] = neurons.threshold[i].saturating_add(ip_inc);
-            let alpha = model.config.activity_ema_alpha as i32;
+            let alpha = model.config.physics.activity_ema_alpha as i32;
             neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
             neurons.adaptation_current[i] = neurons.adaptation_current[i].saturating_add(100);
-            neurons.astro_calcium[i] = neurons.astro_calcium[i].saturating_add(model.config.astro_increment);
+            neurons.astro_calcium[i] = neurons.astro_calcium[i].saturating_add(model.config.astro.increment);
         } else {
             neurons.potential[i] = current_pot;
             if neurons.refractory_timer[i] > 0 { neurons.refractory_timer[i] -= 1; }
             if neurons.threshold[i] > neurons.base_threshold[i] { neurons.threshold[i] = neurons.threshold[i].saturating_sub(ip_dec); }
-            neurons.backprop_signal[i] = ((neurons.backprop_signal[i] as i64 * model.config.smbp_decay) >> 10) as i32;
-            neurons.action_potential[i] = ((neurons.action_potential[i] as i64 * model.config.smbp_decay) >> 10) as i32;
-            let alpha = model.config.activity_ema_alpha as i32;
+            neurons.backprop_signal[i] = ((neurons.backprop_signal[i] as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+            neurons.action_potential[i] = ((neurons.action_potential[i] as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+            let alpha = model.config.physics.activity_ema_alpha as i32;
             neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64) / 1000) as i32;
             neurons.adaptation_current[i] = (neurons.adaptation_current[i] * 95) / 100;
-            neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro_decay_rate) / 1000) as i32;
+            neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro.decay_rate) / 1000) as i32;
 
             // Decay segment potentials
-            for p in &mut neurons.segment_potentials[i] {
-                 *p = (*p * 90) / 100;
+            let seg_offset = i * 4;
+            for s in 0..4 {
+                 neurons.segment_potentials[seg_offset + s] = (neurons.segment_potentials[seg_offset + s] * 90) / 100;
             }
         }
 
@@ -112,7 +116,7 @@ impl CpuBackend {
         let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
         if error > 0 {
             neurons.base_threshold[i] = neurons.base_threshold[i].saturating_add(homeo_rate);
-        } else if error < 0 && neurons.base_threshold[i] > model.config.default_threshold / 2 {
+        } else if error < 0 && neurons.base_threshold[i] > model.config.physics.default_threshold / 2 {
             neurons.base_threshold[i] = neurons.base_threshold[i].saturating_sub(1);
         }
         neurons.next_update_tick[i] = current_tick + neurons.update_interval[i];
@@ -215,8 +219,8 @@ impl CpuBackend {
                     let stp_weight = ((stp_weight as i64 * (SCALE as i64 + u_facilitation as i64)) >> 10) as i32;
 
                     // Consumption: firing uses resources and increases calcium
-                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] as i64 * model.config.stp_resource_decay >> 10) as i32;
-                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] as i64 + model.config.stp_calcium_recovery as i64).min(SCALE as i64) as i32;
+                    model.synapses.stp_resources[syn_idx] = (model.synapses.stp_resources[syn_idx] as i64 * model.config.plasticity.stp_resource_decay >> 10) as i32;
+                    model.synapses.stp_calcium[syn_idx] = (model.synapses.stp_calcium[syn_idx] as i64 + model.config.plasticity.stp_calcium_recovery as i64).min(SCALE as i64) as i32;
 
                     let gated_weight = ((stp_weight as i64 * gate as i64) >> 10) as i32;
                     match model.synapses.compartment[syn_idx] {
@@ -279,10 +283,10 @@ impl CpuBackend {
 
     fn update_neuron_states(&self, model: &mut BakedModel, current_tick: u32, new_spikes: &mut [bool]) {
         let n_count = model.neurons.len();
-        let ip_inc = model.config.ip_increment;
-        let ip_dec = model.config.ip_decay;
-        let noise_amp = model.config.noise_amplitude;
-        let target_activity = model.config.target_activity_level;
+        let ip_inc = model.config.plasticity.ip_increment;
+        let ip_dec = model.config.plasticity.ip_decay;
+        let noise_amp = model.config.physics.noise_amplitude;
+        let target_activity = model.config.physics.target_activity_level;
         let expert_masks = &self.expert_masks;
 
         let neurons = &mut model.neurons;
@@ -352,8 +356,8 @@ impl ComputeBackend for CpuBackend {
 
                 // Parallelized STP Recovery
                 let synapses = &mut model.synapses;
-                let r_rec = model.config.stp_resource_recovery;
-                let c_dec = model.config.stp_calcium_decay;
+                let r_rec = model.config.plasticity.stp_resource_recovery;
+                let c_dec = model.config.plasticity.stp_calcium_decay;
                 synapses.stp_resources.par_iter_mut()
                     .zip(synapses.stp_calcium.par_iter_mut())
                     .for_each(|(r, c)| {
@@ -399,7 +403,7 @@ impl ComputeBackend for CpuBackend {
         let n_count = model.neurons.len();
 
         // Apply learning rate from model config
-        self.plasticity_rule = Box::new(GsopRule { learning_rate: model.config.learning_rate });
+        self.plasticity_rule = Box::new(GsopRule { learning_rate: model.config.plasticity.learning_rate });
 
         use std::collections::HashSet;
         let mut active_synapses = HashSet::new();
@@ -490,7 +494,7 @@ impl ComputeBackend for CpuBackend {
                         let delta = *t * capture_strength;
                         let old_w = *w;
                         *w = w.saturating_add(delta);
-                        genesis_core::plasticity::clamp_and_preserve_sign_with_limit(w, old_w, model.config.weight_clamp_limit);
+                        genesis_core::plasticity::clamp_and_preserve_sign_with_limit(w, old_w, model.config.plasticity.weight_clamp_limit);
 
                         // Consolidation: tag is used up
                         *t = 0;
@@ -549,19 +553,19 @@ impl ComputeBackend for CpuBackend {
 
         // SNNaS: Evolutionary mutation
         if let Some(r) = reward {
-            self.optimizer.mutate_with_surprise(&mut model.synapses, &mut model.neurons, r, history, model.config.max_synapses, block_surprise);
+            self.optimizer.mutate_with_surprise(&mut model.synapses, &mut model.neurons, r, history, model.config.plasticity.max_synapses, block_surprise);
 
-            if r > model.config.neurogenesis_reward_threshold && model.neurons.len() < model.config.max_neurons {
+            if r > model.config.plasticity.neurogenesis_reward_threshold && model.neurons.len() < model.config.plasticity.max_neurons {
                 let grow_size = (model.neurons.len() / 20).max(1);
                 log::info!("Neurogenesis: growing population by {} neurons", grow_size);
                 model.neurons.grow(grow_size);
             }
 
-            if model.config.metaplasticity_enabled {
+            if model.config.plasticity.metaplasticity_enabled {
                 if r.abs() < 10 {
-                    model.config.learning_rate = (model.config.learning_rate as i64 * 900 / 1024) as i32;
+                    model.config.plasticity.learning_rate = (model.config.plasticity.learning_rate as i64 * 900 / 1024) as i32;
                 } else if r.abs() > 500 {
-                    model.config.learning_rate = (model.config.learning_rate as i64 * 1100 / 1024) as i32;
+                    model.config.plasticity.learning_rate = (model.config.plasticity.learning_rate as i64 * 1100 / 1024) as i32;
                 }
             }
         }
@@ -579,7 +583,7 @@ impl ComputeBackend for CpuBackend {
             }
         }
 
-        let max_neuron_sum = model.config.homeostatic_scaling_limit;
+        let max_neuron_sum = model.config.plasticity.homeostatic_scaling_limit;
         let synapses = &mut model.synapses;
 
         // Use chunks to parallelize weight adjustment across large synapse populations

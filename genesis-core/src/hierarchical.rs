@@ -82,13 +82,33 @@ impl NanoModule for HierarchicalModule {
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
 
     fn on_config_sync(&mut self, config: &NetworkConfig) {
-        self.enabled = config.hierarchical_control_enabled;
-        self.top_down_gain = config.top_down_gain;
+        self.enabled = config.modules.hierarchical_control_enabled;
+        self.top_down_gain = config.modules.top_down_gain;
     }
 
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }
     fn set_state(&mut self, state: &[u8]) {
         if let Ok(new_self) = bincode::deserialize::<Self>(state) { *self = new_self; }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hierarchical_layer_monitoring() {
+        let mut hierarchical = HierarchicalModule::new();
+        let mut neurons = NeuronsSoA::new(10);
+        for i in 0..10 { neurons.layer_id[i] = if i < 5 { 1 } else { 2 }; }
+
+        let mut spikes = vec![false; 10];
+        for i in 5..10 { spikes[i] = true; } // 100% activity in layer 2
+
+        hierarchical.on_update_weights(&mut neurons, &[], &spikes, 0, None);
+
+        let layer_2_act = hierarchical.layer_activity.get(&2).cloned().unwrap_or(0.0);
+        assert!((layer_2_act - 1.0).abs() < 0.001);
     }
 }

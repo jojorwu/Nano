@@ -91,14 +91,14 @@ impl ModelBlueprint {
                         let mut tm = TitanMemory::new_with_size(*size, *learning_rate);
                         if let Some(dr) = decay_rate { tm.decay_rate = *dr; }
                         if let Some(ref cfg) = self.config {
-                            tm.byte_memory.resize(cfg.titan_byte_memory_size, 0);
-                            tm.max_associations = cfg.titan_max_associations;
-                            tm.max_blocks = cfg.titan_max_blocks;
-                            tm.max_entries_per_block = cfg.titan_max_entries_per_block;
-                            tm.surprise_threshold = cfg.titan_surprise_threshold;
-                            tm.deep_replay_threshold = cfg.titan_deep_replay_threshold;
-                            tm.elastic_window_max = cfg.titan_elastic_window_max;
-                            tm.decay_rate = cfg.titan_decay_rate;
+                            tm.byte_memory.resize(cfg.titan.byte_memory_size, 0);
+                            tm.max_associations = cfg.titan.max_associations;
+                            tm.max_blocks = cfg.titan.max_blocks;
+                            tm.max_entries_per_block = cfg.titan.max_entries_per_block;
+                            tm.surprise_threshold = cfg.titan.surprise_threshold;
+                            tm.deep_replay_threshold = cfg.titan.deep_replay_threshold;
+                            tm.elastic_window_max = cfg.titan.elastic_window_max;
+                            tm.decay_rate = cfg.titan.decay_rate;
                         }
                         module_states.insert("titan".to_string(), bincode::serialize(&tm).unwrap());
                         titan_memory = Some(tm);

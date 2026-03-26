@@ -115,7 +115,36 @@ impl NanoModule for WorkspaceModule {
     }
 
     fn on_config_sync(&mut self, config: &crate::config::NetworkConfig) {
-        self.broadcast_intensity = config.workspace_broadcast_intensity;
-        self.ignition_threshold = config.workspace_ignition_threshold;
+        self.broadcast_intensity = config.modules.workspace_broadcast_intensity;
+        self.ignition_threshold = config.modules.workspace_ignition_threshold;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::NeuronsSoA;
+    use crate::bus::InputBus;
+
+    #[test]
+    fn test_workspace_ignition() {
+        let mut workspace = WorkspaceModule::new();
+        let mut neurons = NeuronsSoA::new(32);
+        for i in 0..32 { neurons.block_id[i] = (i / 16) as u32; }
+
+        workspace.on_init(&mut neurons).unwrap();
+        let bus = InputBus::new(32);
+
+        // Simulate activity in block 1
+        let mut spikes = vec![false; 32];
+        for i in 16..32 { spikes[i] = true; }
+
+        workspace.on_update_weights(&mut neurons, &[], &spikes, 0, None);
+
+        // Tick to trigger ignition
+        workspace.on_tick(&bus, &spikes, 1);
+
+        assert_eq!(workspace.active_block, Some(1));
+        assert!(workspace.ignition_timer > 0);
     }
 }

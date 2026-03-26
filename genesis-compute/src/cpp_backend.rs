@@ -117,9 +117,9 @@ impl ComputeBackend for CppBackend {
                         model.neurons.as_ffi(),
                         ctx.current_tick,
                         new_spikes.as_mut_ptr(),
-                        model.config.ip_increment,
-                        model.config.ip_decay,
-                        model.config.noise_amplitude
+                        model.config.plasticity.ip_increment,
+                        model.config.plasticity.ip_decay,
+                        model.config.physics.noise_amplitude
                     );
                 }
 

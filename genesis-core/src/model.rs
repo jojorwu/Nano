@@ -81,7 +81,7 @@ pub struct NeuronsSoA {
     pub block_id: Vec<u32>,
     pub potential: Vec<IValue>,
     pub distal_potential: Vec<IValue>,
-    pub segment_potentials: Vec<Vec<IValue>>, // For Multi-Segment Dendrites
+    pub segment_potentials: Vec<IValue>, // For Multi-Segment Dendrites (Flat with stride)
     pub proximal_potential: Vec<IValue>, // For somatic inputs
     pub apical_potential: Vec<IValue>,  // For hierarchical feedback
     pub basal_potential: Vec<IValue>,   // For lateral signals
@@ -99,7 +99,7 @@ pub struct NeuronsSoA {
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
     pub distal_gate: Vec<IValue>,
-    pub segment_gates: Vec<Vec<IValue>>,
+    pub segment_gates: Vec<IValue>, // For Multi-Segment Dendrites (Flat with stride)
     pub apical_gate: Vec<IValue>,
     pub basal_gate: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
@@ -142,6 +142,11 @@ pub struct NeuronsFFI {
     pub block_id: *mut u32,
     pub action_potential: *mut IValue,
     pub plasticity_gate: *mut IValue,
+    pub astro_calcium: *mut IValue,
+    pub energy_level: *mut IValue,
+    pub specialization_score: *mut f32,
+    pub segment_potentials: *mut IValue,
+    pub segment_gates: *mut IValue,
     pub packed_params: *mut u64,
     pub len: u32,
 }
@@ -172,6 +177,11 @@ impl NeuronsSoA {
             block_id: self.block_id.as_mut_ptr(),
             action_potential: self.action_potential.as_mut_ptr(),
             plasticity_gate: self.plasticity_gate.as_mut_ptr(),
+            astro_calcium: self.astro_calcium.as_mut_ptr(),
+            energy_level: self.energy_level.as_mut_ptr(),
+            specialization_score: self.specialization_score.as_mut_ptr(),
+            segment_potentials: self.segment_potentials.as_mut_ptr(),
+            segment_gates: self.segment_gates.as_mut_ptr(),
             packed_params: self.packed_params.as_mut_ptr(),
             len: self.len() as u32,
         }
@@ -218,8 +228,8 @@ impl NeuronsSoA {
             is_remote: Vec::with_capacity(capacity),
             origin_node_id: Vec::with_capacity(capacity),
             specialization_score: Vec::with_capacity(capacity),
-            segment_potentials: Vec::with_capacity(capacity),
-            segment_gates: Vec::with_capacity(capacity),
+            segment_potentials: Vec::with_capacity(capacity * 4),
+            segment_gates: Vec::with_capacity(capacity * 4),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -252,7 +262,7 @@ impl NeuronsSoA {
         self.block_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
-        self.segment_potentials.resize(new_size, vec![0; 4]);
+        self.segment_potentials.resize(new_size * 4, 0);
         self.proximal_potential.resize(new_size, 0);
         self.apical_potential.resize(new_size, 0);
         self.basal_potential.resize(new_size, 0);
@@ -270,7 +280,7 @@ impl NeuronsSoA {
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
         self.distal_gate.resize(new_size, SCALE);
-        self.segment_gates.resize(new_size, vec![SCALE; 4]);
+        self.segment_gates.resize(new_size * 4, SCALE);
         self.apical_gate.resize(new_size, SCALE);
         self.basal_gate.resize(new_size, SCALE);
         self.activity_ema.resize(new_size, 0);
@@ -570,18 +580,18 @@ impl BakedModel {
 
         // Dynamic RAM migration: ensure titan_memory matches config
         if let Some(ref mut titan) = model.titan_memory {
-             let cfg_size = model.config.titan_byte_memory_size;
+             let cfg_size = model.config.titan.byte_memory_size;
              if titan.byte_memory.len() != cfg_size {
                   log::info!("Migrating Titan byte_memory from {} to {} bytes", titan.byte_memory.len(), cfg_size);
                   titan.byte_memory.resize(cfg_size, 0);
              }
-             titan.max_associations = model.config.titan_max_associations;
-             titan.max_blocks = model.config.titan_max_blocks;
-             titan.max_entries_per_block = model.config.titan_max_entries_per_block;
-             titan.surprise_threshold = model.config.titan_surprise_threshold;
-             titan.deep_replay_threshold = model.config.titan_deep_replay_threshold;
-             titan.elastic_window_max = model.config.titan_elastic_window_max;
-             titan.decay_rate = model.config.titan_decay_rate;
+             titan.max_associations = model.config.titan.max_associations;
+             titan.max_blocks = model.config.titan.max_blocks;
+             titan.max_entries_per_block = model.config.titan.max_entries_per_block;
+             titan.surprise_threshold = model.config.titan.surprise_threshold;
+             titan.deep_replay_threshold = model.config.titan.deep_replay_threshold;
+             titan.elastic_window_max = model.config.titan.elastic_window_max;
+             titan.decay_rate = model.config.titan.decay_rate;
         }
 
         model.neurons.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
