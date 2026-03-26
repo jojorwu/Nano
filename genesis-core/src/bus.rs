@@ -34,6 +34,7 @@ pub struct InputBus {
     pub action_idx: usize,
     /// Global broadcast signals (Hormones/Neuromodulators)
     pub global_signals: Vec<AtomicI32>,
+    pub theta_phase: AtomicI32, // Rhythmic Synchronization
 }
 
 impl InputBus {
@@ -68,6 +69,7 @@ impl InputBus {
             channels,
             name_map,
             global_signals,
+            theta_phase: AtomicI32::new(0),
             proximal_idx,
             distal_idx,
             apical_idx,

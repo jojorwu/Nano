@@ -80,7 +80,8 @@ pub struct NeuronsSoA {
     /// Identifier for grouping neurons into blocks (mini-columns) for shared attention.
     pub block_id: Vec<u32>,
     pub potential: Vec<IValue>,
-    pub distal_potential: Vec<IValue>, // For distal dendrites (coincidence detection)
+    pub distal_potential: Vec<IValue>,
+    pub segment_potentials: Vec<Vec<IValue>>, // For Multi-Segment Dendrites
     pub proximal_potential: Vec<IValue>, // For somatic inputs
     pub apical_potential: Vec<IValue>,  // For hierarchical feedback
     pub basal_potential: Vec<IValue>,   // For lateral signals
@@ -97,7 +98,8 @@ pub struct NeuronsSoA {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub gate_threshold: Vec<IValue>,
-    pub distal_gate: Vec<IValue>, // Gating scalars per compartment
+    pub distal_gate: Vec<IValue>,
+    pub segment_gates: Vec<Vec<IValue>>,
     pub apical_gate: Vec<IValue>,
     pub basal_gate: Vec<IValue>,
     pub activity_ema: Vec<IValue>, // Long-term activity tracking (SCALE = 1.0)
@@ -216,6 +218,8 @@ impl NeuronsSoA {
             is_remote: Vec::with_capacity(capacity),
             origin_node_id: Vec::with_capacity(capacity),
             specialization_score: Vec::with_capacity(capacity),
+            segment_potentials: Vec::with_capacity(capacity),
+            segment_gates: Vec::with_capacity(capacity),
             packed_params: Vec::with_capacity(capacity),
         };
         neurons.grow(size);
@@ -248,6 +252,7 @@ impl NeuronsSoA {
         self.block_id.resize(new_size, 0);
         self.potential.resize(new_size, 0);
         self.distal_potential.resize(new_size, 0);
+        self.segment_potentials.resize(new_size, vec![0; 4]);
         self.proximal_potential.resize(new_size, 0);
         self.apical_potential.resize(new_size, 0);
         self.basal_potential.resize(new_size, 0);
@@ -265,6 +270,7 @@ impl NeuronsSoA {
         self.y.resize(new_size, 0);
         self.gate_threshold.resize(new_size, 512);
         self.distal_gate.resize(new_size, SCALE);
+        self.segment_gates.resize(new_size, vec![SCALE; 4]);
         self.apical_gate.resize(new_size, SCALE);
         self.basal_gate.resize(new_size, SCALE);
         self.activity_ema.resize(new_size, 0);

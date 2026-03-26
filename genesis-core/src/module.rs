@@ -174,6 +174,7 @@ impl ModuleRegistry {
         self.register_factory("workspace", || Box::new(crate::workspace::WorkspaceModule::new()));
         self.register_factory("hierarchical", || Box::new(crate::hierarchical::HierarchicalModule::new()));
         self.register_factory("episodic", || Box::new(crate::episodic::EpisodicModule::new()));
+        self.register_factory("curiosity", || Box::new(crate::curiosity::CuriosityModule::new()));
         self.register_factory("cerebellum", || Box::new(crate::robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
 

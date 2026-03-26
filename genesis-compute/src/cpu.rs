@@ -39,14 +39,31 @@ impl CpuBackend {
         let attn_basal = ((neurons.basal_potential[i] as i64 * neurons.basal_gate[i] as i64) >> 10) as i32;
 
         let astro_mod = ((neurons.astro_calcium[i] as i64 * SCALE as i64) >> 12) as i32;
+        // Multi-Segment Dendritic Integration
+        // Each segment independently recognizes a pattern. If any segment 'fires',
+        // it contributes a significant dendritic spike to the soma.
+        let mut total_distal = attn_dist;
+        for (seg_pot, seg_gate) in neurons.segment_potentials[i].iter().zip(&neurons.segment_gates[i]) {
+             let gated = ((*seg_pot as i64 * *seg_gate as i64) >> 10) as i32;
+             if gated > 500 { // Segment threshold
+                  total_distal = total_distal.saturating_add(SCALE); // Segmental Ignition
+             }
+        }
+
         let current_pot = calculate_membrane_potential(
-            neurons.potential[i], neurons.proximal_potential[i], attn_dist, attn_apical, attn_basal,
+            neurons.potential[i], neurons.proximal_potential[i], total_distal, attn_apical, attn_basal,
             neurons.gate_threshold[i], neurons.liquid_current[i], neurons.decay[i], noise_amp,
             neurons.adaptation_current[i] + astro_mod
         );
 
         let refr_mult = if neurons.refractory_timer[i] > 0 { 1 + (1 << neurons.refractory_timer[i]) } else { 1 };
-        let effective_threshold = neurons.threshold[i] * refr_mult;
+        let mut effective_threshold = neurons.threshold[i] * refr_mult;
+
+        // Theta Gating: modulate threshold based on global rhythm
+        // Higher threshold during off-phase, lower during on-phase
+        let theta = ((current_tick as f32 * 0.1).sin() * 200.0) as i32;
+        effective_threshold = effective_threshold.saturating_add(theta);
+
         let fired = current_pot >= effective_threshold;
 
         if fired {
@@ -70,6 +87,11 @@ impl CpuBackend {
             neurons.activity_ema[i] = ((neurons.activity_ema[i] as i64 * alpha as i64) / 1000) as i32;
             neurons.adaptation_current[i] = (neurons.adaptation_current[i] * 95) / 100;
             neurons.astro_calcium[i] = ((neurons.astro_calcium[i] as i64 * model.config.astro_decay_rate) / 1000) as i32;
+
+            // Decay segment potentials
+            for p in &mut neurons.segment_potentials[i] {
+                 *p = (*p * 90) / 100;
+            }
         }
 
         // Metabolic Energy Economy
@@ -311,6 +333,10 @@ impl ComputeBackend for CpuBackend {
 
     fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<genesis_core::SpikeData> {
         let n_count = model.neurons.len();
+
+        // Rhythmic Synchronization: Update global theta phase (8Hz simulation)
+        let _theta = ((ctx.current_tick as f32 * 0.1).sin() * 512.0 + 512.0) as i32;
+        // The host would normally set this in the bus, but for this POC we use a local derivation
         match kernel {
             crate::SimulationKernel::PropagateSynapses => {
                 // Apply external inputs directly to proximal potential with dendritic gating

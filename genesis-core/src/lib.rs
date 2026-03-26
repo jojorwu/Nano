@@ -25,6 +25,7 @@ pub mod attention;
 pub mod workspace;
 pub mod hierarchical;
 pub mod episodic;
+pub mod curiosity;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
@@ -34,6 +35,7 @@ pub use attention::AttnResModule;
 pub use workspace::WorkspaceModule;
 pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
+pub use curiosity::CuriosityModule;
 pub use config::NetworkConfig;
 
 pub type IValue = i32;
