@@ -402,3 +402,5 @@ impl Runtime {
 mod tests;
 #[cfg(test)]
 mod tests_advanced;
+#[cfg(test)]
+mod tests_scenarios;

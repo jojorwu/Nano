@@ -3,6 +3,7 @@ use genesis_core::ModuleManager;
 
 pub struct RuntimeBuilder {
     pub model_path: Option<String>,
+    pub model_instance: Option<genesis_core::BakedModel>,
     pub settings: SimulationSettings,
     pub observers: Vec<Box<dyn SimulationObserver>>,
     pub peers: Vec<String>,
@@ -13,6 +14,7 @@ impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
             model_path: None,
+            model_instance: None,
             settings: SimulationSettings::default(),
             observers: Vec::new(),
             peers: Vec::new(),
@@ -22,6 +24,11 @@ impl RuntimeBuilder {
 
     pub fn from_model(mut self, path: &str) -> Self {
         self.model_path = Some(path.to_string());
+        self
+    }
+
+    pub fn from_model_direct(mut self, model: genesis_core::BakedModel) -> Self {
+        self.model_instance = Some(model);
         self
     }
 
@@ -36,8 +43,12 @@ impl RuntimeBuilder {
     }
 
     pub fn build(self) -> Result<Runtime, RuntimeError> {
-        let path = self.model_path.ok_or_else(|| RuntimeError::ModelLoad("Model path not provided".into()))?;
-        let model = persistence::PersistenceManager::load(&path)?;
+        let model = if let Some(m) = self.model_instance {
+             m
+        } else {
+             let path = self.model_path.ok_or_else(|| RuntimeError::ModelLoad("Model path not provided".into()))?;
+             persistence::PersistenceManager::load(&path)?
+        };
         let n_count = model.neurons.len();
 
         let backend_name = self.settings.preferred_backend.as_deref()

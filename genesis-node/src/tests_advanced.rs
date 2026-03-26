@@ -7,7 +7,7 @@ mod tests_advanced {
 
     fn create_advanced_test_runtime(n_count: usize) -> Runtime {
         let mut config = genesis_core::NetworkConfig::default();
-        config.noise_amplitude = 0;
+        config.physics.noise_amplitude = 0;
 
         let mut neurons = NeuronsSoA::new(n_count);
         // Assign neurons to blocks
@@ -44,7 +44,7 @@ mod tests_advanced {
         let observers: Vec<Box<dyn SimulationObserver>> = Vec::new();
 
         Runtime {
-            engine: SimulationEngine::new(model, modules, backend, &settings),
+            engine: SimulationEngine::new(model, modules, backend, &settings).unwrap(),
             settings,
             episode_reward_history: Vec::new(),
             network_manager: None,
@@ -178,6 +178,7 @@ mod tests_advanced {
     fn test_prediction_error_ltd() {
         use genesis_core::{PlasticityRule, PlasticityContext, Compartment};
         use genesis_core::GsopRule;
+        let config = genesis_core::NetworkConfig::default();
         let gsop = GsopRule { learning_rate: 100 };
         let neurons = NeuronsSoA::new(1);
 
@@ -186,10 +187,12 @@ mod tests_advanced {
         // This is a prediction error that should trigger LTD.
         let ctx = PlasticityContext {
             pre_spiked: true, post_spiked: false, backprop_signal: 0,
+            prediction_error: -1000, // Large over-prediction
             compartment: Compartment::Distal, // Memory
             reward: None, neuromodulation: Default::default(),
             pre_last_spike: 5, post_last_spike: 0, current_tick: 10,
             post_index: 0, neurons: &neurons,
+            config: &config,
         };
 
         gsop.apply(&mut weight, &ctx);

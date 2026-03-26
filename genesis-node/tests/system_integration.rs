@@ -34,7 +34,7 @@ fn test_module_persistence_and_restoration() {
             },
             Box::new(CpuBackend::default()),
             &SimulationSettings::default()
-        ),
+        ).unwrap(),
         settings: SimulationSettings {
             night_phase_interval: 1, // Learning every tick for test
             ..SimulationSettings::default()
@@ -75,7 +75,7 @@ fn test_module_persistence_and_restoration() {
             },
             Box::new(CpuBackend::default()),
             &SimulationSettings::default()
-        ),
+        ).unwrap(),
         settings: SimulationSettings::default(),
         episode_reward_history: Vec::new(),
         network_manager: None,
@@ -98,12 +98,12 @@ fn test_module_persistence_and_restoration() {
 
 #[test]
 fn test_multi_compartment_gating_physics() {
+    let mut config = NetworkConfig::default();
+    config.physics.dendritic_coincidence_threshold = 512;
+
     let mut model = BakedModel {
         version: "4.0".to_string(),
-        config: NetworkConfig {
-            dendritic_coincidence_threshold: 512, // 0.5 * SCALE
-            ..NetworkConfig::default()
-        },
+        config,
         node_id: 0,
         local_range: (0, 3),
         neurons: NeuronsSoA::new(3),
@@ -198,7 +198,7 @@ fn test_evolutionary_structural_growth() {
             genesis_core::ModuleManager::new(),
             Box::new(CpuBackend::default()),
             &SimulationSettings::default()
-        ),
+        ).unwrap(),
         settings: SimulationSettings {
             night_phase_interval: 10,
             ..SimulationSettings::default()

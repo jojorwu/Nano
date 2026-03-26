@@ -82,7 +82,7 @@ enum Commands {
     },
     /// Manage configuration in nano.toml
     Config {
-        /// Key to get or set (e.g., 'network.learning_rate')
+        /// Key to get or set (e.g., 'network.learning_rate'). Use 'list' to see all.
         key: String,
         /// Value to set (if omitted, will get the current value)
         value: Option<String>,
@@ -480,6 +480,12 @@ vocab_size = 1000
         Commands::Config { key, value } => {
             let content = fs::read_to_string("nano.toml").unwrap_or_default();
             let mut doc = content.parse::<toml_edit::DocumentMut>().context("Failed to parse nano.toml")?;
+
+            if key == "list" {
+                 println!("--- Current Configuration (nano.toml) ---");
+                 println!("{}", doc.to_string());
+                 return Ok(());
+            }
 
             if let Some(v) = value {
                 let parts: Vec<&str> = key.split('.').collect();
