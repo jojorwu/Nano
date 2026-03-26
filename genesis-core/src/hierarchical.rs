@@ -37,6 +37,8 @@ impl HierarchicalModule {
 impl NanoModule for HierarchicalModule {
     fn name(&self) -> &str { "hierarchical" }
     fn tier(&self) -> u32 { 15 } // Runs after workspace but before final integration
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
         self.layer_to_neurons.clear();

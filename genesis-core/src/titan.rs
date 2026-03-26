@@ -34,6 +34,7 @@ pub struct BitWiseTitan {
     /// Last access tick per block for age-based decay
     pub last_access: Vec<u32>,
     /// Cached mapping from neuron index to block_id
+    #[serde(default)]
     pub neuron_to_block: Vec<u32>,
     // Configurable Limits
     pub max_associations: usize,
@@ -393,8 +394,10 @@ impl BitWiseTitan {
                                 changed = true;
                             }
                         }
+                        // Always return the block to memory
+                        self.update_block(src_bid, entries);
+
                         if changed {
-                            self.update_block(src_bid, entries);
                             self.context_hashes.entry(current_hash).or_default().push(src_bid);
                             self.context_hashes.entry(bound_hash).or_default().push(src_bid);
                             for (table_idx, &sig) in sigs_l1.iter().enumerate() { self.lsh_tables[table_idx].entry(sig).or_default().push(src_bid); }
@@ -419,15 +422,97 @@ impl BitWiseTitan {
     /// Specialized learning from an episodic sequence replay
     pub fn learn_from_sequence(&mut self, sequence: &crate::episodic::EpisodicSequence, neurons: &NeuronsSoA) {
         if sequence.ticks.is_empty() { return; }
+        let n_count = neurons.len();
 
         // Convert sequence ticks to SpikeData and perform history-based learning
         let history: Vec<crate::SpikeData> = sequence.ticks.iter().map(|t| {
             crate::SpikeData::Sparse(t.clone())
         }).collect();
 
-        // Replay sequence: treat each step as "now" and learn associations with the past
+        // Replay sequence: treat each step as "now" and learn associations with the past.
+        // Optimization: avoid temporal wrap-around for linear episodic sequences.
         for i in 1..history.len() {
-             self.learn_from_history(&history, i, neurons, sequence.surprise_at_start);
+             // 1. Pattern Archiving (Skip if already archived during original event)
+             // 2. Learning Gate
+             let effective_threshold = if sequence.surprise_at_start > 2000 { self.surprise_threshold / 2 } else { self.surprise_threshold };
+             if sequence.surprise_at_start < effective_threshold { continue; }
+
+             let now_packed = history[i].to_bitpacked(n_count);
+             let mut now_active = Vec::new();
+             for (idx, &word) in now_packed.iter().enumerate() {
+                 if word == 0 { continue; }
+                 for bit in 0..64 {
+                     if (word >> bit) & 1 == 1 {
+                         let n_idx = (idx * 64 + bit) as u32;
+                         if (n_idx as usize) < n_count { now_active.push(n_idx); }
+                     }
+                 }
+             }
+             if now_active.is_empty() { continue; }
+
+             // 3. Elastic Temporal Window (Linear, no wrap)
+             let search_depth = if sequence.surprise_at_start > 1000 { self.elastic_window_max } else if sequence.surprise_at_start > 500 { self.elastic_window_max / 2 } else { 2 };
+             let actual_depth = search_depth.min(i); // Limit depth to available history in linear sequence
+
+             // 4. Update Associations (using linear history slice)
+             self.perform_temporal_learning_linear(&history[0..i+1], i, &now_packed, &now_active, actual_depth, neurons, sequence.surprise_at_start);
+        }
+    }
+
+    fn perform_temporal_learning_linear(&mut self, history: &[crate::SpikeData], h_ptr: usize, now_packed: &[u64], now_active: &[u32], depth: usize, neurons: &NeuronsSoA, surprise: IValue) {
+        let n_count = neurons.len();
+        let current_hash = Self::compute_context_hash(now_packed);
+        let (sigs_l1, sigs_l2) = Self::compute_lsh_signatures_hierarchical(now_packed);
+
+        for t in 1..=depth {
+            if t > h_ptr { break; }
+            let past_idx = h_ptr - t;
+            let past_packed = history[past_idx].to_bitpacked(n_count);
+            let bound = Self::vsa_bind(now_packed, &past_packed);
+            let bound_hash = Self::compute_context_hash(&bound);
+
+            let reinforcement = if t == 1 { 2 } else { 1 };
+            let reduction_bonus = if surprise < 100 { 5 } else { 0 };
+
+            for (i, &past_word) in past_packed.iter().enumerate() {
+                if past_word == 0 { continue; }
+                for bit in 0..64 {
+                    if (past_word >> bit) & 1 == 1 {
+                        let src_idx = i * 64 + bit;
+                        if src_idx >= n_count { continue; }
+                        let src_bid = neurons.block_id[src_idx];
+                        let src_modality = neurons.layer_id[src_idx] >> 12;
+
+                        self.ensure_capacity(src_bid);
+                        let mut entries = self.get_block_mut(src_bid);
+                        let mut changed = false;
+
+                        for &tgt_idx in now_active {
+                            let tgt_modality = neurons.layer_id[tgt_idx as usize] >> 12;
+                            let synesthesia_bonus = if src_modality != tgt_modality { 2 } else { 0 };
+
+                            if let Some(assoc) = entries.iter_mut().find(|a| a.target == tgt_idx) {
+                                let boost = if surprise > 1500 { 5 } else { 0 };
+                                assoc.weight = assoc.weight.saturating_add(reinforcement + reduction_bonus + synesthesia_bonus + boost);
+                                changed = true;
+                            } else if entries.len() < self.max_entries_per_block {
+                                let boost = if surprise > 1500 { 10 } else { 0 };
+                                entries.push(Association { target: tgt_idx, weight: reinforcement + reduction_bonus + synesthesia_bonus + boost });
+                                changed = true;
+                            }
+                        }
+                        // Always return the block to memory
+                        self.update_block(src_bid, entries);
+
+                        if changed {
+                            self.context_hashes.entry(current_hash).or_default().push(src_bid);
+                            self.context_hashes.entry(bound_hash).or_default().push(src_bid);
+                            for (table_idx, &sig) in sigs_l1.iter().enumerate() { self.lsh_tables[table_idx].entry(sig).or_default().push(src_bid); }
+                            for (table_idx, &sig) in sigs_l2.iter().enumerate() { self.lsh_tables_l2[table_idx].entry(sig).or_default().push(src_bid); }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -436,6 +521,8 @@ impl NanoModule for BitWiseTitan {
     fn name(&self) -> &str { "titan" }
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["distal".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::ModuleError> {
         self.neuron_to_block = neurons.block_id.clone();

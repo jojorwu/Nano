@@ -39,6 +39,8 @@ impl NanoModule for WorkspaceModule {
     fn name(&self) -> &str { "workspace" }
     fn tier(&self) -> u32 { 10 } // High tier: runs after sensory processing
     fn outputs(&self) -> Vec<String> { vec!["broadcast".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_init(&mut self, neurons: &mut NeuronsSoA) -> Result<(), crate::module::ModuleError> {
         let max_bid = neurons.block_id.iter().max().copied().unwrap_or(0) as usize;

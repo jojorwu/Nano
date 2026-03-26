@@ -53,6 +53,8 @@ impl LoadBalancerModule {
 
 impl NanoModule for LoadBalancerModule {
     fn name(&self) -> &str { "load_balancer" }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
         self.last_rebalance_tick = tick;

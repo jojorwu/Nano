@@ -192,27 +192,27 @@ impl Runtime {
         // Structural plasticity and Global Module updates use raw reward
         self.engine.backend.structural_plasticity(&mut self.engine.model, raw_reward, &reconstructed);
 
-        // Memory Consolidation: Transfer episodic sequences to Titan
-        let mut episodic_sequences = Vec::new();
-        for m in &mut self.engine.modules.modules {
-             if m.name() == "episodic" {
-                  if let Ok(ep) = bincode::deserialize::<genesis_core::episodic::EpisodicModule>(&m.get_state()) {
-                       episodic_sequences = ep.sequences.clone();
-                  }
-             }
-        }
+        // Memory Consolidation: Transfer episodic sequences to Titan using zero-copy downcasting
+        // We use a scope to manage borrows
+        {
+            let mut episodic_sequences = Vec::new();
+            for m in &self.engine.modules.modules {
+                if let Some(ep) = m.as_any().downcast_ref::<genesis_core::episodic::EpisodicModule>() {
+                    episodic_sequences = ep.sequences.clone();
+                    break;
+                }
+            }
 
-        if !episodic_sequences.is_empty() {
-             for m in &mut self.engine.modules.modules {
-                  if m.name() == "titan" {
-                       if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                            for seq in &episodic_sequences {
-                                 titan.learn_from_sequence(seq, &self.engine.model.neurons);
-                            }
-                            m.set_state(&bincode::serialize(&titan).unwrap());
-                       }
-                  }
-             }
+            if !episodic_sequences.is_empty() {
+                for m in &mut self.engine.modules.modules {
+                    if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                        for seq in &episodic_sequences {
+                            titan.learn_from_sequence(seq, &self.engine.model.neurons);
+                        }
+                        break;
+                    }
+                }
+            }
         }
 
         self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
@@ -401,17 +401,14 @@ impl Runtime {
             let history = &self.engine.state.spikes_history;
             if history.len() < 2 { break; }
 
-            // Trigger Titan learning specifically from its own internal history
+            // Trigger Titan learning specifically from its own internal history using zero-copy downcasting
             for m in &mut self.engine.modules.modules {
-                if m.name() == "titan" {
-                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        // Memory Replay: iterate through history and treat each step as "now"
-                        let h_len = history.len();
-                        for i in 0..h_len {
-                            titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
-                        }
-                        m.set_state(&bincode::serialize(&titan).unwrap());
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    let h_len = history.len();
+                    for i in 0..h_len {
+                        titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
                     }
+                    break;
                 }
             }
 

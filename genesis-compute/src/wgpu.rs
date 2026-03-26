@@ -77,8 +77,11 @@ pub struct GpuResources {
     pub block_id_buffer: Option<wgpu::Buffer>,
     pub block_attn_buffer: Option<wgpu::Buffer>,
     pub context_hash_buffer: Option<wgpu::Buffer>,
+    pub lsh_table_l1_buffer: Option<wgpu::Buffer>,
+    pub lsh_table_l2_buffer: Option<wgpu::Buffer>,
     pub segment_potentials_buffer: Option<wgpu::Buffer>,
     pub segment_gates_buffer: Option<wgpu::Buffer>,
+    pub top_down_modulation_buffer: Option<wgpu::Buffer>,
 }
 
 pub struct WgpuBackend {
@@ -148,6 +151,7 @@ impl WgpuBackend {
                 Self::storage_entry(13, true), // expert_mask
                 Self::storage_entry(14, false), // segment_potentials (RW)
                 Self::storage_entry(15, true),  // segment_gates
+                Self::storage_entry(16, true),  // top_down_modulation
                 wgpu::BindGroupLayoutEntry { binding: 23, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
@@ -219,6 +223,8 @@ impl WgpuBackend {
                 Self::storage_entry(3, true), // block_ids
                 Self::storage_entry(4, false), // distal_potentials
                 Self::storage_entry(5, true), // context_hashes
+                Self::storage_entry(6, true), // lsh_table_l1
+                Self::storage_entry(7, true), // lsh_table_l2
             ],
         });
         let titan_retrieval_pipeline = Self::create_pipeline(&device, "Titan Retrieval", &titan_layout, &tick_layout, &titan_shader);
@@ -236,8 +242,11 @@ impl WgpuBackend {
             block_id_buffer: None,
             block_attn_buffer: None,
             context_hash_buffer: None,
+            lsh_table_l1_buffer: None,
+            lsh_table_l2_buffer: None,
             segment_potentials_buffer: None,
             segment_gates_buffer: None,
+            top_down_modulation_buffer: None,
         };
 
         Ok(Self {
@@ -493,6 +502,32 @@ impl ComputeBackend for WgpuBackend {
             self.queue.write_buffer(res.segment_gates_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.segment_gates));
         }
 
+        // Top-down modulation from HierarchicalModule
+        let mut top_down_data = vec![0i32; n_count];
+        for m in model.module_states.values() {
+            if let Ok(hier) = bincode::deserialize::<genesis_core::HierarchicalModule>(m) {
+                if hier.enabled {
+                    for (&high_layer, low_layers) in &hier.hierarchy_map {
+                        let high_act = hier.layer_activity.get(&high_layer).cloned().unwrap_or(0.0);
+                        if high_act > 0.1 {
+                            let boost = (high_act * hier.top_down_gain as f32) as i32;
+                            for &low_layer in low_layers {
+                                if let Some(target_neurons) = hier.layer_to_neurons.get(&low_layer) {
+                                    for &idx in target_neurons {
+                                        if (idx as usize) < n_count {
+                                            top_down_data[idx as usize] += boost;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self::ensure_buffer(&self.device, &mut res.top_down_modulation_buffer, "Top Down Modulation", &top_down_data, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+        self.queue.write_buffer(res.top_down_modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&top_down_data));
+
         let config_data = [
              model.config.physics.noise_amplitude,
              model.config.physics.theta_rhythm as i32,
@@ -613,6 +648,8 @@ impl ComputeBackend for WgpuBackend {
                         wgpu::BindGroupEntry { binding: 3, resource: res.block_id_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 4, resource: res.distal_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 5, resource: res.context_hash_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: res.lsh_table_l1_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: res.lsh_table_l2_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
                     ],
                 });
 
@@ -645,6 +682,7 @@ impl ComputeBackend for WgpuBackend {
                 wgpu::BindGroupEntry { binding: 13, resource: res.expert_mask_buffer.as_ref().unwrap_or(&res.input_buffer.as_ref().unwrap()).as_entire_binding() }, // Placeholder
                 wgpu::BindGroupEntry { binding: 14, resource: res.segment_potentials_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: res.segment_gates_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 16, resource: res.top_down_modulation_buffer.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 23, resource: res.modulation_buffer.as_ref().unwrap().as_entire_binding() },
             ],
         });

@@ -563,6 +563,13 @@ impl ComputeBackend for CpuBackend {
     fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
         self.apply_morphogenesis(model, reward);
         prune_synapses(&mut model.synapses, &model.neurons, self.structural_config.prune_threshold);
+
+        // Metabolic Culling: Reset "dead" neurons
+        let culled = genesis_core::plasticity::cull_inactive_neurons(&mut model.neurons, 5);
+        if !culled.is_empty() {
+             log::debug!("Metabolic Culling: {} neurons reset", culled.len());
+        }
+
         model.synapses.shrink_to_fit();
         self.synapse_offsets.clear();
         self.apply_evolutionary_mutations(model, reward, history, block_surprise);

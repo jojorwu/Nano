@@ -26,6 +26,8 @@ impl CuriosityModule {
 impl NanoModule for CuriosityModule {
     fn name(&self) -> &str { "curiosity" }
     fn tier(&self) -> u32 { 30 } // High tier
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core curiosity logic handled in on_update_weights based on surprise

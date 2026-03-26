@@ -49,6 +49,7 @@ struct Config {
 @group(0) @binding(13) var<storage, read> expert_mask: array<u32>;
 @group(0) @binding(14) var<storage, read_write> segment_potentials: array<i32>;
 @group(0) @binding(15) var<storage, read> segment_gates: array<i32>;
+@group(0) @binding(16) var<storage, read> top_down_modulation: array<i32>;
 
 struct Modulation {
     dopamine: i32,
@@ -124,6 +125,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     mod_factor = (mod_factor * (1024 + modulation.noradrenaline)) >> 10;
 
     let gated_input = (inputs[i] * dendritic_gate[i]) >> 10;
+    let top_down = top_down_modulation[i];
 
     var noise = 0;
     if (config.noise_amplitude > 0) {
@@ -148,7 +150,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (phase < 4u || phase > 12u) { theta_gate = 512; }
     }
 
-    var pot = neuron_states[i].potential + gated_input + proximal + dist_gated + apical_gated + segments_sum + noise - neuron_states[i].adaptation;
+    var pot = neuron_states[i].potential + gated_input + proximal + dist_gated + apical_gated + top_down + segments_sum + noise - neuron_states[i].adaptation;
     pot = (pot * mod_factor) >> 10;
     pot = (pot * theta_gate) >> 10;
 

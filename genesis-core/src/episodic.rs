@@ -37,6 +37,8 @@ impl EpisodicModule {
 impl NanoModule for EpisodicModule {
     fn name(&self) -> &str { "episodic" }
     fn tier(&self) -> u32 { 20 }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core replay logic is handled in on_night_phase

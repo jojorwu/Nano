@@ -76,6 +76,8 @@ impl NanoModule for TextProcessorModule {
     fn name(&self) -> &str { "text_processor" }
     fn tier(&self) -> u32 { 0 }
     fn outputs(&self) -> Vec<String> { vec!["modality:text".to_string(), "proximal".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn handle_input(&mut self, input: &crate::ModuleInput) {
         if let crate::ModuleInput::Text(text) = input {

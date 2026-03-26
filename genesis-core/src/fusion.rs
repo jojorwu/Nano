@@ -62,6 +62,8 @@ impl NanoModule for SpikingFusionModule {
     fn tier(&self) -> u32 { 1 }
     fn outputs(&self) -> Vec<String> { vec!["proximal".to_string(), "distal".to_string()] }
     fn inputs(&self) -> Vec<String> { vec!["modality:vision".to_string(), "modality:text".to_string(), "modality:audio".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {
         let prox = bus.proximal();

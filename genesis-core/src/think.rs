@@ -32,6 +32,7 @@ impl ThinkModule {
 impl NanoModule for ThinkModule {
     fn name(&self) -> &str { "think" }
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
     fn handle_input(&mut self, input: &ModuleInput) {
         if let ModuleInput::Control(name, val) = input {

@@ -41,7 +41,10 @@ pub trait NanoModule: Send + Sync {
     fn inputs(&self) -> Vec<String> { Vec::new() }
 
     /// Optional downcast to concrete type
-    fn as_any(&self) -> &dyn std::any::Any { &() }
+    fn as_any(&self) -> &dyn std::any::Any { &0 }
+
+    /// Optional mutable downcast
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Declares global signal modulations this module wants to apply.
     /// Returns a list of (signal_id, delta_value).
@@ -91,6 +94,7 @@ pub struct ForeignModule {
 impl NanoModule for ForeignModule {
     fn name(&self) -> &str { &self.name }
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
         if let Some(f) = self.tick_fn {
             // Simplified bus pointer pass for Zero-Copy FFI.
@@ -127,6 +131,7 @@ impl DynamicPluginModule {
 
 impl NanoModule for DynamicPluginModule {
     fn name(&self) -> &str { &self.name }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn box_clone(&self) -> Box<dyn NanoModule> {
         Box::new(Self {
             name: self.name.clone(),
@@ -218,6 +223,8 @@ mod tests {
 
     impl NanoModule for MockModule {
         fn name(&self) -> &str { &self.name }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
         fn inputs(&self) -> Vec<String> { self.inputs.clone() }
         fn outputs(&self) -> Vec<String> { self.outputs.clone() }
         fn on_tick(&mut self, _: &InputBus, _: &[bool], _: u32) {}
