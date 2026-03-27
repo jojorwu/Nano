@@ -154,67 +154,30 @@ impl PipelineStage for PropagationStage {
         let n_count = engine.model.neurons.len();
         let full_history = engine.reconstruct_history(16);
 
+        // Heterogeneous Execution Context: we must take ownership of references where possible
+        // to satisfy borrow checker during multi-backend dispatch.
+        let merged_inputs = engine.state.merged_inputs_buffer.clone();
+        let previous_spikes = engine.state.previous_spikes.clone();
+        let global_modulators = engine.state.global_modulators;
 
-        let spike_data = if let Some(ref mut secondary) = engine.secondary_backend {
-            // Heterogeneous Compute: split the neural blocks between backends
-            // Primary backend (typically WGPU/GPU) handles the bulk of neurons
-            // Secondary backend (typically CPU) handles a specific range (e.g. the last 20%)
-            let split_point = (n_count * 80) / 100;
-
-            let kernel_ctx = genesis_compute::KernelContext {
-                external_inputs: &engine.state.merged_inputs_buffer,
-                previous_spikes: &engine.state.previous_spikes,
-                history: &full_history,
-                current_tick: context.tick,
-                modulation: engine.state.global_modulators,
-                top_down_modulation: context.top_down_data.as_deref(),
-            };
-
-            // 1. Concurrent Synapse Propagation (Currently simplified to full on primary)
-            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
-
-            // 2. Parallel Membrane Potential & Spike Generation
-            // In a production environment, we would use the is_remote flags to filter neurons per-backend.
-            // For this implementation, we use a simple range-based split.
-            let primary_range = 0..split_point;
-            let secondary_range = split_point..n_count;
-
-            let primary_spikes = engine.backend.execute_kernel_range(
-                genesis_compute::SimulationKernel::GenerateSpikes,
-                &mut engine.model,
-                &kernel_ctx,
-                primary_range
-            );
-
-            let secondary_spikes = secondary.execute_kernel_range(
-                genesis_compute::SimulationKernel::GenerateSpikes,
-                &mut engine.model,
-                &kernel_ctx,
-                secondary_range
-            );
-
-            // 3. Merge results
-            let mut merged_indices = Vec::new();
-            if let Some(genesis_core::SpikeData::Sparse(indices)) = primary_spikes {
-                merged_indices.extend(indices);
-            }
-            if let Some(genesis_core::SpikeData::Sparse(indices)) = secondary_spikes {
-                merged_indices.extend(indices);
-            }
-            genesis_core::SpikeData::Sparse(merged_indices)
-        } else {
-            let kernel_ctx = genesis_compute::KernelContext {
-                external_inputs: &engine.state.merged_inputs_buffer,
-                previous_spikes: &engine.state.previous_spikes,
-                history: &full_history,
-                current_tick: context.tick,
-                modulation: engine.state.global_modulators,
-                top_down_modulation: context.top_down_data.as_deref(),
-            };
-            engine.backend.execute_kernel(genesis_compute::SimulationKernel::UpdateMembranePotentials, &mut engine.model, &kernel_ctx);
-            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
-            engine.backend.execute_kernel(genesis_compute::SimulationKernel::GenerateSpikes, &mut engine.model, &kernel_ctx).unwrap_or(SpikeData::Sparse(vec![]))
+        let kernel_ctx = genesis_compute::KernelContext {
+            external_inputs: &merged_inputs,
+            previous_spikes: &previous_spikes,
+            history: &full_history,
+            current_tick: context.tick,
+            modulation: global_modulators,
+            top_down_modulation: context.top_down_data.as_deref(),
         };
+
+        // 1. Heterogeneous Potential Update
+        engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::UpdateMembranePotentials, &kernel_ctx);
+
+        // 2. Heterogeneous Synapse Propagation
+        engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::PropagateSynapses, &kernel_ctx);
+
+        // 3. Heterogeneous Spike Generation (Handles both Primary and Secondary devices)
+        let spike_data = engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::GenerateSpikes, &kernel_ctx)
+            .unwrap_or(SpikeData::Sparse(vec![]));
 
         engine.state.current_spikes_buffer.fill(false);
         match &spike_data {

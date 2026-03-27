@@ -236,13 +236,16 @@ impl WgpuBackend {
 
         let resources = GpuResources {
             neuron_state_buffer: None, distal_buffer: None, proximal_buffer: None, apical_buffer: None, basal_buffer: None,
+            indirect_dispatch_buffer: None,
             spikes_buffer: None, sparse_spike_buffer: None, spike_counter_buffer: None, input_buffer: None,
             interval_buffer: None, gate_threshold_buffer: None, expert_mask_buffer: None, dendritic_gate_buffer: None,
             weight_buffer: None, source_buffer: None, target_buffer: None, compartment_buffer: None,
             pre_spike_buffer: None, post_spike_buffer: None, u_matrix_buffer: None, v_matrix_buffer: None,
             latent_state_buffer: None, config_uniform_buffer: None, tick_buffer: None, lr_buffer: None,
             staging_spikes: None, staging_counter: None, staging_state: None, staging_weights: None, is_excitatory_buffer: None,
-            spike_history_buffer: None, delay_buffer: None, stp_resources_buffer: None, stp_calcium_buffer: None,
+            spike_history_buffer: None, delay_buffer: None,
+            synapse_offsets_buffer: None,
+            stp_resources_buffer: None, stp_calcium_buffer: None,
             modulation_buffer: None,
             block_id_buffer: None,
             block_attn_buffer: None,
@@ -333,6 +336,7 @@ impl WgpuBackend {
 impl WgpuBackend {
     fn day_phase_impl(&mut self, model: &mut BakedModel, external_inputs: &[i32], _previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState, range: std::ops::Range<usize>, top_down_modulation: Option<&[i32]>) -> SpikeData {
         let n_count = model.neurons.len();
+        // In a true heterogeneous setup, WGPU only processes is_remote == 0
         let s_count = model.synapses.len();
         if n_count == 0 { return SpikeData::Sparse(Vec::new()); }
 

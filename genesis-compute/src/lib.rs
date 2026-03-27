@@ -22,6 +22,7 @@ pub enum BackendError {
 /// Backends can be optimized for different hardware (CPU, WGPU, etc.) while
 /// maintaining numerical parity through standardized bit-shift physics.
 /// Represents a composable simulation step.
+#[derive(Clone)]
 pub enum SimulationKernel {
     PropagateSynapses,
     UpdateMembranePotentials,

@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use crate::{ComputeBackend, kernels::calculate_membrane_potential};
 
 pub struct CpuBackend {
+    pub is_secondary: bool,
     pub structural_config: StructuralPlasticityConfig,
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
@@ -20,6 +21,7 @@ pub struct CpuBackend {
 impl Default for CpuBackend {
     fn default() -> Self {
         Self {
+            is_secondary: false,
             structural_config: StructuralPlasticityConfig::default(),
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
             optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
@@ -458,7 +460,13 @@ impl CpuBackend {
                 let is_rem = is_remote_ptr as *const u8;
                 for i in start_idx..end_idx {
                     if current_tick < *next_up.add(i) { continue; }
-                    if *is_rem.add(i) != 0 { continue; }
+                    // Handle Secondary Device (1) in secondary backend or Primary (0) in primary
+                    // For CpuBackend, we assume it can be used as either.
+                    // If backend is secondary, it processes is_remote == 1
+                    let flag = *is_rem.add(i);
+                    if flag == 2 { continue; } // Always skip ghost neurons
+                    if self.is_secondary && flag != 1 { continue; }
+                    if !self.is_secondary && flag != 0 { continue; }
                     if !e_masks.is_empty() && !e_masks[i % e_masks.len()] { continue; }
 
                     let fired = self.update_single_neuron_ffi(i, &n_ffi, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
@@ -484,6 +492,11 @@ impl ComputeBackend for CpuBackend {
 
     fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<genesis_core::SpikeData> {
         let n_count = model.neurons.len();
+
+        // Filtering is handled inside update_neuron_states_range for Spike Generation.
+        // For Synapse Propagation, we use standard full logic as it is often faster on CPU
+        // to process all synapses once than to filter per-neuron backend flags.
+
         match kernel {
             crate::SimulationKernel::PropagateSynapses => {
                 for (i, &val) in ctx.external_inputs.iter().enumerate() {

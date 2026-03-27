@@ -76,6 +76,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i < exec_range.start || i >= exec_range.end) { return; }
 
     let st = neuron_states[i];
+    // GPU (Primary) only processes is_remote == 0
     if (st.is_remote != 0u) { return; }
 
     // Dynamic MoE: Expert Freezing

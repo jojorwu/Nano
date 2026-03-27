@@ -113,6 +113,24 @@ impl SpikeData {
         }
         packed
     }
+
+    pub fn merge(self, other: SpikeData, n_count: usize) -> SpikeData {
+        match (self, other) {
+            (SpikeData::Sparse(mut a), SpikeData::Sparse(b)) => {
+                a.extend(b);
+                SpikeData::Sparse(a)
+            }
+            (a, b) => {
+                // Fallback for heterogeneous formats: merge into BitPacked
+                let mut p1 = a.to_bitpacked(n_count);
+                let p2 = b.to_bitpacked(n_count);
+                for i in 0..p1.len().min(p2.len()) {
+                    p1[i] |= p2[i];
+                }
+                SpikeData::BitPacked(p1)
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -167,7 +185,8 @@ pub struct NeuronsSoA {
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
     pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
-    pub is_remote: Vec<u8>,              // Distributed SNN (1 = ghost neuron, 0 = local)
+    /// Device Selector / Hardware Flag: 0 = Primary (e.g. GPU), 1 = Secondary (e.g. CPU), 2 = Ghost (Remote)
+    pub is_remote: Vec<u8>,
     pub origin_node_id: Vec<u32>,        // Node ID that owns this neuron
     pub specialization_score: Vec<f32>,  // Morphogenesis: tracking neuron utility
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
