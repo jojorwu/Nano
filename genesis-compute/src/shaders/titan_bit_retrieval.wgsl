@@ -21,13 +21,13 @@ fn vsa_context_similarity(a: u64, b: u64) -> u32 {
 
 // Hierarchical LSH Retrieval (L1/L2) using Sign-Random-Projection (TurboQuant)
 fn lsh_match_hierarchical(bid: u32, current_hash: u64) -> u32 {
-    // True TurboQuant parity: compute current signature from projection_matrices
-    // and compare against stored block_signatures (Sign-Random-Projection).
+    // In a full implementation, we would compute Sign-LSH on the current bit-pattern.
+    // For extreme performance in this tick, we use the pre-calculated pattern hash
+    // to approximate the random projection result.
+    // The parity is maintained because the host also uses this hash for LSH indexing.
 
-    // For extreme performance, we use the 64-bit current_hash as a seed to
-    // approximate the projection. In a full implementation, we'd use the spike_history buffer.
-    let sig1 = u32(current_hash ^ 0xbf58476d1ce4e5b9u);
-    let sig2 = u32(current_hash ^ 0x94d049bb133111ebu);
+    let sig1 = u32(current_hash & 0xFFFFFFFFu); // Simplification: in production, use projection_matrices
+    let sig2 = u32(current_hash >> 32u);
 
     var score = 0u;
     if (lsh_table_l1[bid] == sig1) { score = score + 512u; }

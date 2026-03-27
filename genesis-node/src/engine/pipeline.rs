@@ -20,6 +20,12 @@ pub struct PipelineContext {
     pub blackboard: std::collections::HashMap<String, f32>,
 }
 
+impl PipelineContext {
+    pub fn clear_blackboard(&mut self) {
+        self.blackboard.clear();
+    }
+}
+
 pub struct SimulationPipeline {
     pub stages: Vec<Box<dyn PipelineStage>>,
 }
@@ -52,6 +58,7 @@ impl SimulationPipeline {
                 "normalization" => stages.push(Box::new(NormalizationStage)),
                 "load_balancing" => stages.push(Box::new(LoadBalancingStage)),
                 "structural_plasticity" => stages.push(Box::new(StructuralPlasticityStage::new(settings.night_phase_interval))),
+                "dream" => stages.push(Box::new(DreamStage)),
                 "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
                 _ => log::warn!("Unknown pipeline stage: {}", name),
             }
@@ -65,11 +72,14 @@ impl SimulationPipeline {
             let stage = &mut self.stages[i];
             stage.execute(engine, context);
 
-            // Dynamic Gating Logic
-            // If high surprise is detected, certain stages might be repeated or skipped.
-            if stage.name() == "propagation" && context.surprise > 1800 {
-                 // High surprise during propagation: re-run propagation once to stabilize
-                 if !context.blackboard.contains_key("prop_retry") {
+            // De-hardcoded Dynamic Gating: React to MetaControl events cached in context.events
+            if stage.name() == "propagation" {
+                let retry_requested = context.events.iter().any(|e| match e {
+                    genesis_core::GlobalEvent::Custom(s, _) => s == "RetryPropagation",
+                    _ => false
+                });
+
+                if retry_requested && !context.blackboard.contains_key("prop_retry") {
                       context.blackboard.insert("prop_retry".to_string(), 1.0);
                       continue; // Execute the same stage index again
                  }
@@ -473,6 +483,60 @@ impl PipelineStage for LoadBalancingStage {
                  }
              }
          }
+    }
+}
+
+pub struct DreamStage;
+impl PipelineStage for DreamStage {
+    fn name(&self) -> &str { "dream" }
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        if !context.blackboard.contains_key("dream_active") { return; }
+
+        let n_count = engine.model.neurons.len();
+        log::debug!("DreamStage: Executing virtual tick using internal history");
+
+        // Use last history step as "pseudo-input"
+        let last_step = engine.state.history_ptr;
+        let pseudo_inputs = engine.state.spikes_history[last_step].to_bitpacked(n_count);
+
+        // Convert pseudo-inputs to scaled potentials
+        engine.state.merged_inputs_buffer.fill(0);
+        for (i, &word) in pseudo_inputs.iter().enumerate() {
+            if word == 0 { continue; }
+            for bit in 0..64 {
+                if (word >> bit) & 1 == 1 {
+                    let idx = i * 64 + bit;
+                    if idx < n_count {
+                        engine.state.merged_inputs_buffer[idx] = genesis_core::SCALE;
+                    }
+                }
+            }
+        }
+
+        // Execute standard propagation but with virtual inputs
+        let full_history = engine.reconstruct_history(16);
+        let kernel_ctx = genesis_compute::KernelContext {
+            external_inputs: &engine.state.merged_inputs_buffer,
+            previous_spikes: &engine.state.previous_spikes,
+            history: &full_history,
+            current_tick: context.tick,
+            modulation: engine.state.global_modulators,
+            top_down_modulation: context.top_down_data.as_deref(),
+        };
+
+        engine.backend.execute_kernel(genesis_compute::SimulationKernel::UpdateMembranePotentials, &mut engine.model, &kernel_ctx);
+        engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
+        let spike_data = engine.backend.execute_kernel(genesis_compute::SimulationKernel::GenerateSpikes, &mut engine.model, &kernel_ctx).unwrap_or_default();
+
+        // Update state but don't record to real history yet (or handle specifically)
+        // For now, let's just update current_spikes_buffer to see the 'dream' result
+        engine.state.current_spikes_buffer.fill(false);
+        match &spike_data {
+            genesis_core::SpikeData::Sparse(indices) => {
+                for &idx in indices { if idx < n_count { engine.state.current_spikes_buffer[idx] = true; } }
+            }
+            _ => {}
+        }
     }
 }
 

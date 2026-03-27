@@ -22,14 +22,14 @@ pub struct GpuNeuronState {
     pub basal_gate: i32,
     pub block_id: u32,
     pub action: i32,
+    pub packed_lo: u32,
+    pub packed_hi: u32,
     pub plasticity_gate: i32,
     pub is_remote: u32,
     pub origin_node_id: u32,
     pub specialization_score: f32,
     pub liquid_current: i32,
     pub update_interval: i32,
-    pub packed_lo: u32,
-    pub packed_hi: u32,
 }
 
 #[repr(C)]
@@ -711,7 +711,11 @@ impl ComputeBackend for WgpuBackend {
 
     fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<SpikeData> {
         match kernel {
-            crate::SimulationKernel::PropagateSynapses => None,
+            crate::SimulationKernel::PropagateSynapses => {
+                // In a production GPU backend, we would dispatch only the propagation part.
+                // For now, day_phase_impl handles the full cycle for correctness.
+                None
+            }
             crate::SimulationKernel::UpdateMembranePotentials => None,
             crate::SimulationKernel::GenerateSpikes => {
                 Some(self.day_phase_impl(model, ctx.external_inputs, ctx.previous_spikes, ctx.history, ctx.current_tick, ctx.modulation, range, ctx.top_down_modulation))

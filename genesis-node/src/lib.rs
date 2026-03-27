@@ -391,26 +391,38 @@ impl Runtime {
     }
 
     pub fn consolidate_memory(&mut self, iterations: u32) {
-        log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
+        use crate::engine::pipeline::PipelineContext;
+        log::info!("Starting memory consolidation phase (Generative Dreaming: {} iterations)...", iterations);
 
+        let start_time = std::time::Instant::now();
         for _ in 0..iterations {
-            // Memory Replay: Fetch past bitpacked patterns
-            let history = &self.engine.state.spikes_history;
-            if history.len() < 2 { break; }
+            let tick = self.engine.state.tick_counter;
+            let mut context = PipelineContext {
+                tick,
+                external_inputs: vec![0; self.engine.model.neurons.len()],
+                reward: None,
+                normalized_reward: None,
+                surprise: 0,
+                start_time,
+                events: Vec::new(),
+                top_down_data: None,
+                blackboard: std::collections::HashMap::new(),
+            };
+            context.blackboard.insert("dream_active".to_string(), 1.0);
 
-            // Trigger Titan learning specifically from its own internal history using zero-copy downcasting
+            // Execute pipeline with dream stage enabled
+            self.pipeline.execute(&mut self.engine, &mut context);
+
+            // Consolidation: Transfer episodic data to Titan
+            // We use history_ptr - 1 because execute() advanced it
+            let history_len = self.engine.state.spikes_history.len();
+            let last_idx = if self.engine.state.history_ptr == 0 { history_len - 1 } else { self.engine.state.history_ptr - 1 };
+
             for m in &mut self.engine.modules.modules {
                 if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
-                    let h_len = history.len();
-                    for i in 0..h_len {
-                        titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
-                    }
-                    break;
+                    titan.learn_from_history(&self.engine.state.spikes_history, last_idx, &self.engine.model.neurons, 1000);
                 }
             }
-
-            // Run a few "thinking" ticks to propagate these internal patterns
-            self.process_burst(&[], 5);
         }
         log::info!("Consolidation complete.");
     }

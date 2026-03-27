@@ -29,6 +29,7 @@ pub mod episodic;
 pub mod curiosity;
 pub mod think;
 pub mod load_balancer;
+pub mod meta_control;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
@@ -39,6 +40,7 @@ pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
 pub use curiosity::CuriosityModule;
 pub use think::ThinkModule;
+pub use meta_control::MetaControlModule;
 pub use event::{EventBus, GlobalEvent};
 pub use load_balancer::LoadBalancerModule;
 pub use plasticity_rules::{PlasticityContext, PlasticityRule, GsopRule};
