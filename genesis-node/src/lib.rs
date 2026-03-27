@@ -102,7 +102,8 @@ impl Runtime {
             normalized_reward,
             surprise: 0,
             start_time,
-            events: Vec::new(),
+            events: self.engine.input_bus.event_bus.drain_all(),
+            top_down_data: None,
             blackboard: std::collections::HashMap::new(),
         };
 
@@ -212,30 +213,8 @@ impl Runtime {
         }
 
         self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
-
-        // Dreaming Phase: Replay episodic memory sequences to drive synaptic plasticity
-        if !episodic_sequences.is_empty() {
-             self.perform_dreaming_phase(&episodic_sequences);
-        }
-
         self.sync_modules_to_model();
         // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.
-    }
-
-    fn perform_dreaming_phase(&mut self, sequences: &[genesis_core::episodic::EpisodicSequence]) {
-        log::info!("Dreaming: replaying {} episodic sequences", sequences.len());
-        for seq in sequences {
-             for tick_active_indices in &seq.ticks {
-                  let mut inputs = vec![0i32; self.engine.model.neurons.len()];
-                  for &idx in tick_active_indices {
-                       if idx < inputs.len() {
-                            inputs[idx] = genesis_core::SCALE;
-                       }
-                  }
-                  // Internal tick without external reward, simulating internal replay
-                  self.tick(&inputs);
-             }
-        }
     }
 
     pub fn tick_with_reward(&mut self, external_inputs: &[i32], reward: Option<i32>) -> Vec<bool> {
@@ -251,7 +230,7 @@ impl Runtime {
 
             if !active_indices.is_empty() {
                 let data = if active_indices.len() < current_spikes.len() / 16 {
-                    SpikeData::Compressed(SpikePacket::compress_indices(&active_indices, current_spikes.len()))
+                    SpikeData::Compressed(SpikeData::compress(&active_indices, current_spikes.len()))
                 } else if active_indices.len() < current_spikes.len() / 8 {
                     SpikeData::Sparse(active_indices)
                 } else {

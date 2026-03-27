@@ -127,10 +127,8 @@ impl InputBus {
     /// Faster clear when unique access is available, using raw memory fill.
     pub fn clear_mut(&mut self) {
         for chan in &mut self.channels {
-            let ptr = chan.as_mut_ptr() as *mut i32;
-            let len = chan.len();
-            unsafe {
-                std::ptr::write_bytes(ptr, 0, len);
+            for v in chan {
+                v.store(0, Ordering::Relaxed);
             }
         }
         for v in &mut self.global_signals {
@@ -184,8 +182,10 @@ impl InputBus {
                 let surprise = self.global_signals[1].load(Ordering::Relaxed); // Signal 1: Noradrenaline
                 if surprise > 0 {
                      // Gain increases with surprise, max +100% gain at surprise = SCALE
-                     let gain = crate::SCALE as i64 + (surprise as i64).min(crate::SCALE as i64);
-                     effective_val = (effective_val as i64 * gain >> 10) as i32;
+                     // Precision handling: use i128 for intermediate calculation if needed,
+                     // but i64 is enough for 10-bit shifts.
+                     let gain = (crate::SCALE as i64).saturating_add((surprise as i64).min(crate::SCALE as i64));
+                     effective_val = ((effective_val as i64 * gain) >> 10) as i32;
                 }
 
                 return effective_val;

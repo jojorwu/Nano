@@ -179,11 +179,9 @@ impl ModuleRegistry {
         self.register_factory("graph_engine", || Box::new(crate::graph::SpikingGraphModule::new(crate::graph::TopologyType::SmallWorld)));
         self.register_factory("adaptive_lr", || Box::new(crate::plasticity::AdaptiveLearningRateModule::new(10)));
         self.register_factory("think", || Box::new(crate::ThinkModule::new(5)));
-        self.register_factory("workspace", || Box::new(crate::workspace::WorkspaceModule::new()));
         self.register_factory("hierarchical", || Box::new(crate::hierarchical::HierarchicalModule::new()));
         self.register_factory("episodic", || Box::new(crate::episodic::EpisodicModule::new()));
         self.register_factory("curiosity", || Box::new(crate::curiosity::CuriosityModule::new()));
-        self.register_factory("meta_control", || Box::new(crate::meta_control::MetaControlModule::new()));
         #[cfg(feature = "robotics")]
         self.register_factory("cerebellum", || Box::new(crate::robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
@@ -394,7 +392,7 @@ impl ModuleManager {
         use rayon::prelude::*;
 
         // 1. Process Events from previous tick
-        let events = bus.event_bus.poll_all();
+        let events = bus.event_bus.drain_all();
         if !events.is_empty() {
             for event in &events {
                 for m in &mut self.modules {

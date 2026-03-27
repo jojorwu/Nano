@@ -18,45 +18,6 @@ pub enum NetworkPacket {
     Control(String),
 }
 
-impl SpikePacket {
-    pub fn compress_indices(indices: &[usize], universe: usize) -> Vec<u8> {
-        let mut bits = Vec::new();
-        let count = indices.len() as u32;
-        bits.extend_from_slice(&count.to_le_bytes());
-
-        let low_bits = if count > 0 { (universe as u32 / count).ilog2().max(1) } else { 1 };
-        bits.push(low_bits as u8);
-
-        let mut bit_buf = 0u8;
-        let mut bit_count = 0;
-        let mut last_high = 0u32;
-
-        let mut sorted = indices.to_vec();
-        sorted.sort_unstable();
-
-        for &idx in &sorted {
-            let high = (idx as u32) >> low_bits;
-            let low = (idx as u32) & ((1 << low_bits) - 1);
-
-            for _ in 0..(high - last_high) {
-                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-                bit_count += 1;
-            }
-            bit_buf |= 1 << bit_count;
-            bit_count += 1;
-            if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-            last_high = high;
-
-            for i in 0..low_bits {
-                if (low >> i) & 1 == 1 { bit_buf |= 1 << bit_count; }
-                bit_count += 1;
-                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
-            }
-        }
-        if bit_count > 0 { bits.push(bit_buf); }
-        bits
-    }
-}
 
 pub struct NetworkManager {
     pub node_id: String,

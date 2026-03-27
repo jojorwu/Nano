@@ -9,7 +9,6 @@ pub struct NetworkConfig {
     pub plasticity: PlasticityConfig,
     pub titan: TitanConfig,
     pub modules: ModuleConfig,
-    pub astro: AstroConfig,
     pub hardware: HardwareConfig,
 }
 
@@ -25,8 +24,6 @@ pub struct PhysicsConfig {
     pub dendritic_coincidence_threshold: IValue,
     pub theta_rhythm: bool,
     pub theta_frequency: f32,
-    pub metabolic_spike_cost: IValue,
-    pub metabolic_recovery_rate: IValue,
     pub specialization_decay: f32,
 }
 
@@ -76,12 +73,6 @@ pub struct ModuleConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct AstroConfig {
-    pub increment: IValue,
-    pub decay_rate: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct HardwareConfig {
     pub preferred_backend: String,
 }
@@ -100,8 +91,6 @@ impl Default for NetworkConfig {
                 dendritic_coincidence_threshold: 512,
                 theta_rhythm: true,
                 theta_frequency: 0.1,
-                metabolic_spike_cost: 10,
-                metabolic_recovery_rate: 2,
                 specialization_decay: 0.99,
             },
             plasticity: PlasticityConfig {
@@ -142,10 +131,6 @@ impl Default for NetworkConfig {
                 workspace_ignition_threshold: 10.0,
                 hierarchical_control_enabled: true,
                 top_down_gain: SCALE / 4,
-            },
-            astro: AstroConfig {
-                increment: 50,
-                decay_rate: 990,
             },
             hardware: HardwareConfig {
                 preferred_backend: "cpu".to_string(),

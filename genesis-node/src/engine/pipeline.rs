@@ -15,6 +15,7 @@ pub struct PipelineContext {
     pub surprise: i32,
     pub start_time: Instant,
     pub events: Vec<genesis_core::GlobalEvent>,
+    pub top_down_data: Option<Vec<i32>>,
     /// Blackboard for inter-stage communication
     pub blackboard: std::collections::HashMap<String, f32>,
 }
@@ -31,7 +32,6 @@ impl SimulationPipeline {
                 Box::new(PropagationStage),
                 Box::new(ThinkingStage),
                 Box::new(ObservationStage),
-                Box::new(AstroStage),
                 Box::new(NeuromodulationStage),
                 Box::new(NormalizationStage),
                 Box::new(StructuralPlasticityStage::new(settings.night_phase_interval)),
@@ -85,9 +85,6 @@ impl PipelineStage for InputStage {
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
         engine.reset_potential_buffers();
 
-        // 0. Poll all events for this tick
-        context.events = engine.input_bus.event_bus.poll_all();
-
         // Prepare merged inputs logic
         let n_count = engine.model.neurons.len();
         engine.state.merged_inputs_buffer.fill(0);
@@ -106,6 +103,36 @@ impl PipelineStage for InputStage {
 
         engine.input_bus.clear_mut();
         engine.modules.on_tick(&engine.input_bus, &engine.state.previous_spikes, context.tick);
+
+        // Pre-calculate Top-Down Modulation for WGPU efficiency
+        let mut top_down_data = vec![0i32; n_count];
+        let mut has_top_down = false;
+        for m in &engine.modules.modules {
+            if let Some(hier) = m.as_any().downcast_ref::<genesis_core::HierarchicalModule>() {
+                if hier.enabled {
+                    for (&high_layer, low_layers) in &hier.hierarchy_map {
+                        let high_act = hier.layer_activity.get(&high_layer).cloned().unwrap_or(0.0);
+                        if high_act > 0.1 {
+                            has_top_down = true;
+                            let boost = (high_act * hier.top_down_gain as f32) as i32;
+                            for &low_layer in low_layers {
+                                if let Some(target_neurons) = hier.layer_to_neurons.get(&low_layer) {
+                                    for &idx in target_neurons {
+                                        if (idx as usize) < n_count {
+                                            top_down_data[idx as usize] = top_down_data[idx as usize].saturating_add(boost);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if has_top_down {
+            context.top_down_data = Some(top_down_data);
+        }
+
         engine.finalize_potentials_from_bus();
     }
 }
@@ -116,6 +143,7 @@ impl PipelineStage for PropagationStage {
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
         let n_count = engine.model.neurons.len();
         let full_history = engine.reconstruct_history(16);
+
 
         let spike_data = if let Some(ref mut secondary) = engine.secondary_backend {
             // Heterogeneous Compute: split the neural blocks between backends
@@ -129,6 +157,7 @@ impl PipelineStage for PropagationStage {
                 history: &full_history,
                 current_tick: context.tick,
                 modulation: engine.state.global_modulators,
+                top_down_modulation: context.top_down_data.as_deref(),
             };
 
             // 1. Concurrent Synapse Propagation (Currently simplified to full on primary)
@@ -164,14 +193,17 @@ impl PipelineStage for PropagationStage {
             }
             genesis_core::SpikeData::Sparse(merged_indices)
         } else {
-            engine.backend.day_phase(
-                &mut engine.model,
-                &engine.state.merged_inputs_buffer,
-                &engine.state.previous_spikes,
-                &full_history,
-                context.tick,
-                engine.state.global_modulators,
-            )
+            let kernel_ctx = genesis_compute::KernelContext {
+                external_inputs: &engine.state.merged_inputs_buffer,
+                previous_spikes: &engine.state.previous_spikes,
+                history: &full_history,
+                current_tick: context.tick,
+                modulation: engine.state.global_modulators,
+                top_down_modulation: context.top_down_data.as_deref(),
+            };
+            engine.backend.execute_kernel(genesis_compute::SimulationKernel::UpdateMembranePotentials, &mut engine.model, &kernel_ctx);
+            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
+            engine.backend.execute_kernel(genesis_compute::SimulationKernel::GenerateSpikes, &mut engine.model, &kernel_ctx).unwrap_or(SpikeData::Sparse(vec![]))
         };
 
         engine.state.current_spikes_buffer.fill(false);
@@ -357,7 +389,7 @@ pub struct NeuromodulationStage;
 impl PipelineStage for NeuromodulationStage {
     fn name(&self) -> &str { "neuromodulation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        crate::engine::neuromodulation::NeuromodulationEngine::update(engine, context.surprise, context.normalized_reward);
+        crate::engine::neuromodulation::NeuromodulationEngine::update_with_events(engine, context.surprise, context.normalized_reward, &context.events);
     }
 }
 
@@ -407,18 +439,6 @@ impl StructuralPlasticityStage {
 impl PipelineStage for StructuralPlasticityStage {
     fn name(&self) -> &str { "structural_plasticity" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        // Event-Driven Neurogenesis
-        for event in &context.events {
-             if let genesis_core::GlobalEvent::StructuralUpdate(details) = event {
-                  if details.starts_with("Neurogenesis:") {
-                       if let Ok(bid) = details.replace("Neurogenesis:", "").parse::<u32>() {
-                            log::info!("Architectural Change: Self-organizing neurogenesis in block {}", bid);
-                            genesis_core::plasticity::grow_neurons_in_block(&mut engine.model.neurons, bid, 2, 0);
-                       }
-                  }
-             }
-        }
-
         if context.tick % self.interval != 0 { return; }
 
         let reward_val = context.reward.map(|r| r as i32);
@@ -453,34 +473,6 @@ impl PipelineStage for LoadBalancingStage {
                  }
              }
          }
-    }
-}
-
-pub struct AstroStage;
-impl PipelineStage for AstroStage {
-    fn name(&self) -> &str { "astro" }
-    fn execute(&mut self, engine: &mut SimulationEngine, _context: &mut PipelineContext) {
-        // Astrocytic Modulation Logic:
-        // Accumulate 'calcium' based on recent spikes and apply threshold feedback.
-        // This is a slow, spatially localized modulation.
-        let n_count = engine.model.neurons.len();
-        let inc = engine.model.config.astro.increment;
-        let decay = engine.model.config.astro.decay_rate;
-
-        // Note: For multi-compartment SNNs, astrocytes typically respond to glutamate leakage.
-        // Simplified: respond to somatic spikes.
-        for i in 0..n_count {
-            if engine.state.current_spikes_buffer[i] {
-                engine.model.neurons.astro_calcium[i] = engine.model.neurons.astro_calcium[i].saturating_add(inc);
-            } else {
-                engine.model.neurons.astro_calcium[i] = (engine.model.neurons.astro_calcium[i] as i64 * decay as i64 / 1000) as i32;
-            }
-
-            // Feedback: Calcium acts as a local threshold modulator
-            // If calcium is high, the neuron becomes harder to fire (homeostatic protection)
-            let feedback = (engine.model.neurons.astro_calcium[i] as i64 * 512 >> 10) as i32;
-            engine.model.neurons.threshold[i] = engine.model.neurons.threshold[i].saturating_add(feedback);
-        }
     }
 }
 

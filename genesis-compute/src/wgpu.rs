@@ -1,9 +1,11 @@
 use genesis_core::{BakedModel, IValue, SpikeData, NeuromodulationState};
 use crate::{ComputeBackend, BackendError, cpu::CpuBackend};
 use wgpu::util::DeviceExt;
+use bytemuck::{Pod, Zeroable};
+use bincode;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct GpuNeuronState {
     pub potential: i32,
     pub threshold: i32,
@@ -20,15 +22,14 @@ pub struct GpuNeuronState {
     pub basal_gate: i32,
     pub block_id: u32,
     pub action: i32,
-    pub packed: u64,
     pub plasticity_gate: i32,
-    pub astro_calcium: i32,
     pub is_remote: u32,
     pub origin_node_id: u32,
-    pub energy_level: i32,
     pub specialization_score: f32,
     pub liquid_current: i32,
-    pub update_interval: u32,
+    pub update_interval: i32,
+    pub packed_lo: u32,
+    pub packed_hi: u32,
 }
 
 #[repr(C)]
@@ -79,6 +80,7 @@ pub struct GpuResources {
     pub context_hash_buffer: Option<wgpu::Buffer>,
     pub lsh_table_l1_buffer: Option<wgpu::Buffer>,
     pub lsh_table_l2_buffer: Option<wgpu::Buffer>,
+    pub projection_matrices_buffer: Option<wgpu::Buffer>,
     pub segment_potentials_buffer: Option<wgpu::Buffer>,
     pub segment_gates_buffer: Option<wgpu::Buffer>,
     pub top_down_modulation_buffer: Option<wgpu::Buffer>,
@@ -225,6 +227,7 @@ impl WgpuBackend {
                 Self::storage_entry(5, true), // context_hashes
                 Self::storage_entry(6, true), // lsh_table_l1
                 Self::storage_entry(7, true), // lsh_table_l2
+                Self::storage_entry(8, true), // projection_matrices
             ],
         });
         let titan_retrieval_pipeline = Self::create_pipeline(&device, "Titan Retrieval", &titan_layout, &tick_layout, &titan_shader);
@@ -236,7 +239,7 @@ impl WgpuBackend {
             weight_buffer: None, source_buffer: None, target_buffer: None, compartment_buffer: None,
             pre_spike_buffer: None, post_spike_buffer: None, u_matrix_buffer: None, v_matrix_buffer: None,
             latent_state_buffer: None, config_uniform_buffer: None, tick_buffer: None, lr_buffer: None,
-            staging_spikes: None, staging_counter: None, staging_state: None, is_excitatory_buffer: None,
+            staging_spikes: None, staging_counter: None, staging_state: None, staging_weights: None, is_excitatory_buffer: None,
             spike_history_buffer: None, delay_buffer: None, stp_resources_buffer: None, stp_calcium_buffer: None,
             modulation_buffer: None,
             block_id_buffer: None,
@@ -244,6 +247,7 @@ impl WgpuBackend {
             context_hash_buffer: None,
             lsh_table_l1_buffer: None,
             lsh_table_l2_buffer: None,
+            projection_matrices_buffer: None,
             segment_potentials_buffer: None,
             segment_gates_buffer: None,
             top_down_modulation_buffer: None,
@@ -321,78 +325,11 @@ impl WgpuBackend {
         true
     }
 
-    fn ensure_buffer_init<T: bytemuck::Pod>(
-        device: &wgpu::Device,
-        buffer: &mut Option<wgpu::Buffer>,
-        label: &str,
-        data: &[T],
-        usage: wgpu::BufferUsages,
-        force_realloc: bool
-    ) -> bool {
-        let size = (data.len() * std::mem::size_of::<T>()) as u64;
-        let needs_realloc = force_realloc || buffer.as_ref().map_or(true, |b| b.size() != size);
-        if needs_realloc {
-            *buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(data),
-                usage,
-            }));
-            true
-        } else {
-            false
-        }
-    }
 }
+
 
 impl WgpuBackend {
-    fn day_phase_range(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState, range: std::ops::Range<usize>) -> SpikeData {
-         // Optimization: If the range is the full model, use the standard path
-         if range.start == 0 && range.end == model.neurons.len() {
-             return self.day_phase(model, external_inputs, previous_spikes, history, current_tick, modulation);
-         }
-         // Otherwise, we perform a partial update (conceptually similar to day_phase but with range masking)
-         // For brevity and based on current architecture, we'll implement this properly in a real backend.
-         // Here we'll return a placeholder or fallback.
-         self.day_phase(model, external_inputs, previous_spikes, history, current_tick, modulation)
-    }
-}
-
-impl ComputeBackend for WgpuBackend {
-    fn name(&self) -> &'static str { "WgpuBackend" }
-
-    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<SpikeData> {
-        let n_count = model.neurons.len();
-        self.execute_kernel_range(kernel, model, ctx, 0..n_count)
-    }
-
-    fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<SpikeData> {
-        match kernel {
-            crate::SimulationKernel::PropagateSynapses => {
-                // For now, full propagation is done on primary backend in PropagationStage
-                None
-            }
-            crate::SimulationKernel::UpdateMembranePotentials => {
-                None
-            }
-            crate::SimulationKernel::GenerateSpikes => {
-                // This is a simplified wrapper for day_phase logic but for a specific range.
-                // In a production WGPU backend, we would use indirect dispatches or push constants
-                // to specify the range to the GPU kernels.
-                // For this implementation, we'll perform a partial day_phase.
-                Some(self.day_phase_range(model, ctx.external_inputs, ctx.previous_spikes, ctx.history, ctx.current_tick, ctx.modulation, range))
-            }
-            crate::SimulationKernel::ApplyModulation(_modulation) => {
-                None
-            }
-        }
-    }
-
-    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData {
-        let n_count = model.neurons.len();
-        self.day_phase_range(model, external_inputs, previous_spikes, history, current_tick, modulation, 0..n_count)
-    }
-
-    fn day_phase_range(&mut self, model: &mut BakedModel, external_inputs: &[i32], _previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState, range: std::ops::Range<usize>) -> SpikeData {
+    fn day_phase_impl(&mut self, model: &mut BakedModel, external_inputs: &[i32], _previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState, range: std::ops::Range<usize>, top_down_modulation: Option<&[i32]>) -> SpikeData {
         let n_count = model.neurons.len();
         let s_count = model.synapses.len();
         if n_count == 0 { return SpikeData::Sparse(Vec::new()); }
@@ -420,15 +357,14 @@ impl ComputeBackend for WgpuBackend {
                     basal_gate: model.neurons.basal_gate[i],
                     block_id: model.neurons.block_id[i],
                     action: model.neurons.action_potential[i],
-                    packed: model.neurons.packed_params[i],
+                    packed_lo: (model.neurons.packed_params[i] & 0xFFFFFFFF) as u32,
+                    packed_hi: (model.neurons.packed_params[i] >> 32) as u32,
                     plasticity_gate: model.neurons.plasticity_gate[i],
-                    astro_calcium: model.neurons.astro_calcium[i],
                     is_remote: model.neurons.is_remote[i] as u32,
                     origin_node_id: model.neurons.origin_node_id[i],
-                    energy_level: model.neurons.energy_level[i],
                     specialization_score: model.neurons.specialization_score[i],
                     liquid_current: model.neurons.liquid_current[i],
-                    update_interval: model.neurons.update_interval[i],
+                    update_interval: model.neurons.update_interval[i] as i32,
                 });
             }
             Self::ensure_buffer(&self.device, &mut res.neuron_state_buffer, "Neuron State", &states, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, false);
@@ -461,7 +397,13 @@ impl ComputeBackend for WgpuBackend {
             if Self::ensure_buffer(&self.device, &mut res.weight_buffer, "Weight", &model.synapses.weight, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false) {
                  self.queue.write_buffer(res.weight_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.synapses.weight));
             }
-            let comp_u32: Vec<u32> = model.synapses.compartment.iter().map(|&c| c as u32).collect();
+            let comp_u32: Vec<u32> = model.synapses.compartment.iter().map(|&c| match c {
+                genesis_core::Compartment::Proximal => 0,
+                genesis_core::Compartment::Distal => 1,
+                genesis_core::Compartment::Apical => 2,
+                genesis_core::Compartment::Basal => 3,
+                genesis_core::Compartment::Custom(v) => 4 + v as u32,
+            }).collect();
             if Self::ensure_buffer(&self.device, &mut res.compartment_buffer, "Compartment", &comp_u32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false) {
                  self.queue.write_buffer(res.compartment_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&comp_u32));
             }
@@ -502,39 +444,21 @@ impl ComputeBackend for WgpuBackend {
             self.queue.write_buffer(res.segment_gates_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&model.neurons.segment_gates));
         }
 
-        // Top-down modulation from HierarchicalModule
-        let mut top_down_data = vec![0i32; n_count];
-        for m in model.module_states.values() {
-            if let Ok(hier) = bincode::deserialize::<genesis_core::HierarchicalModule>(m) {
-                if hier.enabled {
-                    for (&high_layer, low_layers) in &hier.hierarchy_map {
-                        let high_act = hier.layer_activity.get(&high_layer).cloned().unwrap_or(0.0);
-                        if high_act > 0.1 {
-                            let boost = (high_act * hier.top_down_gain as f32) as i32;
-                            for &low_layer in low_layers {
-                                if let Some(target_neurons) = hier.layer_to_neurons.get(&low_layer) {
-                                    for &idx in target_neurons {
-                                        if (idx as usize) < n_count {
-                                            top_down_data[idx as usize] += boost;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // Top-down modulation from HierarchicalModule (Pre-calculated in InputStage/KernelContext)
+        if let Some(td_data) = top_down_modulation {
+            Self::ensure_buffer(&self.device, &mut res.top_down_modulation_buffer, "Top Down Modulation", td_data, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            self.queue.write_buffer(res.top_down_modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(td_data));
+        } else {
+            let zeros = vec![0i32; n_count];
+            Self::ensure_buffer(&self.device, &mut res.top_down_modulation_buffer, "Top Down Modulation", &zeros, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            self.queue.write_buffer(res.top_down_modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&zeros));
         }
-        Self::ensure_buffer(&self.device, &mut res.top_down_modulation_buffer, "Top Down Modulation", &top_down_data, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
-        self.queue.write_buffer(res.top_down_modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&top_down_data));
 
         let config_data = [
              model.config.physics.noise_amplitude,
              model.config.physics.theta_rhythm as i32,
              model.config.plasticity.intrinsic_learning_rate as i32,
-             model.config.physics.metabolic_spike_cost,
-             model.config.physics.metabolic_recovery_rate,
-             0, 0, 0
+             0, 0, 0, 0, 0
         ];
         Self::ensure_buffer(&self.device, &mut res.config_uniform_buffer, "Config", &config_data, wgpu::BufferUsages::STORAGE, false);
 
@@ -611,21 +535,58 @@ impl ComputeBackend for WgpuBackend {
         }
 
         // 3. Dispatch Titan Retrieval (Sparse Associative Memory)
-        if let Some(mut titan_state) = model.module_states.get("titan").and_then(|s| bincode::deserialize::<genesis_core::titan::BitWiseTitan>(s).ok()) {
-
-            // Upload context hashes for fuzzy search
-            let hashes: Vec<u64> = titan_state.context_hashes.keys().copied().collect();
-            if !hashes.is_empty() {
-                Self::ensure_buffer(&self.device, &mut res.context_hash_buffer, "Context Hashes", &hashes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+        if let Some(titan_state) = model.module_states.get("titan").and_then(|s| bincode::deserialize::<genesis_core::titan::BitWiseTitan>(s).ok()) {
+            let mut packed_previous = vec![0u32; (n_count + 31) / 32];
+            for (i, &s) in _previous_spikes.iter().enumerate() {
+                if s { packed_previous[i / 32] |= 1 << (i % 32); }
             }
+            Self::ensure_buffer(&self.device, &mut res.pre_spike_buffer, "Titan Spikes", &packed_previous, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, true);
+            self.queue.write_buffer(res.pre_spike_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&packed_previous));
+
+            let current_hash = genesis_core::titan::BitWiseTitan::compute_context_hash(&packed_history[..packed_history_len]);
+            let hashes = [current_hash];
+            Self::ensure_buffer(&self.device, &mut res.context_hash_buffer, "Context Hashes", &hashes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            self.queue.write_buffer(res.context_hash_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&hashes));
+
+            let max_bid = model.neurons.block_id.iter().max().copied().unwrap_or(0);
+            let mut l1_sigs = vec![0u32; (max_bid + 1) as usize];
+            let mut l2_sigs = vec![0u32; (max_bid + 1) as usize];
+
+            for bid in 0..=max_bid {
+                if let Some(&sig) = titan_state.block_signatures_l1.get(bid as usize) {
+                    l1_sigs[bid as usize] = sig;
+                }
+                if let Some(&sig) = titan_state.block_signatures_l2.get(bid as usize) {
+                    l2_sigs[bid as usize] = sig;
+                }
+            }
+            Self::ensure_buffer(&self.device, &mut res.lsh_table_l1_buffer, "LSH L1", &l1_sigs, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            Self::ensure_buffer(&self.device, &mut res.lsh_table_l2_buffer, "LSH L2", &l2_sigs, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            self.queue.write_buffer(res.lsh_table_l1_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&l1_sigs));
+            self.queue.write_buffer(res.lsh_table_l2_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&l2_sigs));
+
+            let mut flat_matrices = Vec::new();
+            for m in &titan_state.projection_matrices { flat_matrices.extend_from_slice(m); }
+            Self::ensure_buffer(&self.device, &mut res.projection_matrices_buffer, "Proj Matrices", &flat_matrices, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false);
+            self.queue.write_buffer(res.projection_matrices_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&flat_matrices));
+
+            let tick_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Titan Tick BG"),
+                layout: &self.tick_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: res.tick_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.range_buffer.as_ref().unwrap().as_entire_binding() },
+                ],
+            });
 
             let mut all_assocs = Vec::new();
             let mut offsets = vec![0u32];
-            let max_bid = model.neurons.block_id.iter().max().copied().unwrap_or(0);
 
             for bid in 0..=max_bid {
-                if let Some(assocs) = titan_state.sparse_associations.get(&bid) {
-                    for a in assocs {
+                let start_off = titan_state.block_offsets.get(bid as usize).copied().unwrap_or(0) as usize;
+                let count = titan_state.block_counts.get(bid as usize).copied().unwrap_or(0) as usize;
+                if start_off + count <= titan_state.associations_flat.len() {
+                    for a in &titan_state.associations_flat[start_off..start_off+count] {
                         all_assocs.push(Association { target: a.target, weight: a.weight as i32 });
                     }
                 }
@@ -637,6 +598,8 @@ impl ComputeBackend for WgpuBackend {
                 let mut titan_offsets_buffer = None;
                 Self::ensure_buffer(&self.device, &mut titan_assocs_buffer, "Titan Assocs", &all_assocs, wgpu::BufferUsages::STORAGE, true);
                 Self::ensure_buffer(&self.device, &mut titan_offsets_buffer, "Titan Offsets", &offsets, wgpu::BufferUsages::STORAGE, true);
+                self.queue.write_buffer(titan_assocs_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&all_assocs));
+                self.queue.write_buffer(titan_offsets_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&offsets));
 
                 let titan_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Titan BG"),
@@ -644,12 +607,13 @@ impl ComputeBackend for WgpuBackend {
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: titan_assocs_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 1, resource: titan_offsets_buffer.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: res.pre_spike_buffer.as_ref().unwrap_or(&res.input_buffer.as_ref().unwrap()).as_entire_binding() }, // Using pre_spikes (previous_spikes)
+                        wgpu::BindGroupEntry { binding: 2, resource: res.pre_spike_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: res.block_id_buffer.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 4, resource: res.distal_buffer.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: res.context_hash_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: res.lsh_table_l1_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 7, resource: res.lsh_table_l2_buffer.get_or_insert(self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })).as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: res.context_hash_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: res.lsh_table_l1_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: res.lsh_table_l2_buffer.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: res.projection_matrices_buffer.as_ref().unwrap().as_entire_binding() },
                     ],
                 });
 
@@ -735,6 +699,32 @@ impl ComputeBackend for WgpuBackend {
 
         SpikeData::Sparse(result_indices)
     }
+}
+
+impl ComputeBackend for WgpuBackend {
+    fn name(&self) -> &'static str { "WgpuBackend" }
+
+    fn execute_kernel(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext) -> Option<SpikeData> {
+        let n_count = model.neurons.len();
+        self.execute_kernel_range(kernel, model, ctx, 0..n_count)
+    }
+
+    fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<SpikeData> {
+        match kernel {
+            crate::SimulationKernel::PropagateSynapses => None,
+            crate::SimulationKernel::UpdateMembranePotentials => None,
+            crate::SimulationKernel::GenerateSpikes => {
+                Some(self.day_phase_impl(model, ctx.external_inputs, ctx.previous_spikes, ctx.history, ctx.current_tick, ctx.modulation, range, ctx.top_down_modulation))
+            }
+            crate::SimulationKernel::ApplyModulation(_) => None,
+        }
+    }
+
+    fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData {
+        let n_count = model.neurons.len();
+        self.day_phase_impl(model, external_inputs, previous_spikes, history, current_tick, modulation, 0..n_count, None)
+    }
+
     fn update_weights(&mut self, model: &mut BakedModel, previous_spikes: &[bool], current_spikes: &[bool], current_tick: u32, reward: Option<IValue>, history: &[Vec<bool>]) {
         self.update_weights_modulated(model, previous_spikes, current_spikes, current_tick, reward, NeuromodulationState::default(), history);
     }
@@ -754,7 +744,13 @@ impl ComputeBackend for WgpuBackend {
         Self::ensure_buffer(&self.device, &mut res.weight_buffer, "Weight Buffer", &model.synapses.weight, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, false);
         Self::ensure_buffer(&self.device, &mut res.source_buffer, "Source Buffer", &model.synapses.source_index, wgpu::BufferUsages::STORAGE, false);
         Self::ensure_buffer(&self.device, &mut res.target_buffer, "Target Buffer", &model.synapses.target_index, wgpu::BufferUsages::STORAGE, false);
-        let comp_u32: Vec<u32> = model.synapses.compartment.iter().map(|&c| c as u32).collect();
+        let comp_u32: Vec<u32> = model.synapses.compartment.iter().map(|&c| match c {
+            genesis_core::Compartment::Proximal => 0,
+            genesis_core::Compartment::Distal => 1,
+            genesis_core::Compartment::Apical => 2,
+            genesis_core::Compartment::Basal => 3,
+            genesis_core::Compartment::Custom(v) => 4 + v as u32,
+        }).collect();
         Self::ensure_buffer(&self.device, &mut res.compartment_buffer, "Compartment Buffer", &comp_u32, wgpu::BufferUsages::STORAGE, false);
 
         // Prepare GpuNeuronState buffer
@@ -776,6 +772,15 @@ impl ComputeBackend for WgpuBackend {
                 apical_gate: model.neurons.apical_gate[i],
                 basal_gate: model.neurons.basal_gate[i],
                 block_id: model.neurons.block_id[i],
+                action: model.neurons.action_potential[i],
+                packed_lo: (model.neurons.packed_params[i] & 0xFFFFFFFF) as u32,
+                packed_hi: (model.neurons.packed_params[i] >> 32) as u32,
+                plasticity_gate: model.neurons.plasticity_gate[i],
+                is_remote: model.neurons.is_remote[i] as u32,
+                origin_node_id: model.neurons.origin_node_id[i],
+                specialization_score: model.neurons.specialization_score[i],
+                liquid_current: model.neurons.liquid_current[i],
+                update_interval: model.neurons.update_interval[i] as i32,
             });
         }
 
@@ -810,7 +815,7 @@ impl ComputeBackend for WgpuBackend {
             self.queue.write_buffer(res.modulation_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&mod_data));
         }
 
-        let lr_data = [model.config.learning_rate];
+        let lr_data = [model.config.plasticity.learning_rate];
         if res.lr_buffer.is_none() {
             Self::ensure_buffer(&self.device, &mut res.lr_buffer, "LR Buffer", &lr_data, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, true);
         } else {
@@ -819,7 +824,7 @@ impl ComputeBackend for WgpuBackend {
 
         // 2. Create Bind Groups
         // Ensure excitatory buffer is ready and uploaded (cached)
-        let excit_u32: Vec<u32> = model.synapses.source_index.iter().map(|&s| if model.neurons.is_excitatory[s as usize] { 1u32 } else { 0u32 }).collect();
+        let excit_u32: Vec<u32> = model.synapses.source_index.iter().map(|&s| if model.neurons.is_excitatory[s as usize] != 0 { 1u32 } else { 0u32 }).collect();
         Self::ensure_buffer(&self.device, &mut res.is_excitatory_buffer, "Excitatory Buffer", &excit_u32, wgpu::BufferUsages::STORAGE, false);
 
         let gsop_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -924,8 +929,6 @@ impl ComputeBackend for WgpuBackend {
                 model.neurons.adaptation_current[i] = out_states[i].adaptation;
                 model.neurons.backprop_signal[i] = out_states[i].backprop_signal;
                 model.neurons.action_potential[i] = out_states[i].action;
-                model.neurons.astro_calcium[i] = out_states[i].astro_calcium;
-                model.neurons.energy_level[i] = out_states[i].energy_level;
                 model.neurons.specialization_score[i] = out_states[i].specialization_score;
             }
             drop(data);

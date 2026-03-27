@@ -16,10 +16,8 @@ struct NeuronState {
     action: i32,
     packed: vec2<u32>, // u64 mirror
     plasticity_gate: i32,
-    astro_calcium: i32,
     is_remote: u32,
     origin_node_id: u32,
-    energy_level: i32,
     specialization_score: f32,
     liquid_current: i32,
     update_interval: u32,
@@ -94,9 +92,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let old_w = w;
 
     if (pre_spiked && post_spiked) {
-        w = w + lr_final;
+        if (is_excitatory[idx] != 0u) {
+            w = w + lr_final;
+        } else {
+            w = w - lr_final;
+        }
     } else if (pre_spiked && !post_spiked) {
-        w = w - (lr_final / 2);
+        if (is_excitatory[idx] != 0u) {
+            w = w - (lr_final / 2);
+        } else {
+            w = w + (lr_final / 2);
+        }
     }
 
     if (old_w > 0 && w < 0) { w = 1; }

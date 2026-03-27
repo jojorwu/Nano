@@ -99,7 +99,7 @@ impl RuntimeBuilder {
 
         modules.rebuild_tiers();
 
-        let mut engine = SimulationEngine::new(model, modules, backend, &self.settings)
+        let engine = SimulationEngine::new(model, modules, backend, &self.settings)
              .map_err(|e| RuntimeError::StateError("engine_init".into(), e.to_string()))?;
 
         // Heterogeneous setup is now disabled by default for better predictability during architectural changes.

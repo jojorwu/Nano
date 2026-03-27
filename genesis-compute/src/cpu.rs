@@ -36,17 +36,10 @@ impl CpuBackend {
     /// Integrated Single Neuron State Update (Thread-Safe using raw pointers)
     fn update_single_neuron_ffi(&self, i: usize, n: &genesis_core::NeuronsFFI, model: &BakedModel, current_tick: u32, noise_amp: i32, ip_inc: i32, ip_dec: i32, target_activity: i32) -> bool {
         unsafe {
-            // Metabolic Gating: skip update if exhausted
-            if *n.energy_level.add(i) < 50 {
-                 *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate * 2);
-                 return false;
-            }
-
             let attn_dist = ((*n.distal_potential.add(i) as i64 * *n.distal_gate.add(i) as i64) >> 10) as i32;
             let attn_apical = ((*n.apical_potential.add(i) as i64 * *n.apical_gate.add(i) as i64) >> 10) as i32;
             let attn_basal = ((*n.basal_potential.add(i) as i64 * *n.basal_gate.add(i) as i64) >> 10) as i32;
 
-            let astro_mod = ((*n.astro_calcium.add(i) as i64 * SCALE as i64) >> 12) as i32;
             // Multi-Segment Dendritic Integration
             let mut total_distal = attn_dist;
             let seg_offset = i * 4;
@@ -62,7 +55,7 @@ impl CpuBackend {
             let current_pot = calculate_membrane_potential(
                 *n.potential.add(i), *n.proximal_potential.add(i), total_distal, attn_apical, attn_basal,
                 *n.gate_threshold.add(i), *n.liquid_current.add(i), *n.decay.add(i), noise_amp,
-                *n.adaptation_current.add(i) + astro_mod
+                *n.adaptation_current.add(i)
             );
 
             // Refractory Multiplier: exponential threshold increase during refractory period
@@ -97,7 +90,6 @@ impl CpuBackend {
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
 
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i)).saturating_add(100);
-                *n.astro_calcium.add(i) = (*n.astro_calcium.add(i)).saturating_add(model.config.astro.increment);
             } else {
                 *n.potential.add(i) = current_pot;
 
@@ -118,7 +110,6 @@ impl CpuBackend {
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64) / 1000) as i32;
 
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i) * 95) / 100;
-                *n.astro_calcium.add(i) = ((*n.astro_calcium.add(i) as i64 * model.config.astro.decay_rate) / 1000) as i32;
 
                 let seg_offset = i * 4;
                 for s in 0..4 {
@@ -127,10 +118,7 @@ impl CpuBackend {
             }
 
             if fired {
-                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_sub(model.config.physics.metabolic_spike_cost);
                 *n.specialization_score.add(i) = *n.specialization_score.add(i) * model.config.physics.specialization_decay + 0.1;
-            } else {
-                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate);
             }
 
             let activity_ema = *n.activity_ema.add(i);
@@ -505,6 +493,13 @@ impl ComputeBackend for CpuBackend {
                         model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
                     }
                 }
+                if let Some(td) = ctx.top_down_modulation {
+                    for (i, &boost) in td.iter().enumerate() {
+                        if i >= range.start && i < range.end && i < n_count {
+                            model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(boost);
+                        }
+                    }
+                }
                 self.propagate_sparse_delayed_spikes(model, ctx.previous_spikes, ctx.history);
                 self.propagate_latent_spikes(model, ctx.previous_spikes);
                 let synapses = &mut model.synapses;
@@ -530,7 +525,7 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
-        let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation };
+        let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation, top_down_modulation: None };
         self.execute_kernel(crate::SimulationKernel::PropagateSynapses, model, &ctx);
         self.execute_kernel(crate::SimulationKernel::GenerateSpikes, model, &ctx).unwrap_or_default()
     }

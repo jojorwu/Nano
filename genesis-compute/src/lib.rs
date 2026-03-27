@@ -107,6 +107,7 @@ pub struct KernelContext<'a> {
     pub history: &'a [Vec<bool>],
     pub current_tick: u32,
     pub modulation: NeuromodulationState,
+    pub top_down_modulation: Option<&'a [i32]>,
 }
 
 pub use cpu::CpuBackend;

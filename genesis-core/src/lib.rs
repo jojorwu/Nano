@@ -24,29 +24,25 @@ pub mod robotics;
 pub mod plasticity;
 pub mod plasticity_rules;
 pub mod attention;
-pub mod workspace;
 pub mod hierarchical;
 pub mod episodic;
 pub mod curiosity;
 pub mod think;
 pub mod load_balancer;
-pub mod meta_control;
 
 // Re-exports for convenience and compatibility
 pub use bus::{InputBus, Modality};
 pub use module::{NanoModule, ModuleManager, ModuleRegistry, ModuleError, ModuleInput, ForeignModule, ForeignTickFn};
 pub use model::{NeuronsSoA, SynapsesSoA, BakedModel, SpikeData, Compartment, LatentSynapseMatrix, NeuronsFFI, SynapsesFFI};
 pub use attention::AttnResModule;
-pub use workspace::WorkspaceModule;
 pub use hierarchical::HierarchicalModule;
 pub use episodic::EpisodicModule;
 pub use curiosity::CuriosityModule;
 pub use think::ThinkModule;
-pub use meta_control::MetaControlModule;
 pub use event::{EventBus, GlobalEvent};
 pub use load_balancer::LoadBalancerModule;
 pub use plasticity_rules::{PlasticityContext, PlasticityRule, GsopRule};
-pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, AstroConfig, HardwareConfig};
+pub use config::{NetworkConfig, PhysicsConfig, PlasticityConfig, TitanConfig, ModuleConfig, HardwareConfig};
 
 pub type IValue = i32;
 pub const SCALE: IValue = 1024; // 2^10 for bit-shift optimizations

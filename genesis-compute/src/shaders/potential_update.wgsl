@@ -16,10 +16,8 @@ struct NeuronState {
     action: i32,
     packed: vec2<u32>, // u64 mirror
     plasticity_gate: i32,
-    astro_calcium: i32,
     is_remote: u32,
     origin_node_id: u32,
-    energy_level: i32,
     specialization_score: f32,
     liquid_current: i32,
     update_interval: u32,
@@ -35,8 +33,6 @@ struct Config {
     noise_amplitude: i32,
     theta_rhythm: i32,
     intrinsic_learning_rate: i32,
-    metabolic_spike_cost: i32,
-    metabolic_recovery_rate: i32,
 }
 @group(0) @binding(5) var<storage, read> config: Config;
 @group(0) @binding(6) var<storage, read_write> spikes: array<u32>;
@@ -81,13 +77,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let st = neuron_states[i];
     if (st.is_remote != 0u) { return; }
-
-    // Metabolic Gating: if energy is extremely low, the neuron is 'exhausted' and skips update
-    if (st.energy_level < 50) {
-        neuron_states[i].energy_level = min(1024, st.energy_level + config.metabolic_recovery_rate * 2);
-        spikes[i] = 0u;
-        return;
-    }
 
     // Dynamic MoE: Expert Freezing
     // If all dendritic gates for this neuron are very low, skip potential calculation to save power/cycles
@@ -160,10 +149,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     pot = (pot * mod_factor) >> 10;
     pot = (pot * theta_gate) >> 10;
 
-    // Metabolic Economy: potential leaks faster if energy is low
-    let energy_mult = max(128, neuron_states[i].energy_level);
-    pot = (pot * energy_mult) >> 10;
-
     let liquid_mod = ((abs(proximal) + abs(distal_potentials[i])) * 10) >> 10;
     let final_decay = max(1, neuron_states[i].decay - liquid_mod);
     pot = (pot * (1024 - final_decay)) >> 10;
@@ -188,16 +173,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             sparse_spikes[count] = i;
         }
         neuron_states[i].threshold = neuron_states[i].threshold + config.intrinsic_learning_rate;
-        // Energy consumption on spike
-        neuron_states[i].energy_level = max(0, neuron_states[i].energy_level - config.metabolic_spike_cost);
     } else {
         neuron_states[i].potential = pot;
         spikes[i] = 0u;
         if (neuron_states[i].threshold > neuron_states[i].base_threshold) {
             neuron_states[i].threshold = neuron_states[i].threshold - (config.intrinsic_learning_rate / 4);
         }
-        // Energy recovery when idle
-        neuron_states[i].energy_level = min(1024, neuron_states[i].energy_level + config.metabolic_recovery_rate);
         neuron_states[i].backprop_signal = (neuron_states[i].backprop_signal * 800) >> 10;
         neuron_states[i].action = (neuron_states[i].action * 800) >> 10;
         neuron_states[i].adaptation = (neuron_states[i].adaptation * 972) >> 10;

@@ -8,6 +8,7 @@ pub enum GlobalEvent {
     HighSurprise(i32),            // surprise level
     RewardSignal(i32),            // reward value
     ConsolidationTriggered,       // Start of Night Phase / Replay
+    BlockTriggered(u32),          // block_id was activated (e.g. by Titan)
     ModulationShift(usize, i32),  // signal_id, delta
     StructuralUpdate(String),     // e.g. "Neurogenesis"
     Custom(String, Vec<u8>),
@@ -29,7 +30,7 @@ impl EventBus {
         self.events.push(event);
     }
 
-    pub fn poll_all(&self) -> Vec<GlobalEvent> {
+    pub fn drain_all(&self) -> Vec<GlobalEvent> {
         let mut results = Vec::new();
         while let Some(ev) = self.events.pop() {
             results.push(ev);
