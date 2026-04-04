@@ -50,16 +50,22 @@ mod tests {
         }
         observers.push(Box::new(Telemetry::default()));
 
-        Runtime {
-            engine: SimulationEngine::new(model, modules, backend, &settings).unwrap(),
+        let engine = SimulationEngine::new(model, modules, backend, &settings).unwrap();
+        let pipeline = crate::engine::pipeline::SimulationPipeline::new(&settings);
+
+        let mut rt = Runtime {
+            engine,
             settings,
+            pipeline,
             episode_reward_history: Vec::new(),
             network_manager: None,
             observers,
             last_surprise: 0,
             surprise_history: Vec::new(),
             titan_rx: None,
-        }
+        };
+        rt.post_init().unwrap();
+        rt
     }
 
     #[test]
@@ -247,44 +253,22 @@ mod tests {
 
     #[test]
     fn test_elias_fano_roundtrip_precision() {
-        use crate::SpikePacket;
         let indices = vec![1, 10, 100, 500, 999];
         let universe = 1000;
 
-        let compressed = SpikePacket::compress_indices(&indices, universe);
+        let compressed = SpikeData::compress(&indices, universe);
         // High precision: compressed size should be significantly smaller than raw indices
         assert!(compressed.len() < indices.len() * 4);
 
-        let packet = SpikePacket { tick: 1, data: SpikeData::Compressed(compressed) };
-        let queue = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        // Use real NetworkManager logic (extracted)
-        if let SpikeData::Compressed(data) = packet.data {
-             let mut q = queue.lock().unwrap();
-             let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-             let low_bits = data[4] as u32;
-             let mut bit_ptr = 40usize;
-             let mut current_high = 0u32;
-             for _ in 0..count {
-                 while bit_ptr / 8 < data.len() && (data[bit_ptr / 8] >> (bit_ptr % 8)) & 1 == 0 {
-                     current_high += 1;
-                     bit_ptr += 1;
-                 }
-                 bit_ptr += 1;
-                 let mut low = 0u32;
-                 for i in 0..low_bits {
-                     if bit_ptr / 8 < data.len() && (data[bit_ptr / 8] >> (bit_ptr % 8)) & 1 == 1 {
-                         low |= 1 << i;
-                     }
-                     bit_ptr += 1;
-                 }
-                 q.push(((current_high << low_bits) | low) as usize);
-             }
+        let spike_data = SpikeData::Compressed(compressed);
+        let packed = spike_data.to_bitpacked(universe);
+        let mut result = Vec::new();
+        for i in 0..universe {
+            if (packed[i / 64] >> (i % 64)) & 1 == 1 {
+                result.push(i);
+            }
         }
-
-        let mut result = queue.lock().unwrap();
-        result.sort_unstable();
-        assert_eq!(*result, indices, "Elias-Fano precision roundtrip failed");
+        assert_eq!(result, indices, "Elias-Fano precision roundtrip failed");
     }
 
     #[test]

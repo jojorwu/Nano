@@ -4,7 +4,25 @@ use genesis_core::SCALE;
 pub struct NeuromodulationEngine;
 
 impl NeuromodulationEngine {
-    pub fn update(engine: &mut SimulationEngine, surprise: i32, normalized_reward: Option<i32>) {
+    pub fn update_with_events(engine: &mut SimulationEngine, surprise: i32, normalized_reward: Option<i32>, events: &[genesis_core::event::GlobalEvent]) {
+        // 1. Process Event-Driven Modulation from context
+        for event in events {
+             match event {
+                 genesis_core::event::GlobalEvent::ModulationShift(sig_id, delta) => {
+                     match sig_id {
+                         0 => engine.state.global_modulators.dopamine = engine.state.global_modulators.dopamine.saturating_add(*delta),
+                         1 => engine.state.global_modulators.noradrenaline = engine.state.global_modulators.noradrenaline.saturating_add(*delta),
+                         2 => engine.state.global_modulators.serotonin = engine.state.global_modulators.serotonin.saturating_add(*delta),
+                         _ => {}
+                     }
+                 }
+                 genesis_core::event::GlobalEvent::RewardSignal(r) => {
+                      engine.state.global_modulators.dopamine = engine.state.global_modulators.dopamine.saturating_add(*r);
+                 }
+                 _ => {}
+             }
+        }
+
         engine.state.global_modulators.noradrenaline = surprise;
         if let Some(r) = normalized_reward {
             engine.state.global_modulators.dopamine = r;

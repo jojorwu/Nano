@@ -41,7 +41,10 @@ pub trait NanoModule: Send + Sync {
     fn inputs(&self) -> Vec<String> { Vec::new() }
 
     /// Optional downcast to concrete type
-    fn as_any(&self) -> &dyn std::any::Any { &() }
+    fn as_any(&self) -> &dyn std::any::Any { &0 }
+
+    /// Optional mutable downcast
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Declares global signal modulations this module wants to apply.
     /// Returns a list of (signal_id, delta_value).
@@ -59,6 +62,9 @@ pub trait NanoModule: Send + Sync {
     /// Called every simulation tick. Use this to inject external signals into the InputBus.
     /// The InputBus uses atomic integers to allow thread-safe signal injection from multiple modules.
     fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32);
+
+    /// High-level event handling.
+    fn on_event(&mut self, _event: &crate::event::GlobalEvent) {}
 
     /// Called during the learning phase to update module-specific internal weights or states.
     fn on_update_weights(&mut self, neurons: &mut NeuronsSoA, previous_spikes: &[bool], current_spikes: &[bool], tick: u32, reward: Option<IValue>);
@@ -91,6 +97,7 @@ pub struct ForeignModule {
 impl NanoModule for ForeignModule {
     fn name(&self) -> &str { &self.name }
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn on_tick(&mut self, bus: &InputBus, _previous_spikes: &[bool], tick: u32) {
         if let Some(f) = self.tick_fn {
             // Simplified bus pointer pass for Zero-Copy FFI.
@@ -127,6 +134,7 @@ impl DynamicPluginModule {
 
 impl NanoModule for DynamicPluginModule {
     fn name(&self) -> &str { &self.name }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn box_clone(&self) -> Box<dyn NanoModule> {
         Box::new(Self {
             name: self.name.clone(),
@@ -171,10 +179,11 @@ impl ModuleRegistry {
         self.register_factory("graph_engine", || Box::new(crate::graph::SpikingGraphModule::new(crate::graph::TopologyType::SmallWorld)));
         self.register_factory("adaptive_lr", || Box::new(crate::plasticity::AdaptiveLearningRateModule::new(10)));
         self.register_factory("think", || Box::new(crate::ThinkModule::new(5)));
-        self.register_factory("workspace", || Box::new(crate::workspace::WorkspaceModule::new()));
         self.register_factory("hierarchical", || Box::new(crate::hierarchical::HierarchicalModule::new()));
         self.register_factory("episodic", || Box::new(crate::episodic::EpisodicModule::new()));
         self.register_factory("curiosity", || Box::new(crate::curiosity::CuriosityModule::new()));
+        self.register_factory("meta_control", || Box::new(crate::meta_control::MetaControlModule::default()));
+        #[cfg(feature = "robotics")]
         self.register_factory("cerebellum", || Box::new(crate::robotics::SpikingCerebellumModule::new(Vec::new(), Vec::new())));
     }
 
@@ -218,6 +227,8 @@ mod tests {
 
     impl NanoModule for MockModule {
         fn name(&self) -> &str { &self.name }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
         fn inputs(&self) -> Vec<String> { self.inputs.clone() }
         fn outputs(&self) -> Vec<String> { self.outputs.clone() }
         fn on_tick(&mut self, _: &InputBus, _: &[bool], _: u32) {}
@@ -381,6 +392,17 @@ impl ModuleManager {
     pub fn on_tick(&mut self, bus: &InputBus, previous_spikes: &[bool], tick: u32) {
         use rayon::prelude::*;
 
+        // 1. Process Events from previous tick
+        let events = bus.event_bus.drain_all();
+        if !events.is_empty() {
+            for event in &events {
+                for m in &mut self.modules {
+                    m.on_event(event);
+                }
+            }
+        }
+
+        // 2. Main Module Ticks (Parallel within tiers)
         for tier_indices in &self.tiered_indices {
             self.modules.par_iter_mut().enumerate()
                 .filter(|(idx, _)| tier_indices.contains(idx))

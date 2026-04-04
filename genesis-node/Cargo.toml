@@ -15,8 +15,13 @@ fusion = ["genesis-core/fusion"]
 cpp = ["genesis-compute/cpp"]
 cuda = ["genesis-compute/cuda"]
 
+[[bench]]
+name = "scaling"
+harness = false
+
 [dependencies]
 log = { workspace = true }
+criterion = "0.5"
 thiserror = { workspace = true }
 genesis-core = { path = "../genesis-core" }
 genesis-compute = { path = "../genesis-compute" }

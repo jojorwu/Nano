@@ -51,6 +51,19 @@ impl AttnResModule {
 
 impl NanoModule for AttnResModule {
     fn name(&self) -> &str { "attn_res" }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        if let crate::event::GlobalEvent::HighSurprise(s) = event {
+            if *s > 1000 {
+                // High surprise triggers attention shift to memory (distal)
+                for q in &mut self.block_queries {
+                    q[1] = (q[1] * 11) / 10;
+                }
+            }
+        }
+    }
 
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         // This module applies attention weights to the input bus signals

@@ -47,10 +47,12 @@ pub use events::{SimulationEvent, SimulationObserver};
 pub use settings::SimulationSettings;
 pub use network::{NetworkManager, SpikePacket};
 pub use builder::RuntimeBuilder;
+use crate::engine::pipeline::SimulationPipeline;
 
 pub struct Runtime {
     pub engine: SimulationEngine,
     pub settings: SimulationSettings,
+    pub pipeline: SimulationPipeline,
     pub episode_reward_history: Vec<i32>, // GRPO-lite: for reward normalization
     pub network_manager: Option<std::sync::Arc<NetworkManager>>,
     pub observers: Vec<Box<dyn SimulationObserver>>,
@@ -84,7 +86,7 @@ impl Runtime {
     }
 
     pub fn tick_with_reward_targeted(&mut self, external_inputs: &[i32], reward: Option<i32>, layer_mask: Option<u16>) -> Vec<bool> {
-        use crate::engine::pipeline::{SimulationPipeline, PipelineContext};
+        use crate::engine::pipeline::PipelineContext;
 
         let start_time = std::time::Instant::now();
         let normalized_reward = self.prepare_reward(reward);
@@ -100,15 +102,12 @@ impl Runtime {
             normalized_reward,
             surprise: 0,
             start_time,
+            events: self.engine.input_bus.event_bus.drain_all(),
+            top_down_data: None,
             blackboard: std::collections::HashMap::new(),
         };
 
-        let mut pipeline = if let Some(ref stages) = self.settings.active_pipeline_stages {
-            SimulationPipeline::from_config(stages, &self.settings)
-        } else {
-            SimulationPipeline::new(&self.settings)
-        };
-        pipeline.execute(&mut self.engine, &mut context);
+        self.pipeline.execute(&mut self.engine, &mut context);
 
         // History population is now handled by the Propagation stage (or sub-ticks)
         // to ensure it's available for Neuromodulation/Observation stages.
@@ -142,6 +141,7 @@ impl Runtime {
 
         if tick > 0 && tick % self.settings.night_phase_interval == 0 {
             self.emit_event(SimulationEvent::NightPhaseStarted(tick));
+            self.engine.input_bus.event_bus.publish(genesis_core::GlobalEvent::ConsolidationTriggered);
             self.perform_night_phase(reward, normalized_reward, layer_mask, context.surprise);
             self.emit_event(SimulationEvent::NightPhaseComplete(tick));
         }
@@ -191,6 +191,27 @@ impl Runtime {
 
         // Structural plasticity and Global Module updates use raw reward
         self.engine.backend.structural_plasticity(&mut self.engine.model, raw_reward, &reconstructed);
+
+        // Memory Consolidation: Transfer episodic sequences to Titan using zero-copy downcasting
+        let mut episodic_sequences = Vec::new();
+        for m in &self.engine.modules.modules {
+            if let Some(ep) = m.as_any().downcast_ref::<genesis_core::episodic::EpisodicModule>() {
+                episodic_sequences = ep.sequences.clone();
+                break;
+            }
+        }
+
+        if !episodic_sequences.is_empty() {
+            for m in &mut self.engine.modules.modules {
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    for seq in &episodic_sequences {
+                        titan.learn_from_sequence(seq, &self.engine.model.neurons);
+                    }
+                    break;
+                }
+            }
+        }
+
         self.engine.modules.on_night_phase(&mut self.engine.model.neurons, &mut self.engine.model.synapses, raw_reward);
         self.sync_modules_to_model();
         // NOTE: history_ptr is NOT reset here to maintain circular buffer continuity.
@@ -209,7 +230,7 @@ impl Runtime {
 
             if !active_indices.is_empty() {
                 let data = if active_indices.len() < current_spikes.len() / 16 {
-                    SpikeData::Compressed(SpikePacket::compress_indices(&active_indices, current_spikes.len()))
+                    SpikeData::Compressed(SpikeData::compress(&active_indices, current_spikes.len()))
                 } else if active_indices.len() < current_spikes.len() / 8 {
                     SpikeData::Sparse(active_indices)
                 } else {
@@ -370,29 +391,38 @@ impl Runtime {
     }
 
     pub fn consolidate_memory(&mut self, iterations: u32) {
-        log::info!("Starting memory consolidation phase ({} iterations)...", iterations);
+        use crate::engine::pipeline::PipelineContext;
+        log::info!("Starting memory consolidation phase (Generative Dreaming: {} iterations)...", iterations);
 
+        let start_time = std::time::Instant::now();
         for _ in 0..iterations {
-            // Memory Replay: Fetch past bitpacked patterns
-            let history = &self.engine.state.spikes_history;
-            if history.len() < 2 { break; }
+            let tick = self.engine.state.tick_counter;
+            let mut context = PipelineContext {
+                tick,
+                external_inputs: vec![0; self.engine.model.neurons.len()],
+                reward: None,
+                normalized_reward: None,
+                surprise: 0,
+                start_time,
+                events: Vec::new(),
+                top_down_data: None,
+                blackboard: std::collections::HashMap::new(),
+            };
+            context.blackboard.insert("dream_active".to_string(), 1.0);
 
-            // Trigger Titan learning specifically from its own internal history
+            // Execute pipeline with dream stage enabled
+            self.pipeline.execute(&mut self.engine, &mut context);
+
+            // Consolidation: Transfer episodic data to Titan
+            // We use history_ptr - 1 because execute() advanced it
+            let history_len = self.engine.state.spikes_history.len();
+            let last_idx = if self.engine.state.history_ptr == 0 { history_len - 1 } else { self.engine.state.history_ptr - 1 };
+
             for m in &mut self.engine.modules.modules {
-                if m.name() == "titan" {
-                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        // Memory Replay: iterate through history and treat each step as "now"
-                        let h_len = history.len();
-                        for i in 0..h_len {
-                            titan.learn_from_history(history, i, &self.engine.model.neurons, 1000);
-                        }
-                        m.set_state(&bincode::serialize(&titan).unwrap());
-                    }
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    titan.learn_from_history(&self.engine.state.spikes_history, last_idx, &self.engine.model.neurons, 1000);
                 }
             }
-
-            // Run a few "thinking" ticks to propagate these internal patterns
-            self.process_burst(&[], 5);
         }
         log::info!("Consolidation complete.");
     }

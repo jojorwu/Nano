@@ -1,4 +1,4 @@
-use crate::{SynapsesSoA, IValue, WEIGHT_CLAMP_LIMIT};
+use crate::{SynapsesSoA, IValue, WEIGHT_CLAMP_LIMIT, SCALE};
 
 pub fn clamp_and_preserve_sign(weight: &mut IValue, old_weight: IValue) {
     clamp_and_preserve_sign_with_limit(weight, old_weight, WEIGHT_CLAMP_LIMIT);
@@ -163,17 +163,11 @@ impl Default for StructuralPlasticityConfig {
     }
 }
 
-pub fn prune_synapses(synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, threshold: IValue) -> usize {
+pub fn prune_synapses(synapses: &mut SynapsesSoA, _neurons: &crate::NeuronsSoA, threshold: IValue) -> usize {
     let mut pruned = 0;
     let mut i = 0;
     while i < synapses.len() {
-        let target = synapses.target_index[i] as usize;
-        let mut should_prune = synapses.weight[i].abs() < threshold;
-
-        // Metabolic Pruning: if target neuron is starving (low energy), prune incoming connections
-        if target < neurons.len() && neurons.energy_level[target] < 100 {
-            should_prune = true;
-        }
+        let should_prune = synapses.weight[i].abs() < threshold;
 
         if should_prune {
             synapses.remove(i);
@@ -183,6 +177,24 @@ pub fn prune_synapses(synapses: &mut SynapsesSoA, neurons: &crate::NeuronsSoA, t
         }
     }
     pruned
+}
+
+/// Culls neurons that have not contributed to activity or reward for a long period.
+/// This function returns the indices of culled neurons.
+pub fn cull_inactive_neurons(neurons: &mut crate::NeuronsSoA, activity_threshold: IValue) -> Vec<usize> {
+    let mut culled = Vec::new();
+    for i in 0..neurons.len() {
+        // If activity EMA is extremely low, the neuron is a candidate for culling.
+        // (Simplified: we don't actually remove them from SoA to avoid index shifts, we 'reset' them)
+        if neurons.activity_ema[i] < activity_threshold {
+             culled.push(i);
+             neurons.potential[i] = 0;
+             neurons.base_threshold[i] = SCALE;
+             neurons.threshold[i] = SCALE;
+             neurons.specialization_score[i] = 0.0;
+        }
+    }
+    culled
 }
 
 pub struct EvolutionaryOptimizer {
@@ -495,6 +507,27 @@ impl AdaptiveLearningRateModule {
 
 impl NanoModule for AdaptiveLearningRateModule {
     fn name(&self) -> &str { "adaptive_lr" }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn on_event(&mut self, event: &crate::event::GlobalEvent) {
+        match event {
+            crate::event::GlobalEvent::RewardSignal(r) => {
+                if *r > 500 {
+                    self.current_lr = (self.current_lr * 12) / 10;
+                } else if *r < -100 {
+                    self.current_lr = (self.current_lr * 8) / 10;
+                }
+            }
+            crate::event::GlobalEvent::HighSurprise(s) => {
+                if *s > 1500 {
+                    self.current_lr = (self.current_lr * 11) / 10;
+                }
+            }
+            _ => {}
+        }
+        self.current_lr = self.current_lr.clamp(self.base_lr / 2, self.base_lr * 4);
+    }
 
     fn on_tick(&mut self, _bus: &crate::InputBus, _previous_spikes: &[bool], _tick: u32) {}
 

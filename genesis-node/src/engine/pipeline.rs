@@ -14,8 +14,16 @@ pub struct PipelineContext {
     pub normalized_reward: Option<i32>,
     pub surprise: i32,
     pub start_time: Instant,
+    pub events: Vec<genesis_core::GlobalEvent>,
+    pub top_down_data: Option<Vec<i32>>,
     /// Blackboard for inter-stage communication
     pub blackboard: std::collections::HashMap<String, f32>,
+}
+
+impl PipelineContext {
+    pub fn clear_blackboard(&mut self) {
+        self.blackboard.clear();
+    }
 }
 
 pub struct SimulationPipeline {
@@ -50,6 +58,7 @@ impl SimulationPipeline {
                 "normalization" => stages.push(Box::new(NormalizationStage)),
                 "load_balancing" => stages.push(Box::new(LoadBalancingStage)),
                 "structural_plasticity" => stages.push(Box::new(StructuralPlasticityStage::new(settings.night_phase_interval))),
+                "dream" => stages.push(Box::new(DreamStage)),
                 "anomaly_detection" => stages.push(Box::new(AnomalyDetectionStage)),
                 _ => log::warn!("Unknown pipeline stage: {}", name),
             }
@@ -58,8 +67,24 @@ impl SimulationPipeline {
     }
 
     pub fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        for stage in &mut self.stages {
+        let mut i = 0;
+        while i < self.stages.len() {
+            let stage = &mut self.stages[i];
             stage.execute(engine, context);
+
+            // De-hardcoded Dynamic Gating: React to MetaControl events cached in context.events
+            if stage.name() == "propagation" {
+                let retry_requested = context.events.iter().any(|e| match e {
+                    genesis_core::GlobalEvent::Custom(s, _) => s == "RetryPropagation",
+                    _ => false
+                });
+
+                if retry_requested && !context.blackboard.contains_key("prop_retry") {
+                      context.blackboard.insert("prop_retry".to_string(), 1.0);
+                      continue; // Execute the same stage index again
+                 }
+            }
+            i += 1;
         }
     }
 }
@@ -88,6 +113,36 @@ impl PipelineStage for InputStage {
 
         engine.input_bus.clear_mut();
         engine.modules.on_tick(&engine.input_bus, &engine.state.previous_spikes, context.tick);
+
+        // Pre-calculate Top-Down Modulation for WGPU efficiency
+        let mut top_down_data = vec![0i32; n_count];
+        let mut has_top_down = false;
+        for m in &engine.modules.modules {
+            if let Some(hier) = m.as_any().downcast_ref::<genesis_core::HierarchicalModule>() {
+                if hier.enabled {
+                    for (&high_layer, low_layers) in &hier.hierarchy_map {
+                        let high_act = hier.layer_activity.get(&high_layer).cloned().unwrap_or(0.0);
+                        if high_act > 0.1 {
+                            has_top_down = true;
+                            let boost = (high_act * hier.top_down_gain as f32) as i32;
+                            for &low_layer in low_layers {
+                                if let Some(target_neurons) = hier.layer_to_neurons.get(&low_layer) {
+                                    for &idx in target_neurons {
+                                        if (idx as usize) < n_count {
+                                            top_down_data[idx as usize] = top_down_data[idx as usize].saturating_add(boost);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if has_top_down {
+            context.top_down_data = Some(top_down_data);
+        }
+
         engine.finalize_potentials_from_bus();
     }
 }
@@ -99,62 +154,30 @@ impl PipelineStage for PropagationStage {
         let n_count = engine.model.neurons.len();
         let full_history = engine.reconstruct_history(16);
 
-        let spike_data = if let Some(ref mut secondary) = engine.secondary_backend {
-            // Heterogeneous Compute: split the neural blocks between backends
-            // Primary backend (typically WGPU/GPU) handles the bulk of neurons
-            // Secondary backend (typically CPU) handles a specific range (e.g. the last 20%)
-            let split_point = (n_count * 80) / 100;
+        // Heterogeneous Execution Context: we must take ownership of references where possible
+        // to satisfy borrow checker during multi-backend dispatch.
+        let merged_inputs = engine.state.merged_inputs_buffer.clone();
+        let previous_spikes = engine.state.previous_spikes.clone();
+        let global_modulators = engine.state.global_modulators;
 
-            let kernel_ctx = genesis_compute::KernelContext {
-                external_inputs: &engine.state.merged_inputs_buffer,
-                previous_spikes: &engine.state.previous_spikes,
-                history: &full_history,
-                current_tick: context.tick,
-                modulation: engine.state.global_modulators,
-            };
-
-            // 1. Concurrent Synapse Propagation (Currently simplified to full on primary)
-            engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
-
-            // 2. Parallel Membrane Potential & Spike Generation
-            // In a production environment, we would use the is_remote flags to filter neurons per-backend.
-            // For this implementation, we use a simple range-based split.
-            let primary_range = 0..split_point;
-            let secondary_range = split_point..n_count;
-
-            let primary_spikes = engine.backend.execute_kernel_range(
-                genesis_compute::SimulationKernel::GenerateSpikes,
-                &mut engine.model,
-                &kernel_ctx,
-                primary_range
-            );
-
-            let secondary_spikes = secondary.execute_kernel_range(
-                genesis_compute::SimulationKernel::GenerateSpikes,
-                &mut engine.model,
-                &kernel_ctx,
-                secondary_range
-            );
-
-            // 3. Merge results
-            let mut merged_indices = Vec::new();
-            if let Some(genesis_core::SpikeData::Sparse(indices)) = primary_spikes {
-                merged_indices.extend(indices);
-            }
-            if let Some(genesis_core::SpikeData::Sparse(indices)) = secondary_spikes {
-                merged_indices.extend(indices);
-            }
-            genesis_core::SpikeData::Sparse(merged_indices)
-        } else {
-            engine.backend.day_phase(
-                &mut engine.model,
-                &engine.state.merged_inputs_buffer,
-                &engine.state.previous_spikes,
-                &full_history,
-                context.tick,
-                engine.state.global_modulators,
-            )
+        let kernel_ctx = genesis_compute::KernelContext {
+            external_inputs: &merged_inputs,
+            previous_spikes: &previous_spikes,
+            history: &full_history,
+            current_tick: context.tick,
+            modulation: global_modulators,
+            top_down_modulation: context.top_down_data.as_deref(),
         };
+
+        // 1. Heterogeneous Potential Update
+        engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::UpdateMembranePotentials, &kernel_ctx);
+
+        // 2. Heterogeneous Synapse Propagation
+        engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::PropagateSynapses, &kernel_ctx);
+
+        // 3. Heterogeneous Spike Generation (Handles both Primary and Secondary devices)
+        let spike_data = engine.dispatch_heterogeneous(genesis_compute::SimulationKernel::GenerateSpikes, &kernel_ctx)
+            .unwrap_or(SpikeData::Sparse(vec![]));
 
         engine.state.current_spikes_buffer.fill(false);
         match &spike_data {
@@ -290,13 +313,10 @@ impl PipelineStage for ObservationStage {
                 log::debug!("L3: Episodic memory stored (Surprise: {})", context.surprise);
             }
 
-            // Update BitWise Titan Memory if present
+            // Update BitWise Titan Memory if present using zero-copy downcasting
             for m in engine.modules.modules.iter_mut() {
-                if m.name() == "titan" {
-                    if let Ok(mut titan) = bincode::deserialize::<genesis_core::titan::BitWiseTitan>(&m.get_state()) {
-                        titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
-                        m.set_state(&bincode::serialize(&titan).unwrap());
-                    }
+                if let Some(titan) = m.as_any_mut().downcast_mut::<genesis_core::titan::BitWiseTitan>() {
+                    titan.learn_from_history(&engine.state.spikes_history, engine.state.history_ptr, &engine.model.neurons, context.surprise);
                 }
             }
         }
@@ -342,7 +362,7 @@ pub struct NeuromodulationStage;
 impl PipelineStage for NeuromodulationStage {
     fn name(&self) -> &str { "neuromodulation" }
     fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
-        crate::engine::neuromodulation::NeuromodulationEngine::update(engine, context.surprise, context.normalized_reward);
+        crate::engine::neuromodulation::NeuromodulationEngine::update_with_events(engine, context.surprise, context.normalized_reward, &context.events);
     }
 }
 
@@ -426,6 +446,60 @@ impl PipelineStage for LoadBalancingStage {
                  }
              }
          }
+    }
+}
+
+pub struct DreamStage;
+impl PipelineStage for DreamStage {
+    fn name(&self) -> &str { "dream" }
+    fn execute(&mut self, engine: &mut SimulationEngine, context: &mut PipelineContext) {
+        if !context.blackboard.contains_key("dream_active") { return; }
+
+        let n_count = engine.model.neurons.len();
+        log::debug!("DreamStage: Executing virtual tick using internal history");
+
+        // Use last history step as "pseudo-input"
+        let last_step = engine.state.history_ptr;
+        let pseudo_inputs = engine.state.spikes_history[last_step].to_bitpacked(n_count);
+
+        // Convert pseudo-inputs to scaled potentials
+        engine.state.merged_inputs_buffer.fill(0);
+        for (i, &word) in pseudo_inputs.iter().enumerate() {
+            if word == 0 { continue; }
+            for bit in 0..64 {
+                if (word >> bit) & 1 == 1 {
+                    let idx = i * 64 + bit;
+                    if idx < n_count {
+                        engine.state.merged_inputs_buffer[idx] = genesis_core::SCALE;
+                    }
+                }
+            }
+        }
+
+        // Execute standard propagation but with virtual inputs
+        let full_history = engine.reconstruct_history(16);
+        let kernel_ctx = genesis_compute::KernelContext {
+            external_inputs: &engine.state.merged_inputs_buffer,
+            previous_spikes: &engine.state.previous_spikes,
+            history: &full_history,
+            current_tick: context.tick,
+            modulation: engine.state.global_modulators,
+            top_down_modulation: context.top_down_data.as_deref(),
+        };
+
+        engine.backend.execute_kernel(genesis_compute::SimulationKernel::UpdateMembranePotentials, &mut engine.model, &kernel_ctx);
+        engine.backend.execute_kernel(genesis_compute::SimulationKernel::PropagateSynapses, &mut engine.model, &kernel_ctx);
+        let spike_data = engine.backend.execute_kernel(genesis_compute::SimulationKernel::GenerateSpikes, &mut engine.model, &kernel_ctx).unwrap_or_default();
+
+        // Update state but don't record to real history yet (or handle specifically)
+        // For now, let's just update current_spikes_buffer to see the 'dream' result
+        engine.state.current_spikes_buffer.fill(false);
+        match &spike_data {
+            genesis_core::SpikeData::Sparse(indices) => {
+                for &idx in indices { if idx < n_count { engine.state.current_spikes_buffer[idx] = true; } }
+            }
+            _ => {}
+        }
     }
 }
 

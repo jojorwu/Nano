@@ -35,6 +35,8 @@ pub struct InputBus {
     /// Global broadcast signals (Hormones/Neuromodulators)
     pub global_signals: Vec<AtomicI32>,
     pub theta_phase: AtomicI32, // Rhythmic Synchronization
+    /// High-level event bus
+    pub event_bus: crate::event::EventBus,
 }
 
 impl InputBus {
@@ -70,6 +72,7 @@ impl InputBus {
             name_map,
             global_signals,
             theta_phase: AtomicI32::new(0),
+            event_bus: crate::event::EventBus::new(),
             proximal_idx,
             distal_idx,
             apical_idx,
@@ -124,10 +127,8 @@ impl InputBus {
     /// Faster clear when unique access is available, using raw memory fill.
     pub fn clear_mut(&mut self) {
         for chan in &mut self.channels {
-            let ptr = chan.as_mut_ptr() as *mut i32;
-            let len = chan.len();
-            unsafe {
-                std::ptr::write_bytes(ptr, 0, len);
+            for v in chan {
+                v.store(0, Ordering::Relaxed);
             }
         }
         for v in &mut self.global_signals {
@@ -163,28 +164,43 @@ impl InputBus {
             let chan = self.channel(id);
             if index < chan.len() {
                 let val = chan[index].load(Ordering::Relaxed);
-                // Active Inference: Gated Perception
-                // If the network is suppressing this modality via the 'action' channel, reduce the value.
+                // Active Inference: Precision-Weighted Sensory Gating
+                // 1. Inhibitory Gating via the 'action' channel (Active Inference)
                 let action_chan = self.action();
+                let mut effective_val = val;
                 if index < action_chan.len() {
                     let suppression = action_chan[index].load(Ordering::Relaxed);
                     if suppression > 0 {
-                        // Use a simple gating mechanism: if suppression is high, value is reduced.
-                        // SCALE = 1024. If suppression = 1024, val = 0.
-                        return (val as i64 * (crate::SCALE - suppression).max(0) as i64 >> 10) as i32;
+                        // If suppression is high (Active Inference drives motor output), sensory input is reduced.
+                        effective_val = (effective_val as i64 * (crate::SCALE - suppression).max(0) as i64 >> 10) as i32;
                     }
                 }
-                return val;
+
+                // 2. Precision-Weighting via Global Surprise (Noradrenaline)
+                // High surprise (noradrenaline) acts as a gain boost for sensory input,
+                // representing heightened attention to unexpected data.
+                let surprise = self.global_signals[1].load(Ordering::Relaxed); // Signal 1: Noradrenaline
+                if surprise > 0 {
+                     // Gain increases with surprise, max +100% gain at surprise = SCALE
+                     // Precision handling: use i128 for intermediate calculation if needed,
+                     // but i64 is enough for 10-bit shifts.
+                     let gain = (crate::SCALE as i64).saturating_add((surprise as i64).min(crate::SCALE as i64));
+                     effective_val = ((effective_val as i64 * gain) >> 10) as i32;
+                }
+
+                return effective_val;
             }
         }
         0
     }
 
     pub fn atomic_saturating_add(target: &AtomicI32, val: i32) {
+        if val == 0 { return; }
         let mut current = target.load(Ordering::Relaxed);
         loop {
             let next = current.saturating_add(val);
-            match target.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::Relaxed) {
+            if next == current { break; } // Optimization: no change needed
+            match target.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(updated) => current = updated,
             }

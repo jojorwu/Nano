@@ -1,5 +1,6 @@
 use genesis_core::{BakedModel, NeuronsSoA, SynapsesSoA, NetworkConfig, Compartment};
 use genesis_node::{Runtime, SimulationSettings, Observer, Telemetry, SimulationEngine};
+use genesis_node::engine::pipeline::SimulationPipeline;
 use genesis_compute::{CpuBackend, ComputeBackend};
 use std::collections::HashMap;
 
@@ -23,22 +24,27 @@ fn test_module_persistence_and_restoration() {
         vocabulary: HashMap::new(),
     };
 
-    let mut runtime = Runtime {
-        engine: SimulationEngine::new(
-            model,
-            {
-                let mut mm = genesis_core::ModuleManager::new();
-                #[cfg(feature = "titan")]
-                mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
-                mm
-            },
-            Box::new(CpuBackend::default()),
-            &SimulationSettings::default()
-        ).unwrap(),
-        settings: SimulationSettings {
-            night_phase_interval: 1, // Learning every tick for test
-            ..SimulationSettings::default()
+    let settings = SimulationSettings {
+        night_phase_interval: 1, // Learning every tick for test
+        ..SimulationSettings::default()
+    };
+    let engine = SimulationEngine::new(
+        model,
+        {
+            let mut mm = genesis_core::ModuleManager::new();
+            #[cfg(feature = "titan")]
+            mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
+            mm
         },
+        Box::new(CpuBackend::default()),
+        &settings
+    ).unwrap();
+    let pipeline = SimulationPipeline::new(&settings);
+
+    let mut runtime = Runtime {
+        engine,
+        settings,
+        pipeline,
         episode_reward_history: Vec::new(),
         network_manager: None,
         observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
@@ -64,19 +70,24 @@ fn test_module_persistence_and_restoration() {
 
     // 4. Create new runtime and restore
     let model2 = runtime.engine.model.clone();
+    let settings2 = SimulationSettings::default();
+    let engine2 = SimulationEngine::new(
+        model2,
+        {
+            let mut mm = genesis_core::ModuleManager::new();
+            #[cfg(feature = "titan")]
+            mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
+            mm
+        },
+        Box::new(CpuBackend::default()),
+        &settings2
+    ).unwrap();
+    let pipeline2 = SimulationPipeline::new(&settings2);
+
     let mut runtime2 = Runtime {
-        engine: SimulationEngine::new(
-            model2,
-            {
-                let mut mm = genesis_core::ModuleManager::new();
-                #[cfg(feature = "titan")]
-                mm.register_factory("titan", || Box::new(genesis_core::titan::BitWiseTitan::new(500)));
-                mm
-            },
-            Box::new(CpuBackend::default()),
-            &SimulationSettings::default()
-        ).unwrap(),
-        settings: SimulationSettings::default(),
+        engine: engine2,
+        settings: settings2,
+        pipeline: pipeline2,
         episode_reward_history: Vec::new(),
         network_manager: None,
         observers: vec![Box::new(Observer::new(10)), Box::new(Telemetry::default())],
@@ -192,17 +203,22 @@ fn test_evolutionary_structural_growth() {
         vocabulary: HashMap::new(),
     };
 
+    let settings = SimulationSettings {
+        night_phase_interval: 10,
+        ..SimulationSettings::default()
+    };
+    let engine = SimulationEngine::new(
+        model,
+        genesis_core::ModuleManager::new(),
+        Box::new(CpuBackend::default()),
+        &settings
+    ).unwrap();
+    let pipeline = SimulationPipeline::new(&settings);
+
     let mut runtime = Runtime {
-        engine: SimulationEngine::new(
-            model,
-            genesis_core::ModuleManager::new(),
-            Box::new(CpuBackend::default()),
-            &SimulationSettings::default()
-        ).unwrap(),
-        settings: SimulationSettings {
-            night_phase_interval: 10,
-            ..SimulationSettings::default()
-        },
+        engine,
+        settings,
+        pipeline,
         episode_reward_history: Vec::new(),
         network_manager: None,
         observers: vec![Box::new(Observer::new(100)), Box::new(Telemetry::default())],

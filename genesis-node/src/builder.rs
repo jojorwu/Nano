@@ -1,4 +1,5 @@
 use crate::{Runtime, SimulationSettings, SimulationObserver, RuntimeError, Observer, telemetry, persistence, engine::SimulationEngine};
+use crate::engine::pipeline::SimulationPipeline;
 use genesis_core::ModuleManager;
 
 pub struct RuntimeBuilder {
@@ -98,16 +99,10 @@ impl RuntimeBuilder {
 
         modules.rebuild_tiers();
 
-        let mut engine = SimulationEngine::new(model, modules, backend, &self.settings)
+        let engine = SimulationEngine::new(model, modules, backend, &self.settings)
              .map_err(|e| RuntimeError::StateError("engine_init".into(), e.to_string()))?;
 
-        // Automatic Heterogeneous setup: if primary is WGPU, set secondary to CPU
-        if engine.backend.name().contains("Wgpu") {
-            if let Some(secondary) = registry.create("cpu") {
-                log::info!("Heterogeneous Engine: primary=GPU, secondary=CPU");
-                engine.secondary_backend = Some(secondary);
-            }
-        }
+        // Heterogeneous setup is now disabled by default for better predictability during architectural changes.
 
         let (nm, titan_rx) = if !self.peers.is_empty() {
              let node_id = self.node_id.clone().unwrap_or_else(|| "node0".to_string());
@@ -125,9 +120,16 @@ impl RuntimeBuilder {
             (None, None)
         };
 
+        let pipeline = if let Some(ref stages) = self.settings.active_pipeline_stages {
+            SimulationPipeline::from_config(stages, &self.settings)
+        } else {
+            SimulationPipeline::new(&self.settings)
+        };
+
         let mut rt = Runtime {
             engine,
             settings: self.settings,
+            pipeline,
             episode_reward_history: Vec::new(),
             network_manager: nm,
             observers,

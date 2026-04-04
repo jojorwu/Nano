@@ -8,15 +8,21 @@ pub struct SpikingCerebellumModule {
     pub max_delay: usize,
     pub mossy_fiber_indices: Vec<usize>,
     pub purkinje_indices: Vec<usize>,
+    /// Internal weight matrix: Mossy x Purkinje
+    #[serde(default)]
+    pub weights: Vec<Vec<IValue>>,
 }
 
 impl SpikingCerebellumModule {
     pub fn new(mossy: Vec<usize>, purkinje: Vec<usize>) -> Self {
+        let m_count = mossy.len();
+        let p_count = purkinje.len();
         Self {
             delay_line: VecDeque::new(),
             max_delay: 10,
             mossy_fiber_indices: mossy,
             purkinje_indices: purkinje,
+            weights: vec![vec![SCALE / 2; p_count]; m_count],
         }
     }
 }
@@ -25,6 +31,8 @@ impl NanoModule for SpikingCerebellumModule {
     fn name(&self) -> &str { "cerebellum" }
     fn outputs(&self) -> Vec<String> { vec!["apical".to_string()] }
     fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // 1. Maintain delay line of mossy fiber activity
@@ -42,13 +50,13 @@ impl NanoModule for SpikingCerebellumModule {
         if self.delay_line.len() >= self.max_delay {
             let delayed = &self.delay_line[self.max_delay - 1];
             let apical = bus.apical();
-            for (i, &spiked) in delayed.iter().enumerate() {
+
+            for (m_idx, &spiked) in delayed.iter().enumerate() {
                 if spiked {
-                    // Inject into corresponding Purkinje (output) neurons' apical dendrites
-                    if i < self.purkinje_indices.len() {
-                        let target = self.purkinje_indices[i];
+                    for (p_idx, &target) in self.purkinje_indices.iter().enumerate() {
                         if target < apical.len() {
-                            crate::InputBus::atomic_saturating_add(&apical[target], SCALE / 2);
+                            let w = self.weights[m_idx][p_idx];
+                            crate::InputBus::atomic_saturating_add(&apical[target], w);
                         }
                     }
                 }
@@ -56,7 +64,36 @@ impl NanoModule for SpikingCerebellumModule {
         }
     }
 
-    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
+    fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], current_spikes: &[bool], _tick: u32, reward: Option<IValue>) {
+        // Cerebellar Plasticity (LTD-driven learning)
+        // If Purkinje cells fire coincident with high surprise/error, weaken the active mossy connections.
+        let r_val = reward.unwrap_or(0);
+        if r_val < -100 && self.delay_line.len() >= self.max_delay {
+             let delayed = &self.delay_line[self.max_delay - 1];
+             for (m_idx, &m_spiked) in delayed.iter().enumerate() {
+                 if m_spiked {
+                     for (p_idx, &p_target) in self.purkinje_indices.iter().enumerate() {
+                         if p_target < current_spikes.len() && current_spikes[p_target] {
+                             // Cerebellar LTD: reduce weight for connections that cause error
+                             self.weights[m_idx][p_idx] = (self.weights[m_idx][p_idx] - 5).max(0);
+                         }
+                     }
+                 }
+             }
+        } else if r_val > 100 && self.delay_line.len() >= self.max_delay {
+             // LTP-like recovery
+             let delayed = &self.delay_line[self.max_delay - 1];
+             for (m_idx, &m_spiked) in delayed.iter().enumerate() {
+                 if m_spiked {
+                     for (p_idx, &p_target) in self.purkinje_indices.iter().enumerate() {
+                         if p_target < current_spikes.len() && current_spikes[p_target] {
+                             self.weights[m_idx][p_idx] = (self.weights[m_idx][p_idx] + 2).min(SCALE);
+                         }
+                     }
+                 }
+             }
+        }
+    }
     fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
 
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
@@ -72,6 +109,12 @@ pub struct RobotControlModule {
     pub spike_counters: Vec<u32>,
     pub window_size: u32,
     pub current_motor_outputs: Vec<f32>,
+    /// Individual gains for motor neurons, adjusted by reward
+    #[serde(default)]
+    pub motor_gains: Vec<IValue>,
+    /// Tracks recent activity of motor neurons for reward assignment
+    #[serde(default)]
+    pub activity_trace: Vec<f32>,
 }
 
 impl RobotControlModule {
@@ -82,6 +125,8 @@ impl RobotControlModule {
             spike_counters: vec![0; count],
             window_size: 10,
             current_motor_outputs: vec![0.0; count],
+            motor_gains: vec![SCALE; count],
+            activity_trace: vec![0.0; count],
         }
     }
 
@@ -99,6 +144,8 @@ impl NanoModule for RobotControlModule {
     fn name(&self) -> &str { "robot_control" }
     fn outputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
     fn inputs(&self) -> Vec<String> { vec!["proximal".to_string()] }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, bus: &crate::InputBus, previous_spikes: &[bool], _tick: u32) {
         // Intrinsic Motivation (Surprise-driven exploration):
@@ -111,11 +158,12 @@ impl NanoModule for RobotControlModule {
         // Heuristic: Inject noise if total activity is low (derived from previous spikes)
         let total_active = previous_spikes.iter().filter(|&&s| s).count();
         if total_active < self.motor_neuron_indices.len() / 2 {
-            for &idx in &self.motor_neuron_indices {
+            for (i, &idx) in self.motor_neuron_indices.iter().enumerate() {
                 if idx < prox.len() {
-                    // Stochastic boost to proximal potential
+                    // Stochastic boost to proximal potential, scaled by current gain
                     if rng.gen::<f32>() < 0.1 {
-                        crate::InputBus::atomic_saturating_add(&prox[idx], 500);
+                        let gain_boost = (500i64 * self.motor_gains[i] as i64 >> 10) as i32;
+                        crate::InputBus::atomic_saturating_add(&prox[idx], gain_boost);
                     }
                 }
             }
@@ -124,12 +172,26 @@ impl NanoModule for RobotControlModule {
         for (i, &idx) in self.motor_neuron_indices.iter().enumerate() {
             if idx < previous_spikes.len() && previous_spikes[idx] {
                 self.spike_counters[i] += 1;
+                self.activity_trace[i] = self.activity_trace[i] * 0.9 + 0.1;
+            } else {
+                self.activity_trace[i] *= 0.95;
             }
         }
     }
 
     fn on_update_weights(&mut self, _neurons: &mut NeuronsSoA, _previous_spikes: &[bool], _current_spikes: &[bool], _tick: u32, _reward: Option<IValue>) {}
-    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, _reward: Option<IValue>) {}
+    fn on_night_phase(&mut self, _neurons: &mut NeuronsSoA, _synapses: &mut SynapsesSoA, reward: Option<IValue>) {
+        if let Some(r) = reward {
+             // Reward-Modulated Gain: boost gain for motor neurons that were active
+             // during high positive reward, or reduce it if reward was negative.
+             for (i, &trace) in self.activity_trace.iter().enumerate() {
+                 if trace > 0.05 {
+                      let adjustment = (r as f32 * trace * 0.1) as i32;
+                      self.motor_gains[i] = (self.motor_gains[i] + adjustment).clamp(SCALE / 4, SCALE * 4);
+                 }
+             }
+        }
+    }
 
     fn box_clone(&self) -> Box<dyn NanoModule> { Box::new(self.clone()) }
     fn get_state(&self) -> Vec<u8> { bincode::serialize(self).unwrap_or_default() }

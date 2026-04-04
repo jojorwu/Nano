@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use crate::{ComputeBackend, kernels::calculate_membrane_potential};
 
 pub struct CpuBackend {
+    pub is_secondary: bool,
     pub structural_config: StructuralPlasticityConfig,
     pub plasticity_rule: Box<dyn PlasticityRule + Send + Sync>,
     pub optimizer: genesis_core::plasticity::EvolutionaryOptimizer,
@@ -20,6 +21,7 @@ pub struct CpuBackend {
 impl Default for CpuBackend {
     fn default() -> Self {
         Self {
+            is_secondary: false,
             structural_config: StructuralPlasticityConfig::default(),
             plasticity_rule: Box::new(GsopRule { learning_rate: 10 }),
             optimizer: genesis_core::plasticity::EvolutionaryOptimizer::new(0.01),
@@ -40,7 +42,6 @@ impl CpuBackend {
             let attn_apical = ((*n.apical_potential.add(i) as i64 * *n.apical_gate.add(i) as i64) >> 10) as i32;
             let attn_basal = ((*n.basal_potential.add(i) as i64 * *n.basal_gate.add(i) as i64) >> 10) as i32;
 
-            let astro_mod = ((*n.astro_calcium.add(i) as i64 * SCALE as i64) >> 12) as i32;
             // Multi-Segment Dendritic Integration
             let mut total_distal = attn_dist;
             let seg_offset = i * 4;
@@ -56,11 +57,18 @@ impl CpuBackend {
             let current_pot = calculate_membrane_potential(
                 *n.potential.add(i), *n.proximal_potential.add(i), total_distal, attn_apical, attn_basal,
                 *n.gate_threshold.add(i), *n.liquid_current.add(i), *n.decay.add(i), noise_amp,
-                *n.adaptation_current.add(i) + astro_mod
+                *n.adaptation_current.add(i)
             );
 
-            let refr_mult = if *n.refractory_timer.add(i) > 0 { 1 + (1 << *n.refractory_timer.add(i)) } else { 1 };
-            let mut effective_threshold = *n.threshold.add(i) * refr_mult;
+            // Refractory Multiplier: exponential threshold increase during refractory period
+            let refr_timer = *n.refractory_timer.add(i);
+            let refr_mult = if refr_timer > 0 {
+                 // Clamp timer to avoid extreme shifts (max 16x threshold)
+                 1 + (1 << refr_timer.min(4))
+            } else {
+                 1
+            };
+            let mut effective_threshold = (*n.threshold.add(i)).saturating_mul(refr_mult);
 
             let theta = if model.config.physics.theta_rhythm {
                  ((current_tick as f32 * model.config.physics.theta_frequency).sin() * 200.0) as i32
@@ -75,21 +83,35 @@ impl CpuBackend {
                 *n.last_spike_tick.add(i) = current_tick;
                 *n.backprop_signal.add(i) = SCALE;
                 *n.action_potential.add(i) = SCALE;
+
+                // IP (Intrinsic Plasticity): Increment threshold upon firing
                 *n.threshold.add(i) = (*n.threshold.add(i)).saturating_add(ip_inc);
+
+                // EMA Activity tracking
                 let alpha = model.config.physics.activity_ema_alpha as i32;
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64 + (1000 - alpha) as i64 * 100) / 1000) as i32;
+
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i)).saturating_add(100);
-                *n.astro_calcium.add(i) = (*n.astro_calcium.add(i)).saturating_add(model.config.astro.increment);
             } else {
                 *n.potential.add(i) = current_pot;
-                if *n.refractory_timer.add(i) > 0 { *n.refractory_timer.add(i) -= 1; }
-                if *n.threshold.add(i) > *n.base_threshold.add(i) { *n.threshold.add(i) = (*n.threshold.add(i)).saturating_sub(ip_dec); }
-                *n.backprop_signal.add(i) = ((*n.backprop_signal.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
-                *n.action_potential.add(i) = ((*n.action_potential.add(i) as i64 * model.config.physics.smbp_decay) >> 10) as i32;
+
+                if *n.refractory_timer.add(i) > 0 {
+                     *n.refractory_timer.add(i) -= 1;
+                }
+
+                // IP Decay: threshold slowly returns to baseline
+                if *n.threshold.add(i) > *n.base_threshold.add(i) {
+                     *n.threshold.add(i) = (*n.threshold.add(i)).saturating_sub(ip_dec);
+                }
+
+                let smbp_decay = model.config.physics.smbp_decay;
+                *n.backprop_signal.add(i) = ((*n.backprop_signal.add(i) as i64 * smbp_decay) >> 10) as i32;
+                *n.action_potential.add(i) = ((*n.action_potential.add(i) as i64 * smbp_decay) >> 10) as i32;
+
                 let alpha = model.config.physics.activity_ema_alpha as i32;
                 *n.activity_ema.add(i) = ((*n.activity_ema.add(i) as i64 * alpha as i64) / 1000) as i32;
+
                 *n.adaptation_current.add(i) = (*n.adaptation_current.add(i) * 95) / 100;
-                *n.astro_calcium.add(i) = ((*n.astro_calcium.add(i) as i64 * model.config.astro.decay_rate) / 1000) as i32;
 
                 let seg_offset = i * 4;
                 for s in 0..4 {
@@ -98,18 +120,31 @@ impl CpuBackend {
             }
 
             if fired {
-                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_sub(model.config.physics.metabolic_spike_cost);
                 *n.specialization_score.add(i) = *n.specialization_score.add(i) * model.config.physics.specialization_decay + 0.1;
-            } else {
-                *n.energy_level.add(i) = (*n.energy_level.add(i)).saturating_add(model.config.physics.metabolic_recovery_rate);
             }
 
-            let error = *n.activity_ema.add(i) - target_activity;
+            let activity_ema = *n.activity_ema.add(i);
+            let error = activity_ema - target_activity;
+
+            // 1. Threshold-based Homeostasis (Intrinsic Plasticity)
             let homeo_rate = if error.abs() > target_activity { 2 } else { 1 };
             if error > 0 {
                 *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_add(homeo_rate);
             } else if error < 0 && *n.base_threshold.add(i) > model.config.physics.default_threshold / 2 {
                 *n.base_threshold.add(i) = (*n.base_threshold.add(i)).saturating_sub(1);
+            }
+
+            // 2. Metaplasticity-based Homeostasis (BCM Rule)
+            // Adjust plasticity_gate based on activity error to maintain stable firing.
+            // If the neuron is hyper-active, reduce learning capacity to prevent runaway LTP.
+            // If the neuron is under-active, increase learning capacity to allow reorganization.
+            let p_gate = *n.plasticity_gate.add(i);
+            if error > target_activity {
+                // High activity -> Reduce plasticity
+                *n.plasticity_gate.add(i) = p_gate.saturating_sub(2);
+            } else if error < -(target_activity / 2) {
+                // Low activity -> Increase plasticity
+                *n.plasticity_gate.add(i) = p_gate.saturating_add(5).min(SCALE);
             }
             // next_update_tick and update_interval are not in NeuronsFFI yet, let's fix that if needed.
             // For now assume sequential update
@@ -425,7 +460,13 @@ impl CpuBackend {
                 let is_rem = is_remote_ptr as *const u8;
                 for i in start_idx..end_idx {
                     if current_tick < *next_up.add(i) { continue; }
-                    if *is_rem.add(i) != 0 { continue; }
+                    // Handle Secondary Device (1) in secondary backend or Primary (0) in primary
+                    // For CpuBackend, we assume it can be used as either.
+                    // If backend is secondary, it processes is_remote == 1
+                    let flag = *is_rem.add(i);
+                    if flag == 2 { continue; } // Always skip ghost neurons
+                    if self.is_secondary && flag != 1 { continue; }
+                    if !self.is_secondary && flag != 0 { continue; }
                     if !e_masks.is_empty() && !e_masks[i % e_masks.len()] { continue; }
 
                     let fired = self.update_single_neuron_ffi(i, &n_ffi, model, current_tick, noise_amp, ip_inc, ip_dec, target_activity);
@@ -451,6 +492,11 @@ impl ComputeBackend for CpuBackend {
 
     fn execute_kernel_range(&mut self, kernel: crate::SimulationKernel, model: &mut BakedModel, ctx: &crate::KernelContext, range: std::ops::Range<usize>) -> Option<genesis_core::SpikeData> {
         let n_count = model.neurons.len();
+
+        // Filtering is handled inside update_neuron_states_range for Spike Generation.
+        // For Synapse Propagation, we use standard full logic as it is often faster on CPU
+        // to process all synapses once than to filter per-neuron backend flags.
+
         match kernel {
             crate::SimulationKernel::PropagateSynapses => {
                 for (i, &val) in ctx.external_inputs.iter().enumerate() {
@@ -458,6 +504,13 @@ impl ComputeBackend for CpuBackend {
                         let gate = model.neurons.dendritic_gate[i];
                         let gated_val = ((val as i64 * gate as i64) >> 10) as i32;
                         model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
+                    }
+                }
+                if let Some(td) = ctx.top_down_modulation {
+                    for (i, &boost) in td.iter().enumerate() {
+                        if i >= range.start && i < range.end && i < n_count {
+                            model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(boost);
+                        }
                     }
                 }
                 self.propagate_sparse_delayed_spikes(model, ctx.previous_spikes, ctx.history);
@@ -485,7 +538,7 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: genesis_core::NeuromodulationState) -> genesis_core::SpikeData {
-        let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation };
+        let ctx = crate::KernelContext { external_inputs, previous_spikes, history, current_tick, modulation, top_down_modulation: None };
         self.execute_kernel(crate::SimulationKernel::PropagateSynapses, model, &ctx);
         self.execute_kernel(crate::SimulationKernel::GenerateSpikes, model, &ctx).unwrap_or_default()
     }
@@ -524,6 +577,13 @@ impl ComputeBackend for CpuBackend {
     fn structural_plasticity_with_surprise(&mut self, model: &mut BakedModel, reward: Option<IValue>, history: &[Vec<bool>], block_surprise: &[f32]) {
         self.apply_morphogenesis(model, reward);
         prune_synapses(&mut model.synapses, &model.neurons, self.structural_config.prune_threshold);
+
+        // Metabolic Culling: Reset "dead" neurons
+        let culled = genesis_core::plasticity::cull_inactive_neurons(&mut model.neurons, 5);
+        if !culled.is_empty() {
+             log::debug!("Metabolic Culling: {} neurons reset", culled.len());
+        }
+
         model.synapses.shrink_to_fit();
         self.synapse_offsets.clear();
         self.apply_evolutionary_mutations(model, reward, history, block_surprise);

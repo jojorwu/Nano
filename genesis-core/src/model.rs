@@ -28,6 +28,44 @@ impl SpikeData {
         }
     }
 
+    pub fn compress(indices: &[usize], universe: usize) -> Vec<u8> {
+        let mut bits = Vec::new();
+        let count = indices.len() as u32;
+        bits.extend_from_slice(&count.to_le_bytes());
+
+        let low_bits = if count > 0 { (universe as u32 / count).ilog2().max(1) } else { 1 };
+        bits.push(low_bits as u8);
+
+        let mut bit_buf = 0u8;
+        let mut bit_count = 0;
+        let mut last_high = 0u32;
+
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+
+        for &idx in &sorted {
+            let high = (idx as u32) >> low_bits;
+            let low = (idx as u32) & ((1 << low_bits) - 1);
+
+            for _ in 0..(high - last_high) {
+                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+                bit_count += 1;
+            }
+            bit_buf |= 1 << bit_count;
+            bit_count += 1;
+            if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+            last_high = high;
+
+            for i in 0..low_bits {
+                if (low >> i) & 1 == 1 { bit_buf |= 1 << bit_count; }
+                bit_count += 1;
+                if bit_count == 8 { bits.push(bit_buf); bit_buf = 0; bit_count = 0; }
+            }
+        }
+        if bit_count > 0 { bits.push(bit_buf); }
+        bits
+    }
+
     pub fn to_bitpacked(&self, n_count: usize) -> Vec<u64> {
         let packed_len = (n_count + 63) / 64;
         let mut packed = vec![0u64; packed_len];
@@ -47,11 +85,51 @@ impl SpikeData {
                     }
                 }
             }
-            SpikeData::Compressed(_) => {
-                // Not implemented for now, fallback to empty
+            SpikeData::Compressed(data) => {
+                if data.len() < 5 { return packed; }
+                let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+                let low_bits = data[4] as u32;
+                let mut bit_ptr = 40usize;
+                let mut current_high = 0u32;
+                for _ in 0..count {
+                    while bit_ptr / 8 < data.len() && (data[bit_ptr / 8] >> (bit_ptr % 8)) & 1 == 0 {
+                        current_high += 1;
+                        bit_ptr += 1;
+                    }
+                    bit_ptr += 1;
+                    let mut low = 0u32;
+                    for i in 0..low_bits {
+                        if bit_ptr / 8 < data.len() && (data[bit_ptr / 8] >> (bit_ptr % 8)) & 1 == 1 {
+                            low |= 1 << i;
+                        }
+                        bit_ptr += 1;
+                    }
+                    let idx = ((current_high << low_bits) | low) as usize;
+                    if idx < n_count {
+                        packed[idx / 64] |= 1 << (idx % 64);
+                    }
+                }
             }
         }
         packed
+    }
+
+    pub fn merge(self, other: SpikeData, n_count: usize) -> SpikeData {
+        match (self, other) {
+            (SpikeData::Sparse(mut a), SpikeData::Sparse(b)) => {
+                a.extend(b);
+                SpikeData::Sparse(a)
+            }
+            (a, b) => {
+                // Fallback for heterogeneous formats: merge into BitPacked
+                let mut p1 = a.to_bitpacked(n_count);
+                let p2 = b.to_bitpacked(n_count);
+                for i in 0..p1.len().min(p2.len()) {
+                    p1[i] |= p2[i];
+                }
+                SpikeData::BitPacked(p1)
+            }
+        }
     }
 }
 
@@ -107,10 +185,9 @@ pub struct NeuronsSoA {
     pub adaptation_current: Vec<IValue>, // Spike-Frequency Adaptation (SFA)
     pub action_potential: Vec<IValue>,   // For Active Inference / Motor Output
     pub plasticity_gate: Vec<IValue>,    // Metaplasticity (0 = fixed, SCALE = full learning)
-    pub astro_calcium: Vec<IValue>,      // Astrocytic Modulation (Slow calcium dynamics)
-    pub is_remote: Vec<u8>,              // Distributed SNN (1 = ghost neuron, 0 = local)
+    /// Device Selector / Hardware Flag: 0 = Primary (e.g. GPU), 1 = Secondary (e.g. CPU), 2 = Ghost (Remote)
+    pub is_remote: Vec<u8>,
     pub origin_node_id: Vec<u32>,        // Node ID that owns this neuron
-    pub energy_level: Vec<IValue>,       // Metabolic Economy (SCALE = 100% energy)
     pub specialization_score: Vec<f32>,  // Morphogenesis: tracking neuron utility
     /// Packed Low-Precision Parameters: 8-bit [decay, refractory, dist_gate, apical_gate, basal_gate, ... ]
     pub packed_params: Vec<u64>,
@@ -142,8 +219,6 @@ pub struct NeuronsFFI {
     pub block_id: *mut u32,
     pub action_potential: *mut IValue,
     pub plasticity_gate: *mut IValue,
-    pub astro_calcium: *mut IValue,
-    pub energy_level: *mut IValue,
     pub specialization_score: *mut f32,
     pub segment_potentials: *mut IValue,
     pub segment_gates: *mut IValue,
@@ -180,8 +255,6 @@ impl NeuronsSoA {
             block_id: self.block_id.as_mut_ptr(),
             action_potential: self.action_potential.as_mut_ptr(),
             plasticity_gate: self.plasticity_gate.as_mut_ptr(),
-            astro_calcium: self.astro_calcium.as_mut_ptr(),
-            energy_level: self.energy_level.as_mut_ptr(),
             specialization_score: self.specialization_score.as_mut_ptr(),
             segment_potentials: self.segment_potentials.as_mut_ptr(),
             segment_gates: self.segment_gates.as_mut_ptr(),
@@ -226,8 +299,6 @@ impl NeuronsSoA {
             adaptation_current: Vec::with_capacity(capacity),
             action_potential: Vec::with_capacity(capacity),
             plasticity_gate: Vec::with_capacity(capacity),
-            astro_calcium: Vec::with_capacity(capacity),
-            energy_level: Vec::with_capacity(capacity),
             is_remote: Vec::with_capacity(capacity),
             origin_node_id: Vec::with_capacity(capacity),
             specialization_score: Vec::with_capacity(capacity),
@@ -291,10 +362,8 @@ impl NeuronsSoA {
         self.adaptation_current.resize(new_size, 0);
         self.action_potential.resize(new_size, 0);
         self.plasticity_gate.resize(new_size, SCALE);
-        self.astro_calcium.resize(new_size, 0);
         self.is_remote.resize(new_size, 0);
         self.origin_node_id.resize(new_size, 0);
-        self.energy_level.resize(new_size, SCALE); // Start fully charged
         self.specialization_score.resize(new_size, 0.0);
         self.packed_params.resize(new_size, 0);
     }
@@ -328,10 +397,8 @@ impl NeuronsSoA {
         self.adaptation_current.shrink_to_fit();
         self.action_potential.shrink_to_fit();
         self.plasticity_gate.shrink_to_fit();
-        self.astro_calcium.shrink_to_fit();
         self.is_remote.shrink_to_fit();
         self.origin_node_id.shrink_to_fit();
-        self.energy_level.shrink_to_fit();
         self.specialization_score.shrink_to_fit();
         self.packed_params.shrink_to_fit();
     }

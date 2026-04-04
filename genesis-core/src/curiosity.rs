@@ -26,6 +26,8 @@ impl CuriosityModule {
 impl NanoModule for CuriosityModule {
     fn name(&self) -> &str { "curiosity" }
     fn tier(&self) -> u32 { 30 } // High tier
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn on_tick(&mut self, _bus: &InputBus, _previous_spikes: &[bool], _tick: u32) {
         // Core curiosity logic handled in on_update_weights based on surprise
@@ -37,12 +39,15 @@ impl NanoModule for CuriosityModule {
             if self.surprise_history.len() > 10 { self.surprise_history.remove(0); }
 
             // Calculate internal reward based on the "derivative of surprise"
-            if self.surprise_history.len() >= 5 {
-                let prev_avg: i32 = self.surprise_history.iter().take(3).sum::<i32>() / 3;
-                let curr_avg: i32 = self.surprise_history.iter().skip(5).sum::<i32>() / 5;
+            // We use a window-based comparison to detect consistent reduction in surprise.
+            if self.surprise_history.len() >= 10 {
+                let window_size = 4;
+                let prev_avg: i32 = self.surprise_history.iter().take(window_size).sum::<i32>() / window_size as i32;
+                let curr_avg: i32 = self.surprise_history.iter().rev().take(window_size).sum::<i32>() / window_size as i32;
 
-                // If surprise is high but dropping, the system is actively learning -> REWARD
-                if s > 500 && curr_avg < prev_avg {
+                // If surprise is significant but consistently dropping, the system is actively learning -> REWARD
+                // This represents the "Aha!" moment or progress in modeling the environment.
+                if s > 300 && curr_avg < (prev_avg - 50) {
                      self.last_internal_reward = self.curiosity_reward_strength;
                 } else {
                      self.last_internal_reward = 0;
@@ -79,12 +84,10 @@ mod tests {
     fn test_curiosity_reward() {
         let mut curiosity = CuriosityModule::new();
 
-        // Simulate decreasing surprise (learning)
-        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(1000));
-        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(900));
-        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(800));
-        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(700));
-        curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(600));
+        // Simulate decreasing surprise (learning) over 10 steps
+        for s in &[1000, 1000, 1000, 1000, 800, 800, 600, 600, 600, 600] {
+             curiosity.on_update_weights(&mut NeuronsSoA::new(0), &[], &[], 0, Some(*s));
+        }
 
         assert!(curiosity.last_internal_reward > 0);
         let mods = curiosity.get_global_modulations();

@@ -92,6 +92,13 @@ impl ComputeBackend for CppBackend {
                         model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(gated_val);
                     }
                 }
+                if let Some(td) = ctx.top_down_modulation {
+                    for (i, &boost) in td.iter().enumerate() {
+                        if i < n_count {
+                            model.neurons.proximal_potential[i] = model.neurons.proximal_potential[i].saturating_add(boost);
+                        }
+                    }
+                }
 
                 unsafe {
                     let syn_ffi = model.synapses.as_ffi(self.synapse_offsets.as_ptr(), self.synapse_indices_flat.as_ptr());
@@ -132,7 +139,7 @@ impl ComputeBackend for CppBackend {
     }
 
     fn day_phase(&mut self, model: &mut BakedModel, external_inputs: &[i32], previous_spikes: &[bool], history: &[Vec<bool>], current_tick: u32, modulation: NeuromodulationState) -> SpikeData {
-        let ctx = KernelContext { external_inputs, previous_spikes, history, current_tick, modulation };
+        let ctx = KernelContext { external_inputs, previous_spikes, history, current_tick, modulation, top_down_modulation: None };
         self.execute_kernel(SimulationKernel::PropagateSynapses, model, &ctx);
         self.execute_kernel(SimulationKernel::GenerateSpikes, model, &ctx).unwrap_or_default()
     }
